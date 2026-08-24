@@ -21,6 +21,8 @@ class ChatSession:
     updated_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     messages: list[dict] = field(default_factory=list)
     params: dict = field(default_factory=dict)
+    # 摘要检查点：UI 仍保留完整 messages；发给模型时从 boundary 之后取
+    compaction_points: list[dict] = field(default_factory=list)
 
     def get_params(self) -> SessionSettings:
         raw = dict(self.params or {})
@@ -60,6 +62,14 @@ class ChatManager:
                         continue
                     allowed = {f.name for f in ChatSession.__dataclass_fields__.values()}
                     filtered = {k: v for k, v in item.items() if k in allowed}
+                    if filtered.get("compaction_points") is None:
+                        filtered["compaction_points"] = []
+                    if not isinstance(filtered.get("compaction_points"), list):
+                        filtered["compaction_points"] = []
+                    if filtered.get("messages") is None:
+                        filtered["messages"] = []
+                    if filtered.get("params") is None:
+                        filtered["params"] = {}
                     self._sessions.append(ChatSession(**filtered))
             except (json.JSONDecodeError, OSError, TypeError):
                 self._sessions = []

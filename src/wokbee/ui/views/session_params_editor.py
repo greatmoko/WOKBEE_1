@@ -114,7 +114,7 @@ class SessionParamsEditor(QWidget):
         ctx_lbl = QLabel("上下文消息数")
         ctx_lbl.setStyleSheet(self._lbl)
         layout.addWidget(ctx_lbl)
-        ctx_hint = QLabel("携带最近多少条消息；设很大表示尽量不截断")
+        ctx_hint = QLabel("携带最近多少条消息（soft limit）；设很大表示尽量不按条数截断")
         ctx_hint.setStyleSheet(self._hint)
         layout.addWidget(ctx_hint)
         self.hist_box = QSpinBox()
@@ -122,6 +122,34 @@ class SessionParamsEditor(QWidget):
         self.hist_box.setSingleStep(2)
         self.hist_box.setFixedWidth(180)
         layout.addWidget(self.hist_box, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        thr_lbl = QLabel("上下文压缩触发比例")
+        thr_lbl.setStyleSheet(self._lbl)
+        layout.addWidget(thr_lbl)
+        thr_hint = QLabel(
+            "用量超过「可用窗口 × 该比例」时，发送前先摘要旧消息（默认 60%，对齐 Chatbox）"
+        )
+        thr_hint.setWordWrap(True)
+        thr_hint.setStyleSheet(self._hint)
+        layout.addWidget(thr_hint)
+        thr_row = QHBoxLayout()
+        self.thr_box = QDoubleSpinBox()
+        self.thr_box.setRange(0.10, 0.95)
+        self.thr_box.setSingleStep(0.05)
+        self.thr_box.setDecimals(2)
+        self.thr_box.setSuffix("  （比例）")
+        self.thr_box.setFixedWidth(180)
+        thr_row.addWidget(self.thr_box)
+        self.thr_pct = QLabel("")
+        self.thr_pct.setStyleSheet(self._hint)
+        thr_row.addWidget(self.thr_pct)
+        thr_row.addStretch()
+        layout.addLayout(thr_row)
+        self.thr_box.valueChanged.connect(self._on_thr_changed)
+
+        self.auto_compact_chk = QCheckBox("启用自动上下文压缩（先摘要再发）")
+        self.auto_compact_chk.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+        layout.addWidget(self.auto_compact_chk)
 
         enable_tip = "勾选后可编辑并随请求发送；不勾选则不传该参数，使用接口默认"
         params_row = QHBoxLayout()
@@ -290,6 +318,9 @@ class SessionParamsEditor(QWidget):
             self._think_combo.currentIndexChanged.connect(lambda _i: _sync())
             _sync()
 
+    def _on_thr_changed(self, value: float):
+        self.thr_pct.setText(f"≈ {int(round(value * 100))}%")
+
     def _reload_roles(self):
         self.role_combo.blockSignals(True)
         self.role_combo.clear()
@@ -313,6 +344,9 @@ class SessionParamsEditor(QWidget):
         p = self._base
         self.sys_input.setPlainText(p.system_prompt)
         self.hist_box.setValue(p.max_context_message_count)
+        self.thr_box.setValue(p.compaction_threshold)
+        self._on_thr_changed(p.compaction_threshold)
+        self.auto_compact_chk.setChecked(p.auto_compaction)
         self.stream_chk.setChecked(p.stream)
 
         self.temp_enable.setChecked(p.temperature is not None)
@@ -385,5 +419,7 @@ class SessionParamsEditor(QWidget):
             max_tokens=self.max_tok_box.value() if self.mt_enable.isChecked() else None,
             max_context_message_count=self.hist_box.value(),
             stream=self.stream_chk.isChecked(),
+            compaction_threshold=float(self.thr_box.value()),
+            auto_compaction=self.auto_compact_chk.isChecked(),
             provider_options=opt,
         )

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, Signal, QThread, QTimer
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QPoint
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QScrollArea, QLineEdit,
     QDialog, QCheckBox, QListWidget, QListWidgetItem,
-    QInputDialog, QComboBox, QStackedWidget,
+    QInputDialog, QComboBox, QStackedWidget, QSpinBox,
+    QApplication,
 )
 
 from wokbee.ui.styles.theme import Theme
@@ -21,6 +22,134 @@ logger = logging.getLogger("wokbee")
 
 # 添加弹窗中「自定义本地 API」的特殊选项 id
 _CUSTOM_OPTION = "__custom_local__"
+
+
+class _ModelSettingsPopup(QFrame):
+    """模型行设置浮层：上下文窗口 / 设为默认 / 删除。"""
+
+    context_changed = Signal(str, int)   # model_id, context_window
+    set_default = Signal(str)
+    delete_model = Signal(str)
+
+    def __init__(
+        self,
+        theme: Theme,
+        model: ProviderModel,
+        *,
+        is_default: bool,
+        parent=None,
+    ):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.theme = theme
+        self._model_id = model.model_id
+        c = theme.colors
+        self.setObjectName("modelSettingsPopup")
+        self.setStyleSheet(f"""
+            QFrame#modelSettingsPopup {{
+                background: {c["content_bg"]};
+                border: 1px solid {c["border"]};
+                border-radius: 8px;
+            }}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        title = QLabel(model.nickname or model.model_id)
+        title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {c['text']};")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        ctx_row = QHBoxLayout()
+        ctx_row.setSpacing(8)
+        ctx_lbl = QLabel("上下文窗口")
+        ctx_lbl.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']};")
+        ctx_row.addWidget(ctx_lbl)
+        self._ctx_spin = QSpinBox()
+        self._ctx_spin.setRange(0, 10_000_000)
+        self._ctx_spin.setSingleStep(1024)
+        self._ctx_spin.setValue(int(model.context_window or 0))
+        self._ctx_spin.setToolTip("tokens；0 表示未设置")
+        self._ctx_spin.setMinimumWidth(120)
+        self._ctx_spin.setStyleSheet(f"""
+            QSpinBox {{
+                background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
+                border-radius: 4px; padding: 4px 6px; color: {c["text"]}; font-size: 12px;
+            }}
+        """)
+        self._ctx_spin.valueChanged.connect(self._on_ctx)
+        ctx_row.addWidget(self._ctx_spin, stretch=1)
+        layout.addLayout(ctx_row)
+
+        hint = QLabel("单位 tokens")
+        hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        layout.addWidget(hint)
+
+        btn_style = f"""
+            QPushButton {{
+                background: {c["card_bg"]}; color: {c["text"]};
+                border: 1px solid {c["border"]}; border-radius: 6px;
+                padding: 6px 10px; font-size: 12px; text-align: left;
+            }}
+            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
+            QPushButton:disabled {{ color: {c["text_hint"]}; }}
+        """
+        if is_default:
+            def_btn = QPushButton("✓ 当前为默认模型")
+            def_btn.setEnabled(False)
+        else:
+            def_btn = QPushButton("设为默认模型")
+            def_btn.clicked.connect(self._on_default)
+        def_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        def_btn.setStyleSheet(btn_style)
+        layout.addWidget(def_btn)
+
+        del_btn = QPushButton("删除此模型")
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {c["danger"]};
+                border: 1px solid {c["border"]}; border-radius: 6px;
+                padding: 6px 10px; font-size: 12px; text-align: left;
+            }}
+            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
+        """)
+        del_btn.clicked.connect(self._on_delete)
+        layout.addWidget(del_btn)
+
+        self.setFixedWidth(240)
+        self.adjustSize()
+
+    def _on_ctx(self, value: int):
+        self.context_changed.emit(self._model_id, int(value))
+
+    def _on_default(self):
+        mid = self._model_id
+        self.close()
+        self.set_default.emit(mid)
+
+    def _on_delete(self):
+        mid = self._model_id
+        self.close()
+        self.delete_model.emit(mid)
+
+    def popup_at(self, global_pos: QPoint):
+        """在按钮附近弹出，必要时向左/上收拢以免出屏。"""
+        self.adjustSize()
+        screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else None
+        x, y = global_pos.x(), global_pos.y()
+        if geo is not None:
+            if x + self.width() > geo.right():
+                x = geo.right() - self.width() - 4
+            if y + self.height() > geo.bottom():
+                y = global_pos.y() - self.height() - 4
+            x = max(geo.left() + 4, x)
+            y = max(geo.top() + 4, y)
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
 
 def _tip(parent: QWidget, theme: Theme, message: str):
@@ -286,7 +415,8 @@ class ProviderSettingsWorkspace(QWidget):
         self.theme = theme
         self.store = store or ProviderStore()
         self._current_id = ""
-        self._model_checks: list[tuple[QCheckBox, ProviderModel]] = []
+        self._model_checks: list = []  # (QCheckBox, ProviderModel)
+        self._model_popup: _ModelSettingsPopup | None = None
         self._fetch_worker: _FetchModelsWorker | None = None
         self._loading = False
         self._autosave_timer = QTimer(self)
@@ -588,6 +718,7 @@ class ProviderSettingsWorkspace(QWidget):
         self._loading = False
 
     def _render_models(self, models: list[ProviderModel]):
+        self._close_model_popup()
         while self._model_layout.count():
             item = self._model_layout.takeAt(0)
             w = item.widget()
@@ -623,39 +754,53 @@ class ProviderSettingsWorkspace(QWidget):
                     }}
                 """)
                 row_l.addWidget(badge)
-            else:
-                btn = QPushButton("设为默认")
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.setFixedHeight(26)
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background: transparent; color: {c["text_secondary"]};
-                        border: 1px solid {c["border"]}; border-radius: 4px;
-                        padding: 0 8px; font-size: 11px;
-                    }}
-                    QPushButton:hover {{ background: {c["subnav_hover"]}; color: {c["accent"]}; }}
-                """)
-                mid = m.model_id
-                btn.clicked.connect(lambda _=False, model_id=mid: self._on_set_default(model_id))
-                row_l.addWidget(btn)
 
-            del_btn = QPushButton("删除")
-            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            del_btn.setFixedHeight(26)
-            del_btn.setStyleSheet(f"""
+            gear = QPushButton("⚙")
+            gear.setToolTip("模型设置")
+            gear.setCursor(Qt.CursorShape.PointingHandCursor)
+            gear.setFixedSize(28, 26)
+            gear.setStyleSheet(f"""
                 QPushButton {{
-                    background: transparent; color: {c["danger"]};
+                    background: transparent; color: {c["text_secondary"]};
                     border: 1px solid {c["border"]}; border-radius: 4px;
-                    padding: 0 8px; font-size: 11px;
+                    font-size: 13px;
                 }}
-                QPushButton:hover {{ background: {c["subnav_hover"]}; }}
+                QPushButton:hover {{ background: {c["subnav_hover"]}; color: {c["accent"]}; }}
             """)
-            mid = m.model_id
-            del_btn.clicked.connect(lambda _=False, model_id=mid: self._on_delete_model(model_id))
-            row_l.addWidget(del_btn)
+            gear.clicked.connect(
+                lambda _=False, model=m, btn=gear: self._open_model_settings(model, btn)
+            )
+            row_l.addWidget(gear)
 
             self._model_layout.addWidget(row)
             self._model_checks.append((cb, m))
+
+    def _close_model_popup(self):
+        if self._model_popup is not None:
+            self._model_popup.close()
+            self._model_popup.deleteLater()
+            self._model_popup = None
+
+    def _open_model_settings(self, model: ProviderModel, anchor: QWidget):
+        self._close_model_popup()
+        is_default = self.store.is_default_model(self._current_id, model.model_id)
+        popup = _ModelSettingsPopup(
+            self.theme, model, is_default=is_default, parent=self.window(),
+        )
+        popup.context_changed.connect(self._on_model_context_changed)
+        popup.set_default.connect(self._on_set_default)
+        popup.delete_model.connect(self._on_delete_model)
+        self._model_popup = popup
+        # 锚点右下角外侧弹出
+        pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 2))
+        popup.popup_at(pos)
+
+    def _on_model_context_changed(self, model_id: str, context_window: int):
+        for _cb, m in self._model_checks:
+            if m.model_id == model_id:
+                m.context_window = int(context_window)
+                break
+        self._schedule_autosave()
 
     def _schedule_autosave(self, *_args):
         if self._loading or not self._current_id:
@@ -671,9 +816,11 @@ class ProviderSettingsWorkspace(QWidget):
 
     def _on_model_toggled(self, *_args):
         self._autosave_now()
+
     def _on_delete_model(self, model_id: str):
         if not self._current_id or not model_id:
             return
+        self._close_model_popup()
         if not _confirm(self, self.theme, f"确定删除模型「{model_id}」？"):
             return
         settings = self._collect_settings()
@@ -687,7 +834,7 @@ class ProviderSettingsWorkspace(QWidget):
     def _on_set_default(self, model_id: str):
         if not self._current_id or not model_id:
             return
-        # 先写入当前表单（含勾选），再设默认
+        self._close_model_popup()
         for cb, m in self._model_checks:
             if m.model_id == model_id:
                 cb.setChecked(True)
@@ -704,6 +851,7 @@ class ProviderSettingsWorkspace(QWidget):
             return
         self._render_models(self.store.get_settings(self._current_id).models)
         self._refresh_default_labels()
+
     def _collect_settings(self) -> ProviderSettings:
         models: list[ProviderModel] = []
         for cb, m in self._model_checks:
@@ -711,7 +859,7 @@ class ProviderSettingsWorkspace(QWidget):
                 model_id=m.model_id,
                 nickname=m.nickname,
                 capabilities=list(m.capabilities),
-                context_window=m.context_window,
+                context_window=int(m.context_window or 0),
                 max_output=m.max_output,
                 enabled=cb.isChecked(),
             ))

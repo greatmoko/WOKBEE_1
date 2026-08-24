@@ -9,7 +9,7 @@ from pathlib import Path
 import logging
 
 from PySide6.QtCore import Qt, Signal, QThread, QEvent, QTimer, QSize, QMimeData
-from PySide6.QtGui import QPixmap, QKeyEvent, QImage
+from PySide6.QtGui import QPixmap, QKeyEvent, QImage, QMouseEvent, QPainter, QColor, QPen, QTextDocument
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QScrollArea, QTextEdit, QTextBrowser,
@@ -19,11 +19,13 @@ from PySide6.QtWidgets import (
 
 from wokbee.ui.styles.theme import Theme
 from wokbee.ui.viewmodels.chat_viewmodel import ChatViewModel
+from wokbee.ui.widgets.context_ring import ContextUsageRing
 from wokbee.core.chat_manager import ChatManager, ChatSession
 from wokbee.core.provider_store import ProviderStore, ResolvedModel
 from wokbee.core.ai_client import AIClient
 from wokbee.core.session_settings import SessionSettings
 from wokbee.core.ai_role import AIRoleManager
+from wokbee.core import context_manager as ctxman
 from wokbee.core.file_reader import (
     is_image, is_document, read_image_as_base64, read_file_as_text,
     build_file_filter, save_qimage, persist_attachment,
@@ -32,6 +34,74 @@ from wokbee.core.file_reader import (
 logger = logging.getLogger("wokbee")
 
 _RESOURCES = Path(__file__).parent.parent.parent / "resources"
+
+_INPUT_MIN_HEIGHT = 90  # 当前默认高度
+
+
+def _stabilize_markdown(text: str) -> str:
+    """补全未闭合的代码围栏，减轻流式半截 Markdown 导致的高度跳动。"""
+    if not text:
+        return text
+    # 奇数个 ``` 表示围栏未闭合
+    if text.count("```") % 2 == 1:
+        return text + "\n```"
+    return text
+
+
+class _InputResizeHandle(QWidget):
+    """输入框顶部拖拽条：向上拖高、向下拖矮。"""
+
+    drag_delta = Signal(int)  # 正值 = 增高（鼠标上移）
+
+    def __init__(self, theme: Theme, parent=None):
+        super().__init__(parent)
+        self.theme = theme
+        self.setFixedHeight(8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("拖动调整输入框高度")
+        self._dragging = False
+        self._last_y = 0
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = self.theme.colors
+        # 中间短横作为拖拽暗示
+        mid_y = self.height() / 2
+        x0 = self.width() / 2 - 14
+        x1 = self.width() / 2 + 14
+        pen = QPen(QColor(c.get("border", "#e5e5e5")))
+        pen.setWidth(2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(int(x0), int(mid_y), int(x1), int(mid_y))
+        p.end()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._last_y = event.globalPosition().toPoint().y()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self._dragging:
+            y = event.globalPosition().toPoint().y()
+            delta = self._last_y - y  # 上移为正 → 增高
+            self._last_y = y
+            if delta:
+                self.drag_delta.emit(delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging:
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class _ChatInputEdit(QTextEdit):
@@ -113,24 +183,125 @@ class _AutoHeightBrowser(QTextBrowser):
         super().__init__(parent)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setOpenExternalLinks(True)
         self.setReadOnly(True)
+        # 流式高度上限：避免半截 Markdown / 宽度为 0 时算出天文数字高度
+        self._height_cap = 0
         self.document().contentsChanged.connect(self._update_height)
+
+    def set_height_cap(self, cap: int):
+        """cap<=0 表示不限制（结束后收紧到真实内容高度）。"""
+        self._height_cap = max(0, int(cap))
+        self._update_height()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_height()
 
+    def _content_width(self) -> int:
+        w = self.viewport().width()
+        if w <= 1:
+            w = self.width()
+        if w <= 1:
+            parent = self.parentWidget()
+            if parent is not None:
+                w = parent.width() - 24
+        return max(w, 200)
+
     def _update_height(self):
         doc = self.document()
-        doc.setTextWidth(self.viewport().width())
+        doc.setTextWidth(self._content_width())
         margins = self.contentsMargins()
         h = int(doc.size().height()) + margins.top() + margins.bottom() + 2 * self.frameWidth()
-        self.setFixedHeight(max(h, 30))
+        h = max(h, 30)
+        if self._height_cap > 0:
+            h = min(h, self._height_cap)
+        # 仅在变化明显时改高度，减少微抖
+        if abs(h - self.height()) >= 2:
+            self.setFixedHeight(h)
 
     def sizeHint(self) -> QSize:
         return QSize(super().sizeHint().width(), self.minimumHeight() or 30)
+
+
+class _UserBubbleLabel(QLabel):
+    """用户气泡：按最大宽度正确换行并计算高度，避免长文被裁切。"""
+
+    _H_PAD = 28  # 左右 padding 估算
+    _V_PAD = 24  # 上下 padding 估算
+
+    def __init__(self, text: str, max_width: int, theme: Theme, parent=None):
+        super().__init__(parent)
+        self.theme = theme
+        c = theme.colors
+        self._max_w = max(160, int(max_width))
+        font = self.font()
+        font.setPixelSize(13)
+        self.setFont(font)
+        self.setText(text)
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+        self.setStyleSheet(f"""
+            QLabel {{
+                background: #dcf8c6;
+                border-radius: 10px;
+                padding: 10px 14px;
+                font-size: 13px;
+                color: {c["text"]};
+            }}
+        """)
+        self.setMaximumWidth(self._max_w)
+        self._apply_size()
+
+    def set_max_bubble_width(self, max_width: int):
+        self._max_w = max(160, int(max_width))
+        self.setMaximumWidth(self._max_w)
+        self._apply_size()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._calc_size(width)[1]
+
+    def sizeHint(self) -> QSize:
+        w, h = self._calc_size(self._max_w)
+        return QSize(w, h)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(60, 36)
+
+    def _calc_size(self, max_width: int) -> tuple[int, int]:
+        max_width = max(80, int(max_width))
+        doc = QTextDocument()
+        doc.setDefaultFont(self.font())
+        doc.setPlainText(self.text())
+        content_max = max(40, max_width - self._H_PAD)
+        # idealWidth：不换行时的自然宽度
+        doc.setTextWidth(-1)
+        ideal = int(doc.idealWidth()) + 4
+        content_w = min(content_max, max(ideal, 40))
+        doc.setTextWidth(content_w)
+        h = int(doc.size().height()) + self._V_PAD
+        w = content_w + self._H_PAD
+        return max(60, w), max(36, h)
+
+    def _apply_size(self):
+        w, h = self._calc_size(self._max_w)
+        self.setFixedSize(w, h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 父级变窄时收紧
+        parent = self.parentWidget()
+        if parent is not None and parent.width() > 0:
+            avail = parent.width()
+            if avail < self._max_w:
+                self._max_w = max(160, avail)
+                self.setMaximumWidth(self._max_w)
+                self._apply_size()
 
 
 class _AiNameWorker(QThread):
@@ -152,6 +323,46 @@ class _AiNameWorker(QThread):
             self.finished.emit(content)
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class _CompactWorker(QThread):
+    """后台线程：生成上下文摘要并返回新的 compaction point。"""
+    finished = Signal(str, int)  # summary, boundary_index
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        client: AIClient | None,
+        to_compact: list[dict],
+        previous_summary: str,
+        new_boundary: int,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._client = client
+        self._to_compact = to_compact
+        self._previous_summary = previous_summary
+        self._new_boundary = new_boundary
+
+    def run(self):
+        summary = ""
+        if self._client is not None:
+            try:
+                msgs = ctxman.build_summary_prompt_messages(
+                    self._to_compact, self._previous_summary,
+                )
+                resp = self._client.chat(msgs, temperature=0.2, max_tokens=800)
+                summary = (resp.content or "").strip()
+                if not summary and resp.reasoning_content:
+                    summary = resp.reasoning_content.strip()
+            except Exception as e:
+                logger.warning("LLM 摘要失败，改用机械摘要: %s", e)
+        if not summary:
+            summary = ctxman.mechanical_summary(self._to_compact, self._previous_summary)
+        if not summary.strip():
+            self.failed.emit("无法生成摘要")
+            return
+        self.finished.emit(summary, self._new_boundary)
 
 
 class _AIChatWorker(QThread):
@@ -613,16 +824,32 @@ class _ChatWorkspace(QWidget):
         self._workers: dict[str, _AIChatWorker] = {}
         self._drafts: dict[str, str] = {}
         self._pending_files: list[str] = []
+        self._compact_worker: _CompactWorker | None = None
+        self._pending_send: dict | None = None  # 压缩完成后继续发送
+        self._compact_rounds = 0
         self._scroll_timer = QTimer(self)
         self._scroll_timer.setSingleShot(True)
         self._scroll_timer.setInterval(100)
         self._scroll_timer.timeout.connect(self._do_scroll)
+
+        # 流式 UI 节流：合并短时间内多次 chunk 刷新，减少 Markdown 重排跳动
+        self._stream_ui_timer = QTimer(self)
+        self._stream_ui_timer.setSingleShot(True)
+        self._stream_ui_timer.setInterval(60)
+        self._stream_ui_timer.timeout.connect(self._flush_stream_ui)
+        self._stream_ui_dirty_content = False
+        self._stream_ui_dirty_reasoning = False
+
+        self._usage_timer = QTimer(self)
+        self._usage_timer.setInterval(400)
+        self._usage_timer.timeout.connect(self._refresh_context_ring)
 
         self.vm.title_updated.connect(self._on_vm_title_updated)
         self.vm.model_changed.connect(self._on_vm_model_changed)
         self.vm.error.connect(self._show_tip)
 
         self._build()
+        self._usage_timer.start()
 
     def _build(self):
         c = self.theme.colors
@@ -680,9 +907,14 @@ class _ChatWorkspace(QWidget):
                 border-top: 1px solid {c["border_light"]};
             }}
         """)
+        self._input_wrapper = input_wrapper
         input_layout = QVBoxLayout(input_wrapper)
-        input_layout.setContentsMargins(20, 10, 20, 14)
+        input_layout.setContentsMargins(20, 0, 20, 14)
         input_layout.setSpacing(8)
+
+        self._input_resize = _InputResizeHandle(self.theme)
+        self._input_resize.drag_delta.connect(self._on_input_resize_delta)
+        input_layout.addWidget(self._input_resize)
 
         # 附件预览条
         self._attach_bar = QFrame()
@@ -696,7 +928,10 @@ class _ChatWorkspace(QWidget):
 
         self._input_box = _ChatInputEdit()
         self._input_box.setPlaceholderText("输入消息...（Enter 发送，Shift+Enter 换行，可粘贴图片）")
-        self._input_box.setFixedHeight(90)
+        self._input_min_h = _INPUT_MIN_HEIGHT
+        self._input_box.setMinimumHeight(self._input_min_h)
+        self._input_box.setMaximumHeight(self._input_min_h * 8)  # 窗口 resize 时再收紧
+        self._input_box.setFixedHeight(self._input_min_h)
         self._input_box.setStyleSheet(f"""
             QTextEdit {{
                 background: {c["input_bg"]};
@@ -740,6 +975,10 @@ class _ChatWorkspace(QWidget):
         """)
         self._model_btn.clicked.connect(self._show_model_menu)
         bottom_bar.addWidget(self._model_btn)
+
+        self._ctx_ring = ContextUsageRing(self.theme)
+        self._ctx_ring.compress_clicked.connect(self._on_compress_clicked)
+        bottom_bar.addWidget(self._ctx_ring)
 
         bottom_bar.addStretch()
 
@@ -794,6 +1033,37 @@ class _ChatWorkspace(QWidget):
         layout.addWidget(input_wrapper)
 
         self._show_welcome()
+        QTimer.singleShot(0, self._clamp_input_height)
+
+    def _input_max_height(self) -> int:
+        """软件整体高度的 2/3。"""
+        win = self.window()
+        h = win.height() if win is not None else self.height()
+        if h <= 0:
+            h = 600
+        return max(self._input_min_h, int(h * 2 / 3))
+
+    def _clamp_input_height(self):
+        if not hasattr(self, "_input_box"):
+            return
+        max_h = self._input_max_height()
+        self._input_box.setMaximumHeight(max_h)
+        cur = self._input_box.height()
+        new_h = min(max(cur, self._input_min_h), max_h)
+        if new_h != cur:
+            self._input_box.setFixedHeight(new_h)
+
+    def _on_input_resize_delta(self, delta: int):
+        if not delta:
+            return
+        max_h = self._input_max_height()
+        new_h = min(max(self._input_box.height() + delta, self._input_min_h), max_h)
+        self._input_box.setMaximumHeight(max_h)
+        self._input_box.setFixedHeight(new_h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._clamp_input_height()
 
     def eventFilter(self, obj, event):
         if obj is self._input_box and event.type() == QEvent.Type.KeyPress:
@@ -883,6 +1153,7 @@ class _ChatWorkspace(QWidget):
         QTimer.singleShot(50, self._scroll_to_bottom)
         QTimer.singleShot(200, self._scroll_to_bottom)
         self._init_model_for_session()
+        self._refresh_context_ring()
 
     def _init_model_for_session(self):
         """根据当前对话已保存的模型初始化；无则用默认/首个可用模型。"""
@@ -911,12 +1182,17 @@ class _ChatWorkspace(QWidget):
         if self._current_model:
             display = f"🤖 {self._current_model.model_id}"
             self._model_btn.setText(display)
-            self._model_btn.setToolTip(
-                f"{self._current_model.provider_name} / {self._current_model.model_id}"
-            )
+            ctx = int(self._current_model.context_window or 0)
+            tip = f"{self._current_model.provider_name} / {self._current_model.model_id}"
+            if ctx > 0:
+                tip += f"\n上下文窗口: {ctx:,} tokens"
+            else:
+                tip += "\n未设置上下文窗口（可在厂商设置中填写）"
+            self._model_btn.setToolTip(tip)
         else:
-            self._model_btn.setText("未选择模型")
+            self._model_btn.setText("未配置模型")
             self._model_btn.setToolTip("请选择已启用的模型")
+        self._refresh_context_ring()
 
     def _show_tip(self, message: str):
         c = self.theme.colors
@@ -1182,26 +1458,13 @@ class _ChatWorkspace(QWidget):
                 ]
                 text = "\n".join(lines).strip()
             if text:
-                bubble = QLabel(text)
-                bubble.setWordWrap(True)
-                bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                bubble.setStyleSheet(f"""
-                    background: #dcf8c6;
-                    border-radius: 10px;
-                    padding: 10px 14px;
-                    font-size: 13px;
-                    color: {c["text"]};
-                """)
+                max_w = 360
+                if hasattr(self, "_msg_scroll") and self._msg_scroll.viewport().width() > 0:
+                    max_w = max(200, int(self._msg_scroll.viewport().width() * 0.72))
+                bubble = _UserBubbleLabel(text, max_w, self.theme)
                 bubble_col.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignRight)
             elif not attachments:
-                bubble = QLabel("[附件]")
-                bubble.setStyleSheet(f"""
-                    background: #dcf8c6;
-                    border-radius: 10px;
-                    padding: 10px 14px;
-                    font-size: 13px;
-                    color: {c["text"]};
-                """)
+                bubble = _UserBubbleLabel("[附件]", 120, self.theme)
                 bubble_col.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignRight)
 
             col_wrapper = QWidget()
@@ -1232,6 +1495,7 @@ class _ChatWorkspace(QWidget):
         wrapper.setLayout(row)
         wrapper.setStyleSheet("background: transparent;")
         self._msg_layout.addWidget(wrapper)
+        return wrapper
 
     def _build_thinking_widget(self, reasoning: str) -> QWidget:
         """构建可展开/折叠的思考过程组件。"""
@@ -1395,7 +1659,8 @@ class _ChatWorkspace(QWidget):
         self.manager.save()
 
         self._add_bubble("user", display_text, attachments=saved_attachments)
-        self._scroll_to_bottom()
+        # 提问后立刻定位到最新用户气泡（布局完成前多次补滚）
+        self._scroll_to_latest(force=True)
 
         if not self._current_model or not self._current_model.api_host:
             self._show_tip("请先在「AI配置 → 厂商设置」中配置模型的 API 地址")
@@ -1407,16 +1672,22 @@ class _ChatWorkspace(QWidget):
         self._session.set_params(params)
         self._set_sending(True)
 
-        all_msgs = self._session.messages
-        max_msgs = params.max_context_message_count
-        if max_msgs > 0 and max_msgs < 10_000_000:
-            hist = all_msgs[-(max_msgs + 1):-1]
-        else:
-            hist = all_msgs[:-1]
+        usage = self._compute_usage(include_draft=False)
+        if ctxman.needs_compaction(usage, auto_compaction=params.auto_compaction):
+            self._pending_send = {
+                "sid": sid,
+                "api_user_content": api_user_content,
+                "params": params,
+            }
+            self._compact_rounds = 0
+            self._start_compaction(manual=False)
+            return
 
-        api_messages = []
+        self._start_chat_request(sid, api_user_content, params)
+
+    def _history_to_api_messages(self, hist: list[dict]) -> list[dict]:
+        api_messages: list[dict] = []
         for m in hist:
-            # 历史多模态：尽量带上仍存在的图片
             atts = m.get("attachments") or []
             img_parts = []
             for att in atts:
@@ -1439,12 +1710,38 @@ class _ChatWorkspace(QWidget):
                 api_messages.append({"role": m["role"], "content": parts})
             else:
                 api_messages.append({"role": m["role"], "content": content})
+        return api_messages
 
+    def _assemble_api_messages(self, api_user_content, params: SessionSettings) -> list[dict]:
+        assert self._session is not None
+        ctx_window = 0
+        max_out = params.max_tokens
+        if self._current_model:
+            ctx_window = int(self._current_model.context_window or 0)
+        summary, hist = ctxman.build_context_message_dicts(
+            messages=self._session.messages,
+            compaction_points=self._session.compaction_points,
+            system_prompt=params.system_prompt,
+            max_context_message_count=params.max_context_message_count,
+            context_window=ctx_window,
+            max_output=max_out,
+            exclude_last=True,
+        )
+        api_messages = self._history_to_api_messages(hist)
         api_messages.append({"role": "user", "content": api_user_content})
-
+        # system + summary 插在最前（摘要紧随 system）
+        head: list[dict] = []
         if params.system_prompt.strip():
-            api_messages.insert(0, {"role": "system", "content": params.system_prompt.strip()})
+            head.append({"role": "system", "content": params.system_prompt.strip()})
+        if summary.strip():
+            head.append(ctxman.summary_as_message(summary))
+        return head + api_messages
 
+    def _start_chat_request(self, sid: str, api_user_content, params: SessionSettings):
+        if not self._current_model:
+            self._set_sending(False)
+            return
+        api_messages = self._assemble_api_messages(api_user_content, params)
         use_stream = params.stream
         self._cancel_worker_for_session(sid)
 
@@ -1455,7 +1752,7 @@ class _ChatWorkspace(QWidget):
             self._think_buf = ""
             self._in_think_tag = False
             self._create_stream_bubble()
-            self._scroll_to_bottom()
+            self._scroll_to_latest(force=True)
 
         worker = _AIChatWorker(
             session_id=sid,
@@ -1470,14 +1767,143 @@ class _ChatWorkspace(QWidget):
         worker.non_stream_done.connect(self._on_non_stream_done)
         worker.error.connect(self._on_reply_error)
         worker.start()
+        self._refresh_context_ring()
+
+    def _compute_usage(self, *, include_draft: bool = True) -> ctxman.ContextUsage:
+        params = self._session.get_params() if self._session else SessionSettings()
+        ctx_window = int(self._current_model.context_window or 0) if self._current_model else 0
+        draft = self._input_box.toPlainText() if include_draft else ""
+        pending_imgs = sum(1 for p in self._pending_files if is_image(p))
+        return ctxman.estimate_session_usage(
+            messages=self._session.messages if self._session else [],
+            compaction_points=self._session.compaction_points if self._session else [],
+            system_prompt=params.system_prompt,
+            max_context_message_count=params.max_context_message_count,
+            context_window=ctx_window,
+            compaction_threshold=params.compaction_threshold,
+            max_output=params.max_tokens,
+            draft_text=draft,
+            pending_image_count=pending_imgs,
+        )
+
+    def _refresh_context_ring(self):
+        if not hasattr(self, "_ctx_ring"):
+            return
+        usage = self._compute_usage(include_draft=True)
+        self._ctx_ring.set_usage(usage.used, usage.limit)
+        busy = self._compact_worker is not None and self._compact_worker.isRunning()
+        self._ctx_ring.set_ring_enabled(bool(self._session) and not busy)
+
+    def _on_compress_clicked(self):
+        if not self._session:
+            self._show_tip("请先开始对话")
+            return
+        if not self._current_model or not self._current_model.api_host:
+            self._show_tip("请先配置模型后再压缩")
+            return
+        if self._compact_worker and self._compact_worker.isRunning():
+            return
+        plan = ctxman.plan_compaction(self._session.messages, self._session.compaction_points)
+        if plan is None:
+            self._show_tip("当前对话较短，无需压缩")
+            return
+        self._pending_send = None
+        self._start_compaction(manual=True)
+
+    def _start_compaction(self, *, manual: bool):
+        if not self._session:
+            return
+        plan = ctxman.plan_compaction(self._session.messages, self._session.compaction_points)
+        if plan is None:
+            if manual:
+                self._show_tip("当前对话较短，无需压缩")
+            elif self._pending_send:
+                ps = self._pending_send
+                self._pending_send = None
+                self._start_chat_request(ps["sid"], ps["api_user_content"], ps["params"])
+            return
+
+        to_compact, _retained, new_boundary, prev_summary = plan
+        client = None
+        if self._current_model and self._current_model.api_host:
+            client = AIClient(
+                self._current_model.api_host,
+                self._current_model.api_key,
+                self._current_model.model_id,
+                family=self._current_model.family,
+            )
+        if manual:
+            self._set_sending(True)
+            self._send_btn.setText("压缩中")
+
+        worker = _CompactWorker(
+            client, to_compact, prev_summary, new_boundary, parent=self,
+        )
+        self._compact_worker = worker
+        worker.finished.connect(
+            lambda summary, boundary, m=manual: self._on_compact_done(summary, boundary, m)
+        )
+        worker.failed.connect(lambda err, m=manual: self._on_compact_failed(err, m))
+        worker.start()
+        self._refresh_context_ring()
+
+    def _on_compact_done(self, summary: str, boundary: int, manual: bool):
+        self._compact_worker = None
+        if not self._session:
+            self._set_sending(False)
+            self._pending_send = None
+            return
+        self._session.compaction_points = ctxman.append_compaction_point(
+            self._session.compaction_points,
+            summary=summary,
+            boundary_index=boundary,
+        )
+        self.manager.save()
+        self._refresh_context_ring()
+        if manual and not self._pending_send:
+            self._set_sending(False)
+            self._show_tip("已压缩上下文")
+            return
+        if self._pending_send:
+            ps = self._pending_send
+            self._pending_send = None
+            usage = self._compute_usage(include_draft=False)
+            params = ps["params"]
+            self._compact_rounds += 1
+            if (
+                self._compact_rounds < 3
+                and ctxman.needs_compaction(usage, auto_compaction=params.auto_compaction)
+            ):
+                self._pending_send = ps
+                self._start_compaction(manual=False)
+            else:
+                self._compact_rounds = 0
+                self._start_chat_request(ps["sid"], ps["api_user_content"], params)
+
+    def _on_compact_failed(self, err: str, manual: bool):
+        self._compact_worker = None
+        logger.error("上下文压缩失败: %s", err)
+        if self._pending_send:
+            # 自动压缩失败时仍尝试发送（由 token 裁剪兜底）
+            ps = self._pending_send
+            self._pending_send = None
+            self._start_chat_request(ps["sid"], ps["api_user_content"], ps["params"])
+            return
+        self._set_sending(False)
+        if manual:
+            self._show_tip(f"压缩失败: {err}")
+        self._refresh_context_ring()
 
     def _set_sending(self, sending: bool):
         self._input_box.setEnabled(not sending)
         self._send_btn.setEnabled(not sending)
         self._model_btn.setEnabled(not sending)
         self._attach_btn.setEnabled(not sending)
+        if hasattr(self, "_ctx_ring"):
+            self._ctx_ring.set_ring_enabled(not sending and bool(self._session))
         if sending:
-            self._send_btn.setText("…")
+            if self._send_btn.text() != "压缩中":
+                self._send_btn.setText("…")
         else:
             self._send_btn.setText("发送")
 
@@ -1487,6 +1913,7 @@ class _ChatWorkspace(QWidget):
             if p and p not in self._pending_files:
                 self._pending_files.append(p)
         self._refresh_attach_bar()
+        self._refresh_context_ring()
 
     def _on_attach(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1589,6 +2016,10 @@ class _ChatWorkspace(QWidget):
         thinking_layout.addWidget(thinking_header)
 
         self._stream_reasoning_label = _AutoHeightBrowser()
+        # 仅作异常高度兜底（宽度未就绪时文档会算出天文数字）；正常长回复不应触顶
+        vp_h = self._msg_scroll.viewport().height() if hasattr(self, "_msg_scroll") else 600
+        stream_cap = max(4000, int(vp_h) * 4)
+        self._stream_reasoning_label.set_height_cap(stream_cap)
         self._stream_reasoning_label.setStyleSheet(f"""
             QTextBrowser {{
                 font-size: 12px; color: {c["text_secondary"]};
@@ -1600,6 +2031,7 @@ class _ChatWorkspace(QWidget):
 
         # 回复内容区域（Markdown 渲染）
         self._stream_reply_label = self._make_md_browser(c["card_bg"])
+        self._stream_reply_label.set_height_cap(stream_cap)
         bubble_col.addWidget(self._stream_reply_label)
 
         col_wrapper = QWidget()
@@ -1667,6 +2099,26 @@ class _ChatWorkspace(QWidget):
                         self._show_content_chunk(self._think_buf)
                         self._think_buf = ""
 
+        # 滚动由 _flush_stream_ui 统一触发
+
+    def _schedule_stream_ui(self):
+        if not self._stream_ui_timer.isActive():
+            self._stream_ui_timer.start()
+
+    def _flush_stream_ui(self):
+        """节流后的实际界面刷新。"""
+        if self._stream_ui_dirty_reasoning and self._stream_reasoning_label is not None:
+            self._stream_reasoning_label.setMarkdown(
+                _stabilize_markdown(self._stream_reasoning)
+            )
+            self._stream_reasoning_label._update_height()
+            self._stream_ui_dirty_reasoning = False
+        if self._stream_ui_dirty_content and self._stream_reply_label is not None:
+            self._stream_reply_label.setMarkdown(
+                _stabilize_markdown(self._stream_content)
+            )
+            self._stream_reply_label._update_height()
+            self._stream_ui_dirty_content = False
         self._request_scroll()
 
     def _show_reasoning_chunk(self, text: str):
@@ -1674,21 +2126,24 @@ class _ChatWorkspace(QWidget):
             return
         if self._stream_phase != "reasoning":
             self._stream_phase = "reasoning"
-        if not self._stream_thinking_frame.isVisible():
+        if self._stream_thinking_frame is not None and not self._stream_thinking_frame.isVisible():
             self._stream_thinking_frame.setVisible(True)
         self._stream_reasoning += text
-        self._stream_reasoning_label.setMarkdown(self._stream_reasoning)
+        self._stream_ui_dirty_reasoning = True
+        self._schedule_stream_ui()
 
     def _show_content_chunk(self, text: str):
         if not text:
             return
         if self._stream_phase == "reasoning":
-            self._stream_thinking_header.setText("💭 思考过程")
+            if self._stream_thinking_header is not None:
+                self._stream_thinking_header.setText("💭 思考过程")
             self._stream_phase = "content"
         elif self._stream_phase == "idle":
             self._stream_phase = "content"
         self._stream_content += text
-        self._stream_reply_label.setMarkdown(self._stream_content)
+        self._stream_ui_dirty_content = True
+        self._schedule_stream_ui()
 
     def _on_stream_finished(self, worker_sid: str):
         """流式输出完成：持久化消息、转换思考区域为可折叠。"""
@@ -1701,6 +2156,7 @@ class _ChatWorkspace(QWidget):
 
         if self._session and self._session.id == worker_sid:
             self._set_sending(False)
+            self._refresh_context_ring()
 
             if hasattr(self, "_think_buf") and self._think_buf:
                 if self._in_think_tag:
@@ -1708,6 +2164,10 @@ class _ChatWorkspace(QWidget):
                 else:
                     self._show_content_chunk(self._think_buf)
                 self._think_buf = ""
+
+            # 刷出节流队列中的最后一帧，再用最终 Markdown 定稿
+            self._stream_ui_timer.stop()
+            self._flush_stream_ui()
 
             if not self._stream_content.strip() and self._stream_reasoning.strip():
                 self._stream_content = self._stream_reasoning
@@ -1725,14 +2185,20 @@ class _ChatWorkspace(QWidget):
                 self._convert_thinking_to_collapsible()
 
             if self._stream_reply_label and self._stream_content:
-                self._stream_reply_label.setMarkdown("")
+                self._stream_reply_label.set_height_cap(0)
                 self._stream_reply_label.setMarkdown(self._stream_content)
+                self._stream_reply_label._update_height()
+
+            if self._stream_reasoning_label is not None:
+                self._stream_reasoning_label.set_height_cap(0)
 
             self._stream_wrapper = None
             self._stream_reply_label = None
             self._stream_reasoning_label = None
             self._stream_thinking_frame = None
             self._stream_thinking_header = None
+            self._stream_ui_dirty_content = False
+            self._stream_ui_dirty_reasoning = False
             self._scroll_to_bottom()
 
     def _convert_thinking_to_collapsible(self):
@@ -1781,12 +2247,14 @@ class _ChatWorkspace(QWidget):
             self._set_sending(False)
             self._add_bubble("assistant", content, reasoning)
             self._scroll_to_bottom()
+            self._refresh_context_ring()
 
     def _on_reply_error(self, worker_sid: str, error_msg: str):
         self._workers.pop(worker_sid, None)
         if not self._session or self._session.id != worker_sid:
             return
         self._set_sending(False)
+        self._refresh_context_ring()
         if hasattr(self, "_stream_wrapper") and self._stream_wrapper:
             self._stream_wrapper.deleteLater()
             self._stream_wrapper = None
@@ -1894,6 +2362,8 @@ class _ChatWorkspace(QWidget):
             )
             # 只写入当前对话，不改全局默认
             self.vm.save_chat_params(new_params)
+            self._refresh_context_ring()
+
     def _show_quick_role_dialog(self, parent_dlg: QDialog, role_combo: QComboBox, sys_input: QTextEdit):
         c = self.theme.colors
 
@@ -1990,6 +2460,7 @@ class _ChatWorkspace(QWidget):
     def _on_vm_model_changed(self, model: ResolvedModel | None):
         self._current_model = model
         self._update_model_btn()
+        self._refresh_context_ring()
 
     def _auto_title_from_user_msg(self, session: ChatSession):
         """首次提问时，先用前30字做临时标题，再后台调用主模型 AI 命名。"""
@@ -2029,16 +2500,50 @@ class _ChatWorkspace(QWidget):
         self.vm.apply_ai_name(session_id, reply)
 
     def _request_scroll(self):
-        """节流滚动：流式输出期间最多每 100ms 滚动一次。"""
+        """节流滚动；用户上翻阅读时不强制拉回底部。"""
+        sb = self._msg_scroll.verticalScrollBar()
+        if sb.maximum() - sb.value() > 120:
+            return
         if not self._scroll_timer.isActive():
             self._scroll_timer.start()
 
     def _do_scroll(self):
+        # 先让布局吃到最新气泡高度，再滚到底
+        container = self._msg_scroll.widget()
+        if container is not None:
+            container.adjustSize()
+            container.updateGeometry()
         sb = self._msg_scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _scroll_to_bottom(self):
+        self._do_scroll()
         QTimer.singleShot(0, self._do_scroll)
+        QTimer.singleShot(50, self._do_scroll)
+
+    def _scroll_to_latest(self, *, force: bool = True):
+        """定位到消息区最新气泡（提问后 / 流式气泡出现后）。"""
+        def _go():
+            container = self._msg_scroll.widget()
+            if container is not None:
+                container.adjustSize()
+                container.updateGeometry()
+            # 滚到最新一条消息控件
+            if self._msg_layout.count() > 0:
+                item = self._msg_layout.itemAt(self._msg_layout.count() - 1)
+                w = item.widget() if item else None
+                if w is not None:
+                    self._msg_scroll.ensureWidgetVisible(w, 0, 24)
+            sb = self._msg_scroll.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+        if not force:
+            self._request_scroll()
+            return
+        _go()
+        QTimer.singleShot(0, _go)
+        QTimer.singleShot(40, _go)
+        QTimer.singleShot(120, _go)
 
     def show_welcome(self):
         self._session = None

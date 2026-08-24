@@ -75,6 +75,9 @@ class SessionSettings:
     max_tokens: int | None = None
     max_context_message_count: int = 40  # 消息条数；很大视为不限
     stream: bool = True
+    # 压缩触发比例（相对可用窗口）；对齐 Chatbox compactionThreshold
+    compaction_threshold: float = 0.6
+    auto_compaction: bool = True
     provider_options: ProviderOptions = field(default_factory=ProviderOptions)
 
     def to_dict(self) -> dict:
@@ -87,6 +90,8 @@ class SessionSettings:
             "max_tokens": self.max_tokens,
             "max_context_message_count": self.max_context_message_count,
             "stream": self.stream,
+            "compaction_threshold": self.compaction_threshold,
+            "auto_compaction": self.auto_compaction,
             "provider_options": self.provider_options.to_dict(),
         }
 
@@ -125,6 +130,13 @@ class SessionSettings:
             except (TypeError, ValueError):
                 return None
 
+        thr_raw = d.get("compaction_threshold", d.get("compactionThreshold", 0.6))
+        try:
+            thr = float(thr_raw)
+        except (TypeError, ValueError):
+            thr = 0.6
+        thr = min(max(thr, 0.1), 0.95)
+
         return cls(
             provider=str(d.get("provider") or ""),
             model_id=str(d.get("model_id") or d.get("modelId") or ""),
@@ -134,6 +146,8 @@ class SessionSettings:
             max_tokens=_opt_int(max_tokens),
             max_context_message_count=int(max_ctx),
             stream=bool(d.get("stream", True)),
+            compaction_threshold=thr,
+            auto_compaction=bool(d.get("auto_compaction", d.get("autoCompaction", True))),
             provider_options=ProviderOptions.from_dict(d.get("provider_options") or d.get("providerOptions")),
         )
 

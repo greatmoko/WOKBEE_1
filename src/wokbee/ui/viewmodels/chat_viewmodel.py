@@ -13,6 +13,7 @@ from wokbee.core.chat_manager import ChatManager, ChatSession
 from wokbee.core.provider_store import ProviderStore, ResolvedModel
 from wokbee.core.session_settings import SessionSettings
 from wokbee.core.ai_role import AIRole, AIRoleManager
+from wokbee.core import context_manager as ctxman
 from wokbee.core.file_reader import (
     is_image, is_document, read_image_as_base64, read_file_as_text,
 )
@@ -184,21 +185,29 @@ class ChatViewModel(QObject):
         self.manager.save()
 
         params = session.get_params()
-        all_msgs = session.messages
-        max_msgs = params.max_context_message_count
-        if max_msgs > 0 and max_msgs < 10_000_000:
-            api_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in all_msgs[-(max_msgs + 1):-1]
-            ]
-        else:
-            api_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in all_msgs[:-1]
-            ]
+        ctx_window = 0
+        if self._current_model:
+            ctx_window = int(self._current_model.context_window or 0)
+        summary, hist = ctxman.build_context_message_dicts(
+            messages=session.messages,
+            compaction_points=getattr(session, "compaction_points", None) or [],
+            system_prompt=params.system_prompt,
+            max_context_message_count=params.max_context_message_count,
+            context_window=ctx_window,
+            max_output=params.max_tokens,
+            exclude_last=True,
+        )
+        api_messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in hist
+        ]
         api_messages.append({"role": "user", "content": api_user_content})
+        head: list[dict] = []
         if params.system_prompt.strip():
-            api_messages.insert(0, {"role": "system", "content": params.system_prompt.strip()})
+            head.append({"role": "system", "content": params.system_prompt.strip()})
+        if summary.strip():
+            head.append(ctxman.summary_as_message(summary))
+        api_messages = head + api_messages
 
         return display_text, api_messages, session.id
 
