@@ -19,6 +19,8 @@ class ServiceRegistry:
     def __init__(self, config: Config | None = None):
         self._config = config or Config()
         self._role_manager: AIRoleManager | None = None
+        self._autobee_settings = None
+        self._autobee_store = None
 
     @property
     def config(self) -> Config:
@@ -29,3 +31,17 @@ class ServiceRegistry:
         if self._role_manager is None:
             self._role_manager = AIRoleManager()
         return self._role_manager
+
+    @property
+    def autobee_settings(self):
+        if self._autobee_settings is None:
+            from autobee.core.settings import AutoBeeSettings
+            self._autobee_settings = AutoBeeSettings(self._config)
+        return self._autobee_settings
+
+    @property
+    def autobee_store(self):
+        if self._autobee_store is None:
+            from autobee.core.project_store import ProjectStore
+            self._autobee_store = ProjectStore(self.autobee_settings)
+        return self._autobee_store

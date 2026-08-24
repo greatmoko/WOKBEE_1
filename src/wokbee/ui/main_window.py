@@ -28,9 +28,10 @@ class _PrimaryNav(QFrame):
     # (nav_id, icon_text, label_text, font_size, position)
     # position: "top" 正常顺序, "bottom" 贴底
     NAV_ITEMS = [
-        ("chat",       None,  "WokBee", 20, "top"),
-        ("automation", "⚡", "AI配置", 20, "top"),
-        ("settings",   "⚙",  "设置",   22, "bottom"),
+        ("chat",       None,  "WokBee",  20, "top"),
+        ("autobee",    "🐝",  "autobee", 18, "top"),
+        ("automation", "⚡",  "AI配置",  20, "top"),
+        ("settings",   "⚙",  "设置",    22, "bottom"),
     ]
 
     def __init__(self, theme: Theme, parent=None):
@@ -202,6 +203,7 @@ class MainWindow(QMainWindow):
         from wokbee.ui.views.chat_view import ChatView
         from wokbee.ui.views.settings_view import SettingsView
         from wokbee.ui.views.automation_view import AutomationView
+        from autobee.ui.autobee_view import AutoBeeView
 
         svc = self._services
 
@@ -209,13 +211,24 @@ class MainWindow(QMainWindow):
         settings = SettingsView(self.theme, chat.manager)
         settings.chats_cleared.connect(chat.refresh_after_clear)
 
-        automation = AutomationView(self.theme, svc.role_manager)
+        automation = AutomationView(
+            self.theme,
+            svc.role_manager,
+            autobee_settings=svc.autobee_settings,
+        )
+        autobee = AutoBeeView(
+            self.theme,
+            store=svc.autobee_store,
+            settings=svc.autobee_settings,
+        )
 
         self._views["chat"] = chat
+        self._views["autobee"] = autobee
         self._views["automation"] = automation
         self._views["settings"] = settings
 
         self._stack.addWidget(chat)
+        self._stack.addWidget(autobee)
         self._stack.addWidget(automation)
         self._stack.addWidget(settings)
 

@@ -61,6 +61,9 @@ class _SubNav(QFrame):
         ("ai_roles", "🤖", "AI 角色"),
         ("model_config", "🧠", "厂商设置"),
         ("session_defaults", "⚙", "对话默认设置"),
+        ("autobee_settings", "🐝", "AutoBee 设置"),
+        ("skills", "📚", "Skills"),
+        ("mcp", "🔌", "MCP"),
     ]
 
     def __init__(self, theme: Theme, parent=None):
@@ -687,12 +690,17 @@ class _AIRoleWorkspace(QWidget):
 class AutomationView(QWidget):
     """AI 配置页：左侧二级导航 + 右侧工作区。"""
 
-    def __init__(self, theme: Theme,
-                 role_manager: AIRoleManager | None = None,
-                 parent=None):
+    def __init__(
+        self,
+        theme: Theme,
+        role_manager: AIRoleManager | None = None,
+        autobee_settings=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.theme = theme
         self._role_manager = role_manager or AIRoleManager()
+        self._autobee_settings = autobee_settings
         self._pages: dict[str, QWidget] = {}
         self._build()
 
@@ -722,6 +730,25 @@ class AutomationView(QWidget):
         defaults_page = SessionDefaultsWorkspace(self.theme, self._role_manager)
         self._pages["session_defaults"] = defaults_page
         self._stack.addWidget(defaults_page)
+
+        from autobee.ui.settings_workspace import AutoBeeSettingsWorkspace
+        from autobee.core.settings import AutoBeeSettings
+        ab_settings = self._autobee_settings or AutoBeeSettings()
+        ab_page = AutoBeeSettingsWorkspace(self.theme, ab_settings)
+        self._pages["autobee_settings"] = ab_page
+        self._stack.addWidget(ab_page)
+
+        from autobee.ui.skills_workspace import SkillsWorkspace
+        from autobee.core.skills_store import SkillsStore
+        skills_page = SkillsWorkspace(self.theme, SkillsStore())
+        self._pages["skills"] = skills_page
+        self._stack.addWidget(skills_page)
+
+        from autobee.ui.mcp_workspace import McpWorkspace
+        from autobee.core.mcp_store import McpStore
+        mcp_page = McpWorkspace(self.theme, McpStore())
+        self._pages["mcp"] = mcp_page
+        self._stack.addWidget(mcp_page)
 
         self._subnav.select("ai_roles")
 

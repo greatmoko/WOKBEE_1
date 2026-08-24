@@ -24,6 +24,19 @@ class Config:
             "height": 640,
         },
         "theme": "dark",
+        "autobee": {
+            "workspace_root": "",
+            "approval": {
+                "skip_read": True,
+                "skip_write": False,
+                "skip_routine": False,
+                "skip_high_risk": False,
+            },
+            "default_provider": "",
+            "default_model_id": "",
+            "max_steps": 40,
+            "max_parallel_tools": 4,
+        },
     }
 
     def __new__(cls, config_path: str | None = None):
