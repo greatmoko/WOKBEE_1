@@ -1,4 +1,4 @@
-"""AI 配置页面 — AI 角色 / 厂商设置。"""
+"""AI 配置页面 — AI 角色 / 厂商设置 / 对话默认设置。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from wokbee.ui.styles.theme import Theme
-from wokbee.core.model_config import ModelConfigManager, ModelEntry
+from wokbee.core.provider_store import ProviderStore, ResolvedModel
 from wokbee.core.ai_role import AIRole, AIRoleManager
 from wokbee.core.ai_client import AIClient
 from wokbee.core.config import Config
@@ -60,6 +60,7 @@ class _SubNav(QFrame):
     ITEMS = [
         ("ai_roles", "🤖", "AI 角色"),
         ("model_config", "🧠", "厂商设置"),
+        ("session_defaults", "⚙", "对话默认设置"),
     ]
 
     def __init__(self, theme: Theme, parent=None):
@@ -215,7 +216,7 @@ class _RoleGenWorker(QThread):
         "行为准则和输出风格。直接输出 Prompt 内容，不要加标题或解释。"
     )
 
-    def __init__(self, model: ModelEntry, role_name: str,
+    def __init__(self, model: ResolvedModel, role_name: str,
                  system_prompt: str = "", parent=None):
         super().__init__(parent)
         self._model = model
@@ -224,8 +225,10 @@ class _RoleGenWorker(QThread):
 
     def run(self):
         try:
-            client = AIClient(self._model.endpoint, self._model.api_key, self._model.model_name,
-                              disable_thinking=self._model.disable_thinking)
+            client = AIClient(
+                self._model.api_host, self._model.api_key, self._model.model_id,
+                family=self._model.family,
+            )
             messages = [
                 {"role": "system", "content": self._system_prompt},
                 {"role": "user", "content": f"角色名称：{self._role_name}"},
@@ -249,7 +252,7 @@ class _AIRoleDialog(QDialog):
         self.theme = theme
         self._role = role
         self._gen_worker: _RoleGenWorker | None = None
-        self._model_manager = ModelConfigManager()
+        self._provider_store = ProviderStore()
         self._role_manager = AIRoleManager()
         self._config = Config()
         self._build()
@@ -291,14 +294,18 @@ class _AIRoleDialog(QDialog):
                 background: {c["content_bg"]};
                 border: 1px solid {c["input_border"]};
                 border-radius: 4px; padding: 4px; outline: none;
-                selection-background-color: {c["accent_light"]};
-                selection-color: {c["accent"]};
+                selection-background-color: {c["btn_hover"]};
+                selection-color: {c["text"]};
             }}
             QComboBox QAbstractItemView::item {{
-                padding: 4px 8px; border-radius: 4px; color: {c["text"]};
+                padding: 4px 8px; border: none; outline: none; color: {c["text"]};
             }}
-            QComboBox QAbstractItemView::item:hover {{
-                background: {c["subnav_hover"]};
+            QComboBox QAbstractItemView::item:hover,
+            QComboBox QAbstractItemView::item:selected,
+            QComboBox QAbstractItemView::item:focus {{
+                background: {c["btn_hover"]};
+                border: none;
+                outline: none;
             }}
         """
 
@@ -345,15 +352,15 @@ class _AIRoleDialog(QDialog):
         self._model_combo = QComboBox()
         self._model_combo.setStyleSheet(combo_style)
         self._model_combo.setFixedHeight(30)
-        models = self._model_manager.list_all()
-        last_model_id = self._config.get("role_gen.model_id", "")
+        from wokbee.ui.combo_style import apply_combo_popup_style
+        apply_combo_popup_style(self._model_combo, c)
+        models = self._provider_store.list_selectable_models()
+        last_key = self._config.get("role_gen.model_key", "")
         select_idx = 0
         for i, m in enumerate(models):
-            prefix = "⭐ " if m.is_primary else ""
-            self._model_combo.addItem(f"{prefix}{m.model_name}", m.id)
-            if last_model_id and m.id == last_model_id:
-                select_idx = i
-            elif not last_model_id and m.is_primary:
+            key = f"{m.provider_id}|{m.model_id}"
+            self._model_combo.addItem(f"{m.provider_name} / {m.model_id}", key)
+            if last_key and key == last_key:
                 select_idx = i
         if models:
             self._model_combo.setCurrentIndex(select_idx)
@@ -368,6 +375,7 @@ class _AIRoleDialog(QDialog):
 
         self._role_combo = QComboBox()
         self._role_combo.setStyleSheet(combo_style)
+        apply_combo_popup_style(self._role_combo, c)
         self._role_combo.setFixedHeight(30)
         self._role_combo.addItem("默认（Prompt 专家）", "")
         roles = self._role_manager.list_all()
@@ -439,12 +447,12 @@ class _AIRoleDialog(QDialog):
 
         layout.addLayout(btn_row)
 
-    def _get_selected_model(self) -> ModelEntry | None:
-        model_id = self._model_combo.currentData()
-        if not model_id:
+    def _get_selected_model(self) -> ResolvedModel | None:
+        key = self._model_combo.currentData()
+        if not key or "|" not in str(key):
             return None
-        models = self._model_manager.list_all()
-        return next((m for m in models if m.id == model_id), None)
+        pid, mid = str(key).split("|", 1)
+        return self._provider_store.resolve(pid, mid)
 
     def _get_selected_role_prompt(self) -> str:
         role_id = self._role_combo.currentData()
@@ -460,14 +468,14 @@ class _AIRoleDialog(QDialog):
             return
 
         model = self._get_selected_model()
-        if not model or not model.endpoint:
+        if not model or not model.api_host:
             self._desc_input.setPlainText("请先在「AI配置 → 厂商设置」中配置模型")
             return
 
         if self._gen_worker and self._gen_worker.isRunning():
             self._gen_worker.wait(3000)
 
-        self._config.set("role_gen.model_id", self._model_combo.currentData() or "")
+        self._config.set("role_gen.model_key", self._model_combo.currentData() or "")
         self._config.set("role_gen.role_id", self._role_combo.currentData() or "")
         self._config.save()
 
@@ -705,10 +713,15 @@ class AutomationView(QWidget):
         self._pages["ai_roles"] = role_page
         self._stack.addWidget(role_page)
 
-        from wokbee.ui.views.settings_view import _ModelConfigWorkspace
-        model_page = _ModelConfigWorkspace(self.theme)
+        from wokbee.ui.views.provider_view import ProviderSettingsWorkspace
+        model_page = ProviderSettingsWorkspace(self.theme)
         self._pages["model_config"] = model_page
         self._stack.addWidget(model_page)
+
+        from wokbee.ui.views.session_defaults_view import SessionDefaultsWorkspace
+        defaults_page = SessionDefaultsWorkspace(self.theme, self._role_manager)
+        self._pages["session_defaults"] = defaults_page
+        self._stack.addWidget(defaults_page)
 
         self._subnav.select("ai_roles")
 

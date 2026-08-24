@@ -8,30 +8,102 @@ from pathlib import Path
 
 import logging
 
-from PySide6.QtCore import Qt, Signal, QThread, QEvent, QTimer, QSize
-from PySide6.QtGui import QPixmap, QKeyEvent
+from PySide6.QtCore import Qt, Signal, QThread, QEvent, QTimer, QSize, QMimeData
+from PySide6.QtGui import QPixmap, QKeyEvent, QImage
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QScrollArea, QTextEdit, QTextBrowser,
-    QLineEdit, QMenu, QDialog, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QComboBox, QFileDialog, QSizePolicy,
+    QLineEdit, QMenu, QDialog,
+    QComboBox, QFileDialog, QSizePolicy,
 )
 
 from wokbee.ui.styles.theme import Theme
 from wokbee.ui.viewmodels.chat_viewmodel import ChatViewModel
 from wokbee.core.chat_manager import ChatManager, ChatSession
-from wokbee.core.model_config import ModelConfigManager, ModelEntry
+from wokbee.core.provider_store import ProviderStore, ResolvedModel
 from wokbee.core.ai_client import AIClient
-from wokbee.core.chat_params import ChatParams
+from wokbee.core.session_settings import SessionSettings
 from wokbee.core.ai_role import AIRoleManager
 from wokbee.core.file_reader import (
     is_image, is_document, read_image_as_base64, read_file_as_text,
-    build_file_filter,
+    build_file_filter, save_qimage, persist_attachment,
 )
 
 logger = logging.getLogger("wokbee")
 
 _RESOURCES = Path(__file__).parent.parent.parent / "resources"
+
+
+class _ChatInputEdit(QTextEdit):
+    """支持粘贴/拖入图片与文件的输入框。"""
+
+    files_dropped = Signal(list)  # list[str] 本地路径
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._session_id_provider = lambda: "tmp"
+
+    def set_session_id_provider(self, fn):
+        self._session_id_provider = fn
+
+    def insertFromMimeData(self, source: QMimeData):
+        paths: list[str] = []
+        sid = self._session_id_provider() or "tmp"
+
+        if source.hasUrls():
+            for url in source.urls():
+                if url.isLocalFile():
+                    fp = url.toLocalFile()
+                    if is_image(fp) or is_document(fp):
+                        paths.append(fp)
+
+        if not paths and source.hasImage():
+            img = source.imageData()
+            try:
+                if isinstance(img, QPixmap) and not img.isNull():
+                    paths.append(save_qimage(img, sid))
+                elif isinstance(img, QImage) and not img.isNull():
+                    paths.append(save_qimage(img, sid))
+            except Exception as e:
+                logger.error("保存粘贴图片失败: %s", e)
+
+        if paths:
+            self.files_dropped.emit(paths)
+            # 不把 file:// 路径或文件名再插入输入框
+            return
+
+        super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, event):
+        md = event.mimeData()
+        if md.hasUrls() or md.hasImage():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        md = event.mimeData()
+        paths: list[str] = []
+        sid = self._session_id_provider() or "tmp"
+        if md.hasUrls():
+            for url in md.urls():
+                if url.isLocalFile():
+                    fp = url.toLocalFile()
+                    if is_image(fp) or is_document(fp):
+                        paths.append(fp)
+        if not paths and md.hasImage():
+            img = md.imageData()
+            try:
+                if isinstance(img, (QImage, QPixmap)):
+                    paths.append(save_qimage(img, sid))
+            except Exception as e:
+                logger.error("保存拖入图片失败: %s", e)
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
 
 class _AutoHeightBrowser(QTextBrowser):
@@ -90,30 +162,15 @@ class _AIChatWorker(QThread):
     stream_done = Signal(str)                # (session_id,)
     error = Signal(str, str)                 # (session_id, error_msg)
 
-    def __init__(self, session_id: str, endpoint: str, api_key: str, model: str,
-                 messages: list[dict], *, temperature: float = 0.7,
-                 top_p: float = 1.0, max_tokens: int = 4096,
-                 stream: bool = True, disable_thinking: bool = False,
-                 reasoning_effort: str = "",
-                 frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
-                 top_k: int = 0, stop: list[str] | None = None,
+    def __init__(self, session_id: str, model: ResolvedModel,
+                 messages: list[dict], settings: SessionSettings,
                  parent=None):
         super().__init__(parent)
         self.session_id = session_id
-        self._endpoint = endpoint
-        self._api_key = api_key
         self._model = model
         self._messages = messages
-        self._temperature = temperature
-        self._top_p = top_p
-        self._max_tokens = max_tokens
-        self._stream = stream
-        self._disable_thinking = disable_thinking
-        self._reasoning_effort = reasoning_effort
-        self._frequency_penalty = frequency_penalty
-        self._presence_penalty = presence_penalty
-        self._top_k = top_k
-        self._stop = stop
+        self._settings = settings
+        self._stream = settings.stream
         self._cancelled = False
         self.accumulated_content = ""
         self.accumulated_reasoning = ""
@@ -123,9 +180,10 @@ class _AIChatWorker(QThread):
 
     def run(self):
         try:
-            client = AIClient(self._endpoint, self._api_key, self._model,
-                              disable_thinking=self._disable_thinking,
-                              reasoning_effort=self._reasoning_effort)
+            client = AIClient(
+                self._model.api_host, self._model.api_key, self._model.model_id,
+                family=self._model.family,
+            )
             if self._stream:
                 self._run_stream(client)
             else:
@@ -137,13 +195,7 @@ class _AIChatWorker(QThread):
     def _run_stream(self, client: AIClient):
         has_content = False
         try:
-            for chunk in client.chat_stream(
-                self._messages, temperature=self._temperature,
-                top_p=self._top_p, max_tokens=self._max_tokens,
-                frequency_penalty=self._frequency_penalty,
-                presence_penalty=self._presence_penalty,
-                top_k=self._top_k, stop=self._stop,
-            ):
+            for chunk in client.chat_stream(self._messages, settings=self._settings):
                 if self._cancelled:
                     return
                 if chunk.is_finished:
@@ -163,13 +215,7 @@ class _AIChatWorker(QThread):
                 raise
 
     def _run_sync(self, client: AIClient):
-        resp = client.chat(
-            self._messages, temperature=self._temperature,
-            top_p=self._top_p, max_tokens=self._max_tokens,
-            frequency_penalty=self._frequency_penalty,
-            presence_penalty=self._presence_penalty,
-            top_k=self._top_k, stop=self._stop,
-        )
+        resp = client.chat(self._messages, settings=self._settings)
         self.non_stream_done.emit(self.session_id, resp.content, resp.reasoning_content)
 
 
@@ -210,22 +256,28 @@ class _ChatItem(QFrame):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(2)
+        layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(4)
         if s.pinned:
             pin = QLabel("📌")
             pin.setStyleSheet("font-size: 11px;")
-            top.addWidget(pin)
+            pin.setFixedWidth(16)
+            top.addWidget(pin, 0, Qt.AlignmentFlag.AlignLeft)
 
         title = QLabel(s.title)
+        title.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        title.setWordWrap(False)
+        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         title.setStyleSheet(f"""
             font-size: 13px; font-weight: bold; color: {c["text"]};
+            background: transparent; border: none;
         """)
-        title.setMaximumWidth(160)
-        top.addWidget(title, stretch=1)
+        top.addWidget(title, 1)
         layout.addLayout(top)
 
         try:
@@ -241,7 +293,10 @@ class _ChatItem(QFrame):
         info_text = " · ".join(info_parts)
 
         info = QLabel(info_text)
-        info.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        info.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        info.setWordWrap(False)
+        info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        info.setStyleSheet(f"font-size: 11px; color: {c['text_hint']}; background: transparent; border: none;")
         layout.addWidget(info)
 
     def mousePressEvent(self, event):
@@ -361,13 +416,13 @@ class _ChatSidebar(QFrame):
         self.session_selected.emit(session_id)
 
     def _on_new(self):
-        from wokbee.core.model_config import ModelConfigManager
-        mcm = ModelConfigManager()
-        primary = mcm.get_primary()
-        provider = primary.provider if primary else ""
-        model = primary.model_name if primary else ""
-
-        session = self.manager.create(provider=provider, model=model)
+        # 新建对话：预填默认模型（或首个可用模型）
+        store = ProviderStore()
+        primary = store.first_resolved()
+        session = self.manager.create(
+            provider=primary.provider_id if primary else "",
+            model=primary.model_id if primary else "",
+        )
         self._selected_id = session.id
         self.refresh()
         self.session_selected.emit(session.id)
@@ -552,9 +607,9 @@ class _ChatWorkspace(QWidget):
         self.vm = vm
         self.manager = vm.manager
         self._role_manager = vm.role_manager
-        self._model_manager = ModelConfigManager()
+        self._provider_store = ProviderStore()
         self._session: ChatSession | None = None
-        self._current_model: ModelEntry | None = None
+        self._current_model: ResolvedModel | None = None
         self._workers: dict[str, _AIChatWorker] = {}
         self._drafts: dict[str, str] = {}
         self._pending_files: list[str] = []
@@ -639,8 +694,8 @@ class _ChatWorkspace(QWidget):
         self._attach_bar_layout.addStretch()
         input_layout.addWidget(self._attach_bar)
 
-        self._input_box = QTextEdit()
-        self._input_box.setPlaceholderText("输入消息...（Enter 发送，Shift+Enter 换行）")
+        self._input_box = _ChatInputEdit()
+        self._input_box.setPlaceholderText("输入消息...（Enter 发送，Shift+Enter 换行，可粘贴图片）")
         self._input_box.setFixedHeight(90)
         self._input_box.setStyleSheet(f"""
             QTextEdit {{
@@ -655,6 +710,10 @@ class _ChatWorkspace(QWidget):
                 border-color: {c["input_focus_border"]};
             }}
         """)
+        self._input_box.set_session_id_provider(
+            lambda: self._session.id if self._session else "tmp"
+        )
+        self._input_box.files_dropped.connect(self._add_pending_files)
         self._input_box.installEventFilter(self)
         input_layout.addWidget(self._input_box)
 
@@ -796,7 +855,10 @@ class _ChatWorkspace(QWidget):
                 reasoning = msg.get("reasoning_content", "")
                 if msg["role"] == "assistant":
                     content, reasoning = ChatViewModel.parse_think_tags(content, reasoning)
-                self._add_bubble(msg["role"], content, reasoning)
+                self._add_bubble(
+                    msg["role"], content, reasoning,
+                    attachments=msg.get("attachments") or [],
+                )
 
         worker = self._workers.get(session_id)
         if worker and worker.isRunning():
@@ -823,37 +885,38 @@ class _ChatWorkspace(QWidget):
         self._init_model_for_session()
 
     def _init_model_for_session(self):
-        """根据当前对话的模型信息或主模型初始化模型选择器。"""
-        self._model_manager = ModelConfigManager()
-        models = self._model_manager.list_all()
+        """根据当前对话已保存的模型初始化；无则用默认/首个可用模型。"""
+        self._provider_store = ProviderStore()
         self._current_model = None
-
-        if self._session and self._session.model_name:
-            for m in models:
-                if m.model_name == self._session.model_name and m.provider == self._session.model_provider:
-                    self._current_model = m
-                    break
-
+        if self._session:
+            p = self._session.get_params()
+            if p.provider and p.model_id:
+                self._current_model = self._provider_store.resolve(p.provider, p.model_id)
+            if not self._current_model and self._session.model_name:
+                self._current_model = self._provider_store.resolve(
+                    self._session.model_provider, self._session.model_name,
+                )
         if not self._current_model:
-            primary = self._model_manager.get_primary()
-            if primary:
-                self._current_model = primary
-            elif models:
-                self._current_model = models[0]
-
+            self._current_model = self._provider_store.first_resolved()
+            if self._current_model and self._session:
+                params = self._session.get_params()
+                params.provider = self._current_model.provider_id
+                params.model_id = self._current_model.model_id
+                self._session.set_params(params)
+                self.manager.save()
         self._model_btn.setEnabled(True)
         self._update_model_btn()
 
     def _update_model_btn(self):
         if self._current_model:
-            display = f"🤖 {self._current_model.model_name}"
+            display = f"🤖 {self._current_model.model_id}"
             self._model_btn.setText(display)
             self._model_btn.setToolTip(
-                f"{self._current_model.provider} / {self._current_model.model_name}"
+                f"{self._current_model.provider_name} / {self._current_model.model_id}"
             )
         else:
-            self._model_btn.setText("未配置模型")
-            self._model_btn.setToolTip("请先在设置中添加模型")
+            self._model_btn.setText("未选择模型")
+            self._model_btn.setToolTip("请选择已启用的模型")
 
     def _show_tip(self, message: str):
         c = self.theme.colors
@@ -891,9 +954,9 @@ class _ChatWorkspace(QWidget):
 
     def _show_model_menu(self):
         c = self.theme.colors
-        models = ModelConfigManager().list_all()
+        models = ProviderStore().list_selectable_models()
         if not models:
-            self._show_tip("请先在「AI配置 → 厂商设置」中添加模型")
+            self._show_tip("请先在「AI配置 → 厂商设置」中配置并启用模型")
             return
 
         menu = QMenu(self)
@@ -916,25 +979,32 @@ class _ChatWorkspace(QWidget):
         """)
 
         for m in models:
-            prefix = "⭐ " if m.is_primary else ""
-            check = " ✓" if (self._current_model and m.id == self._current_model.id) else ""
-            text = f"{prefix}{m.provider} / {m.model_name}{check}"
-            action = menu.addAction(text)
-            action.setData(m.id)
+            check = ""
+            if (self._current_model
+                    and m.provider_id == self._current_model.provider_id
+                    and m.model_id == self._current_model.model_id):
+                check = " ✓"
+            label = f"{m.provider_name} / {m.model_id}{check}"
+            action = menu.addAction(label)
+            action.setData(f"{m.provider_id}|{m.model_id}")
 
         chosen = menu.exec(self._model_btn.mapToGlobal(
             self._model_btn.rect().topLeft()
         ))
         if chosen:
-            model_id = chosen.data()
-            selected = next((m for m in models if m.id == model_id), None)
-            if selected:
-                self._current_model = selected
-                self._update_model_btn()
-                if self._session:
-                    self._session.model_provider = selected.provider
-                    self._session.model_name = selected.model_name
-                    self.manager.save()
+            key = chosen.data()
+            if key and "|" in str(key):
+                pid, mid = str(key).split("|", 1)
+                selected = ProviderStore().resolve(pid, mid)
+                if selected:
+                    self._current_model = selected
+                    self._update_model_btn()
+                    if self._session:
+                        params = self._session.get_params()
+                        params.provider = selected.provider_id
+                        params.model_id = selected.model_id
+                        self._session.set_params(params)
+                        self.manager.save()
 
     def _show_welcome(self):
         """无任何对话被选中时的欢迎页。"""
@@ -942,29 +1012,22 @@ class _ChatWorkspace(QWidget):
         self._header.hide()
         self._clear_messages()
 
-        self._model_manager = ModelConfigManager()
-        primary = self._model_manager.get_primary()
-        has_model = primary is not None
-        if not has_model:
-            models = self._model_manager.list_all()
-            if models:
-                has_model = True
-                primary = models[0]
+        self._provider_store = ProviderStore()
+        has_model = self._provider_store.has_any_model()
+        self._current_model = self._provider_store.first_resolved() if has_model else None
 
         if has_model:
-            self._current_model = primary
             self._input_box.setEnabled(True)
-            self._input_box.setPlaceholderText("输入消息，自动创建新对话...")
+            self._input_box.setPlaceholderText("输入消息开始对话…")
             self._send_btn.setEnabled(True)
             self._model_btn.setEnabled(True)
             self._update_model_btn()
         else:
-            self._current_model = None
             self._input_box.setEnabled(False)
-            self._input_box.setPlaceholderText("请先在设置中配置模型")
+            self._input_box.setPlaceholderText("请先在 AI配置 → 厂商设置 中添加厂商并勾选模型")
             self._send_btn.setEnabled(False)
             self._model_btn.setEnabled(False)
-            self._model_btn.setText("未配置模型")
+            self._model_btn.setText("未选择模型")
 
         welcome = QWidget()
         wl = QVBoxLayout(welcome)
@@ -1063,26 +1126,89 @@ class _ChatWorkspace(QWidget):
         """)
         return tb
 
-    def _add_bubble(self, role: str, content: str, reasoning: str = ""):
+    def _add_bubble(
+        self,
+        role: str,
+        content: str,
+        reasoning: str = "",
+        attachments: list | None = None,
+    ):
         c = self.theme.colors
         is_user = role == "user"
+        attachments = attachments or []
 
         row = QHBoxLayout()
         row.setSpacing(0)
 
         if is_user:
-            bubble = QLabel(content)
-            bubble.setWordWrap(True)
-            bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            bubble.setStyleSheet(f"""
-                background: #dcf8c6;
-                border-radius: 10px;
-                padding: 10px 14px;
-                font-size: 13px;
-                color: {c["text"]};
-            """)
+            bubble_col = QVBoxLayout()
+            bubble_col.setSpacing(6)
+            bubble_col.setContentsMargins(0, 0, 0, 0)
+
+            for att in attachments:
+                if isinstance(att, str):
+                    path, name, kind = att, Path(att).name, ("image" if is_image(att) else "doc")
+                else:
+                    path = str(att.get("path") or "")
+                    name = str(att.get("name") or Path(path).name)
+                    kind = str(att.get("kind") or ("image" if is_image(path) else "doc"))
+                if kind == "image" and path and Path(path).is_file():
+                    img = QLabel()
+                    pix = QPixmap(path)
+                    if not pix.isNull():
+                        scaled = pix.scaled(
+                            280, 280,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        img.setPixmap(scaled)
+                        img.setStyleSheet("background: transparent; border: none;")
+                        img.setToolTip(name)
+                        bubble_col.addWidget(img, alignment=Qt.AlignmentFlag.AlignRight)
+                elif name:
+                    chip = QLabel(f"📎 {name}")
+                    chip.setStyleSheet(f"""
+                        font-size: 12px; color: {c["text_secondary"]};
+                        background: transparent; border: none;
+                    """)
+                    bubble_col.addWidget(chip, alignment=Qt.AlignmentFlag.AlignRight)
+
+            text = (content or "").strip()
+            # 去掉旧版纯文本附件标记行
+            if text:
+                lines = [
+                    ln for ln in text.splitlines()
+                    if not re.match(r"^\[📎 .+\]$", ln.strip())
+                ]
+                text = "\n".join(lines).strip()
+            if text:
+                bubble = QLabel(text)
+                bubble.setWordWrap(True)
+                bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                bubble.setStyleSheet(f"""
+                    background: #dcf8c6;
+                    border-radius: 10px;
+                    padding: 10px 14px;
+                    font-size: 13px;
+                    color: {c["text"]};
+                """)
+                bubble_col.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignRight)
+            elif not attachments:
+                bubble = QLabel("[附件]")
+                bubble.setStyleSheet(f"""
+                    background: #dcf8c6;
+                    border-radius: 10px;
+                    padding: 10px 14px;
+                    font-size: 13px;
+                    color: {c["text"]};
+                """)
+                bubble_col.addWidget(bubble, alignment=Qt.AlignmentFlag.AlignRight)
+
+            col_wrapper = QWidget()
+            col_wrapper.setLayout(bubble_col)
+            col_wrapper.setStyleSheet("background: transparent;")
             row.addStretch(1)
-            row.addWidget(bubble, 3)
+            row.addWidget(col_wrapper, 3)
         else:
             bubble_col = QVBoxLayout()
             bubble_col.setSpacing(0)
@@ -1188,9 +1314,10 @@ class _ChatWorkspace(QWidget):
 
         if not self._session:
             if not self._current_model:
+                self._show_tip("请先选择模型")
                 return
-            provider = self._current_model.provider
-            model = self._current_model.model_name
+            provider = self._current_model.provider_id
+            model = self._current_model.model_id
             session = self.manager.create(provider=provider, model=model)
             self._session = session
             self.vm._session = session
@@ -1212,22 +1339,32 @@ class _ChatWorkspace(QWidget):
 
         # 构建 API 消息内容（可能含多模态）
         api_parts: list[dict] = []
-        display_text = text
         doc_prefix = ""
+        saved_attachments: list[dict] = []
+        sid = self._session.id
 
-        for fp in self._pending_files:
+        for fp in list(self._pending_files):
             try:
-                if is_image(fp):
-                    b64, mime = read_image_as_base64(fp)
+                stored = persist_attachment(fp, sid)
+                if is_image(stored):
+                    b64, mime = read_image_as_base64(stored)
                     api_parts.append({
                         "type": "image_url",
                         "image_url": {"url": f"data:{mime};base64,{b64}"},
                     })
-                    display_text += f"\n[📎 {Path(fp).name}]"
-                elif is_document(fp):
-                    extracted = read_file_as_text(fp)
+                    saved_attachments.append({
+                        "path": stored,
+                        "name": Path(fp).name,
+                        "kind": "image",
+                    })
+                elif is_document(stored):
+                    extracted = read_file_as_text(stored)
                     doc_prefix += f"--- {Path(fp).name} ---\n{extracted}\n---\n\n"
-                    display_text += f"\n[📎 {Path(fp).name}]"
+                    saved_attachments.append({
+                        "path": stored,
+                        "name": Path(fp).name,
+                        "kind": "doc",
+                    })
             except Exception as exc:
                 self._show_tip(f"读取文件失败: {Path(fp).name}\n{exc}")
                 logger.error("读取附件 %s 失败: %s", fp, exc)
@@ -1245,33 +1382,63 @@ class _ChatWorkspace(QWidget):
         else:
             api_user_content = full_text
 
-        if not display_text.strip():
-            display_text = "[附件]"
+        display_text = text
+        if not display_text.strip() and saved_attachments:
+            display_text = ""
 
-        self._session.messages.append({"role": "user", "content": display_text})
+        user_msg: dict = {"role": "user", "content": display_text}
+        if saved_attachments:
+            user_msg["attachments"] = saved_attachments
+        self._session.messages.append(user_msg)
         self.manager.touch(self._session.id)
         self._auto_title_from_user_msg(self._session)
         self.manager.save()
 
-        self._add_bubble("user", display_text)
+        self._add_bubble("user", display_text, attachments=saved_attachments)
         self._scroll_to_bottom()
 
-        if not self._current_model or not self._current_model.endpoint:
+        if not self._current_model or not self._current_model.api_host:
             self._show_tip("请先在「AI配置 → 厂商设置」中配置模型的 API 地址")
             return
 
         params = self._session.get_params()
+        params.provider = self._current_model.provider_id
+        params.model_id = self._current_model.model_id
+        self._session.set_params(params)
         self._set_sending(True)
 
         all_msgs = self._session.messages
-        if params.history_rounds > 0:
-            max_msgs = params.history_rounds * 2
-            api_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in all_msgs[-(max_msgs + 1):-1]
-            ]
+        max_msgs = params.max_context_message_count
+        if max_msgs > 0 and max_msgs < 10_000_000:
+            hist = all_msgs[-(max_msgs + 1):-1]
         else:
-            api_messages = []
+            hist = all_msgs[:-1]
+
+        api_messages = []
+        for m in hist:
+            # 历史多模态：尽量带上仍存在的图片
+            atts = m.get("attachments") or []
+            img_parts = []
+            for att in atts:
+                path = att.get("path") if isinstance(att, dict) else str(att)
+                if path and is_image(path) and Path(path).is_file():
+                    try:
+                        b64, mime = read_image_as_base64(path)
+                        img_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        })
+                    except Exception:
+                        pass
+            content = m.get("content") or ""
+            if img_parts:
+                parts = []
+                if content:
+                    parts.append({"type": "text", "text": content})
+                parts.extend(img_parts)
+                api_messages.append({"role": m["role"], "content": parts})
+            else:
+                api_messages.append({"role": m["role"], "content": content})
 
         api_messages.append({"role": "user", "content": api_user_content})
 
@@ -1279,7 +1446,6 @@ class _ChatWorkspace(QWidget):
             api_messages.insert(0, {"role": "system", "content": params.system_prompt.strip()})
 
         use_stream = params.stream
-        sid = self._session.id
         self._cancel_worker_for_session(sid)
 
         if use_stream:
@@ -1291,26 +1457,11 @@ class _ChatWorkspace(QWidget):
             self._create_stream_bubble()
             self._scroll_to_bottom()
 
-        _stop_list = [
-            s.strip() for s in self._current_model.stop_sequences.split(",") if s.strip()
-        ] or None
-
         worker = _AIChatWorker(
             session_id=sid,
-            endpoint=self._current_model.endpoint,
-            api_key=self._current_model.api_key,
-            model=self._current_model.model_name,
+            model=self._current_model,
             messages=api_messages,
-            temperature=params.temperature,
-            top_p=params.top_p,
-            max_tokens=params.max_tokens,
-            stream=use_stream,
-            disable_thinking=self._current_model.disable_thinking,
-            reasoning_effort=self._current_model.reasoning_effort,
-            frequency_penalty=self._current_model.frequency_penalty,
-            presence_penalty=self._current_model.presence_penalty,
-            top_k=self._current_model.top_k,
-            stop=_stop_list,
+            settings=params,
             parent=self,
         )
         self._workers[sid] = worker
@@ -1331,14 +1482,17 @@ class _ChatWorkspace(QWidget):
             self._send_btn.setText("发送")
 
     # ── 附件相关 ──
+    def _add_pending_files(self, paths: list):
+        for p in paths:
+            if p and p not in self._pending_files:
+                self._pending_files.append(p)
+        self._refresh_attach_bar()
+
     def _on_attach(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "选择文件", "", build_file_filter(),
         )
-        for p in paths:
-            if p not in self._pending_files:
-                self._pending_files.append(p)
-        self._refresh_attach_bar()
+        self._add_pending_files(paths)
 
     def _refresh_attach_bar(self):
         layout = self._attach_bar_layout
@@ -1365,6 +1519,17 @@ class _ChatWorkspace(QWidget):
             hl = QHBoxLayout(chip)
             hl.setContentsMargins(6, 2, 2, 2)
             hl.setSpacing(4)
+            if is_image(fp) and Path(fp).is_file():
+                thumb = QLabel()
+                pix = QPixmap(fp)
+                if not pix.isNull():
+                    thumb.setPixmap(pix.scaled(
+                        28, 28,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    ))
+                    thumb.setStyleSheet("background: transparent; border: none;")
+                    hl.addWidget(thumb)
             lbl = QLabel(name)
             lbl.setStyleSheet(f"font-size: 11px; color: {c['text_secondary']}; background: transparent; border: none;")
             lbl.setToolTip(fp)
@@ -1632,186 +1797,64 @@ class _ChatWorkspace(QWidget):
             self._show_tip("请先选择或新建一个对话")
             return
 
+        from wokbee.ui.views.session_params_editor import SessionParamsEditor
+
         c = self.theme.colors
         p = self._session.get_params()
+        family = self._current_model.family if self._current_model else ""
 
         dlg = QDialog(self)
         dlg.setWindowTitle("对话参数设置")
-        dlg.setFixedSize(460, 684)
+        dlg.setFixedSize(500, 780)
         dlg.setStyleSheet(f"background: {c['content_bg']};")
 
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(24, 20, 24, 18)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(0, 0, 0, 0)
 
-        lbl_style = f"font-size: 13px; font-weight: bold; color: {c['text']};"
-        hint_style = f"font-size: 11px; color: {c['text_hint']}; margin-bottom: 2px;"
+        tip = QLabel("仅影响当前对话；新建对话的默认值请到「AI配置 → 对话默认设置」修改")
+        tip.setWordWrap(True)
+        tip.setStyleSheet(
+            f"font-size: 11px; color: {c['text_hint']}; padding: 12px 24px 0 24px;"
+        )
+        outer.addWidget(tip)
 
-        combo_style = f"""
-            QComboBox {{
-                background: {c["input_bg"]};
-                border: 1px solid {c["input_border"]};
-                border-radius: 6px;
-                padding: 5px 30px 5px 10px;
-                color: {c["text"]};
-                font-size: 12px;
-            }}
-            QComboBox:hover {{
-                border-color: {c["input_focus_border"]};
-            }}
-            QComboBox::drop-down {{
-                subcontrol-origin: padding;
-                subcontrol-position: center right;
-                width: 28px; border: none;
-            }}
-            QComboBox::down-arrow {{
-                image: none; width: 0; height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {c["text_secondary"]};
-            }}
-            QComboBox QAbstractItemView {{
-                background: {c["content_bg"]};
-                border: 1px solid {c["input_border"]};
-                border-radius: 4px; padding: 4px; outline: none;
-                selection-background-color: {c["accent_light"]};
-                selection-color: {c["accent"]};
-            }}
-            QComboBox QAbstractItemView::item {{
-                padding: 5px 10px; border-radius: 4px; color: {c["text"]};
-            }}
-            QComboBox QAbstractItemView::item:hover {{
-                background: {c["subnav_hover"]};
-            }}
-        """
-
-        # 角色选择
-        role_lbl = QLabel("系统角色设定")
-        role_lbl.setStyleSheet(lbl_style)
-        layout.addWidget(role_lbl)
-
-        role_hint = QLabel("从已有角色选择，或手动编辑下方内容")
-        role_hint.setStyleSheet(hint_style)
-        layout.addWidget(role_hint)
-
-        role_row = QHBoxLayout()
-        role_row.setSpacing(8)
-
-        role_combo = QComboBox()
-        role_combo.setStyleSheet(combo_style)
-        roles = self._role_manager.list_all()
-        role_combo.addItem("— 自定义 —", "")
-        for r in roles:
-            role_combo.addItem(r.name, r.id)
-        role_row.addWidget(role_combo, stretch=1)
-
-        quick_btn = QPushButton("+ 快速创建")
-        quick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        quick_btn.setFixedHeight(30)
-        quick_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["btn_bg"]}; color: {c["accent"]};
-                border: none; border-radius: 6px; padding: 0 12px; font-size: 12px;
-            }}
-            QPushButton:hover {{ background: {c["btn_hover"]}; }}
-        """)
-        role_row.addWidget(quick_btn)
-        layout.addLayout(role_row)
-
-        sys_input = QTextEdit()
-        sys_input.setPlainText(p.system_prompt)
-        sys_input.setFixedHeight(216)
-        sys_input.setStyleSheet(f"""
-            QTextEdit {{
-                background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
-                border-radius: 6px; padding: 6px 8px; color: {c["text"]}; font-size: 12px;
-            }}
-            QTextEdit:focus {{ border-color: {c["input_focus_border"]}; }}
-        """)
-        layout.addWidget(sys_input)
-
-        def _on_role_selected(index: int):
-            role_id = role_combo.itemData(index)
-            if role_id:
-                role = self._role_manager.get(role_id)
-                if role:
-                    sys_input.setPlainText(role.description)
-
-        role_combo.currentIndexChanged.connect(_on_role_selected)
-
-        def _on_quick_create():
-            self._show_quick_role_dialog(dlg, role_combo, sys_input)
-
-        quick_btn.clicked.connect(_on_quick_create)
-
-        params_row = QHBoxLayout()
-        params_row.setSpacing(16)
-
-        temp_box = QDoubleSpinBox()
-        temp_box.setRange(0.0, 2.0)
-        temp_box.setSingleStep(0.1)
-        temp_box.setDecimals(1)
-        temp_box.setValue(p.temperature)
-        temp_col = QVBoxLayout()
-        temp_lbl = QLabel("温度")
-        temp_lbl.setStyleSheet(lbl_style)
-        temp_col.addWidget(temp_lbl)
-        temp_col.addWidget(temp_box)
-        params_row.addLayout(temp_col)
-
-        topp_box = QDoubleSpinBox()
-        topp_box.setRange(0.0, 1.0)
-        topp_box.setSingleStep(0.05)
-        topp_box.setDecimals(2)
-        topp_box.setValue(p.top_p)
-        topp_col = QVBoxLayout()
-        topp_lbl = QLabel("Top P")
-        topp_lbl.setStyleSheet(lbl_style)
-        topp_col.addWidget(topp_lbl)
-        topp_col.addWidget(topp_box)
-        params_row.addLayout(topp_col)
-
-        layout.addLayout(params_row)
-
-        params_row2 = QHBoxLayout()
-        params_row2.setSpacing(16)
-
-        max_tok_box = QSpinBox()
-        max_tok_box.setRange(1, 128000)
-        max_tok_box.setSingleStep(256)
-        max_tok_box.setValue(p.max_tokens)
-        mt_col = QVBoxLayout()
-        mt_lbl = QLabel("最大输出 Token")
-        mt_lbl.setStyleSheet(lbl_style)
-        mt_col.addWidget(mt_lbl)
-        mt_col.addWidget(max_tok_box)
-        params_row2.addLayout(mt_col)
-
-        hist_box = QSpinBox()
-        hist_box.setRange(0, 100)
-        hist_box.setSingleStep(1)
-        hist_box.setValue(p.history_rounds)
-        hist_col = QVBoxLayout()
-        hist_lbl = QLabel("历史对话轮数")
-        hist_lbl.setStyleSheet(lbl_style)
-        hist_col.addWidget(hist_lbl)
-        hist_h = QLabel("0 表示不携带历史")
-        hist_h.setStyleSheet(hint_style)
-        hist_col.addWidget(hist_h)
-        hist_col.addWidget(hist_box)
-        params_row2.addLayout(hist_col)
-
-        layout.addLayout(params_row2)
-
-        stream_chk = QCheckBox("启用流式输出")
-        stream_chk.setChecked(p.stream)
-        stream_chk.setStyleSheet(f"font-size: 13px; color: {c['text']};")
-        layout.addWidget(stream_chk)
-
-        layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        editor = SessionParamsEditor(
+            self.theme,
+            family=family,
+            role_manager=self._role_manager,
+        )
+        editor.load(p)
+        editor.quick_create_clicked.connect(
+            lambda: self._show_quick_role_dialog(dlg, editor.role_combo, editor.sys_input)
+        )
+        wrap = QWidget()
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(24, 12, 24, 8)
+        wl.addWidget(editor)
+        scroll.setWidget(wrap)
+        outer.addWidget(scroll)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
+        btn_row.setContentsMargins(24, 8, 24, 16)
+        btn_row.setSpacing(10)
+
+        reset_btn = QPushButton("恢复为全局默认")
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.setFixedHeight(34)
+        reset_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {c["text_secondary"]};
+                border: 1px solid {c["border"]}; border-radius: 6px; padding: 0 12px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
+        """)
+        reset_btn.clicked.connect(
+            lambda: editor.load(self.manager.session_defaults.get())
+        )
+        btn_row.addWidget(reset_btn)
         btn_row.addStretch()
 
         cancel_btn = QPushButton("取消")
@@ -1839,20 +1882,18 @@ class _ChatWorkspace(QWidget):
         """)
         save_btn.clicked.connect(dlg.accept)
         btn_row.addWidget(save_btn)
-
-        layout.addLayout(btn_row)
+        outer.addLayout(btn_row)
 
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_params = ChatParams(
-                system_prompt=sys_input.toPlainText().strip(),
-                temperature=temp_box.value(),
-                top_p=topp_box.value(),
-                max_tokens=max_tok_box.value(),
-                history_rounds=hist_box.value(),
-                stream=stream_chk.isChecked(),
+            new_params = editor.collect()
+            new_params.provider = p.provider or (
+                self._current_model.provider_id if self._current_model else ""
             )
+            new_params.model_id = p.model_id or (
+                self._current_model.model_id if self._current_model else ""
+            )
+            # 只写入当前对话，不改全局默认
             self.vm.save_chat_params(new_params)
-
     def _show_quick_role_dialog(self, parent_dlg: QDialog, role_combo: QComboBox, sys_input: QTextEdit):
         c = self.theme.colors
 
@@ -1946,7 +1987,7 @@ class _ChatWorkspace(QWidget):
                 self._title_label.setText(s.title)
         self.title_changed.emit(session_id)
 
-    def _on_vm_model_changed(self, model: ModelEntry | None):
+    def _on_vm_model_changed(self, model: ResolvedModel | None):
         self._current_model = model
         self._update_model_btn()
 
@@ -1964,11 +2005,10 @@ class _ChatWorkspace(QWidget):
             text_parts = [p.get("text", "") for p in raw if isinstance(p, dict) and p.get("type") == "text"]
             raw = " ".join(text_parts)
 
-        primary = self._model_manager.get_primary()
-        if not primary or not primary.endpoint:
+        primary = self._current_model or ProviderStore().first_resolved()
+        if not primary or not primary.api_host:
             return
-        client = AIClient(primary.endpoint, primary.api_key, primary.model_name,
-                          disable_thinking=primary.disable_thinking)
+        client = AIClient(primary.api_host, primary.api_key, primary.model_id, family=primary.family)
         messages = [
             {"role": "system", "content": (
                 '根据用户的对话内容，生成一个简短的中文对话标题。\n'

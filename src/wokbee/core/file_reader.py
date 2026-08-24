@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import mimetypes
 import logging
+import shutil
+import uuid
 from pathlib import Path
 
 logger = logging.getLogger("wokbee")
@@ -19,6 +21,8 @@ _MIME_MAP = {
     ".webp": "image/webp", ".bmp": "image/bmp",
 }
 
+_ATTACH_ROOT = Path.home() / ".wokbee" / "attachments"
+
 
 def is_image(path: str) -> bool:
     return Path(path).suffix.lower() in IMAGE_EXTS
@@ -26,6 +30,42 @@ def is_image(path: str) -> bool:
 
 def is_document(path: str) -> bool:
     return Path(path).suffix.lower() in DOC_EXTS
+
+
+def attachments_dir(session_id: str = "tmp") -> Path:
+    d = _ATTACH_ROOT / (session_id or "tmp")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_qimage(image, session_id: str = "tmp", *, suffix: str = ".png") -> str:
+    """将 QImage / QPixmap 保存到附件目录，返回路径。"""
+    from PySide6.QtGui import QImage, QPixmap
+
+    if isinstance(image, QPixmap):
+        image = image.toImage()
+    if not isinstance(image, QImage) or image.isNull():
+        raise ValueError("无效的图片数据")
+    path = attachments_dir(session_id) / f"paste_{uuid.uuid4().hex[:10]}{suffix}"
+    if not image.save(str(path), "PNG"):
+        raise OSError(f"保存粘贴图片失败: {path}")
+    return str(path)
+
+
+def persist_attachment(src: str, session_id: str = "tmp") -> str:
+    """将附件复制到会话目录，保证历史可回看。已在目录内则原样返回。"""
+    src_p = Path(src)
+    if not src_p.is_file():
+        return src
+    dest_dir = attachments_dir(session_id)
+    try:
+        if src_p.resolve().parent == dest_dir.resolve():
+            return str(src_p)
+    except OSError:
+        pass
+    dest = dest_dir / f"{uuid.uuid4().hex[:8]}_{src_p.name}"
+    shutil.copy2(src_p, dest)
+    return str(dest)
 
 
 def read_image_as_base64(path: str) -> tuple[str, str]:

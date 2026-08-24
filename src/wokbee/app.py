@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication
 
 from wokbee.ui.main_window import MainWindow
 from wokbee.ui.styles.theme import Theme
+from wokbee.ui.no_wheel import install_no_wheel_value_change, install_no_focus_frame_style
 from wokbee.core.config import Config
 
 
@@ -18,6 +19,9 @@ class Application:
 
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.qt_app.setStyle("Fusion")
+        # 全局去掉焦点黑框，并禁止滚轮改动 SpinBox / ComboBox
+        self._no_focus_style = install_no_focus_frame_style(self.qt_app)
+        self._no_wheel_filter = install_no_wheel_value_change(self.qt_app)
 
         self.window = MainWindow(self.config, self.theme)
 

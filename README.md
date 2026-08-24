@@ -5,7 +5,7 @@
 | 模块 | 说明 |
 |------|------|
 | **WokBee 对话** | 多会话聊天，兼容 OpenAI 风格 API |
-| **AI配置** | AI 角色、厂商设置 |
+| **AI配置** | AI 角色、厂商设置（Chatbox 风格：Key / Host / 模型列表） |
 | **设置** | 通用设置（主题等） |
 
 **已剔除**：AutoBee、知识库、KB 问答、应用页，以及对应配置项与依赖。
@@ -31,7 +31,7 @@ python main.py
 # 或：python -m wokbee
 ```
 
-首次启动后，在「AI配置 → 厂商设置」中配置 Endpoint 与 API Key，即可开始对话。
+首次启动后，在「AI配置 → 厂商设置」中填写 API Key、确认 Host，并启用模型；对话页参数（Temperature 等）按会话独立配置。
 
 ## 目录结构
 

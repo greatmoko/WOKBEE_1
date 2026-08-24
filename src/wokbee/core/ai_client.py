@@ -10,6 +10,8 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass
 
 from wokbee.core.errors import AIError
+from wokbee.core.request_builder import build_completion_params
+from wokbee.core.session_settings import SessionSettings
 
 logger = logging.getLogger("wokbee")
 
@@ -36,16 +38,14 @@ class AIClient:
     """调用 OpenAI 兼容的 /chat/completions 接口。"""
 
     def __init__(self, endpoint: str, api_key: str, model: str, *,
-                 retry_interval: int = 0, call_delay: float = 0,
-                 disable_thinking: bool = False,
-                 reasoning_effort: str = ""):
+                 family: str = "openai_compat",
+                 retry_interval: int = 0, call_delay: float = 0):
         self._url = self._build_chat_url(endpoint)
         self._api_key = api_key
         self._model = model
+        self._family = family or "openai_compat"
         self._retry_interval = max(0, int(retry_interval))
         self._call_delay = max(0.0, float(call_delay))
-        self._disable_thinking = disable_thinking
-        self._reasoning_effort = reasoning_effort  # "", "low", "high", "max"
         self.on_retry_log: Callable[[str], None] | None = None
         self.cancel_check: Callable[[], bool] | None = None
 
@@ -54,14 +54,22 @@ class AIClient:
         url = endpoint.rstrip("/")
         for suffix in ["/chat/completions", "/completions"]:
             if url.endswith(suffix):
-                return url if suffix == "/chat/completions" else url.replace("/completions", "/chat/completions")
+                return url if suffix == "/chat/completions" else url.replace(
+                    "/completions", "/chat/completions"
+                )
         if url.endswith("/models"):
             url = url[: -len("/models")]
         url = url.rstrip("/")
         return url + "/chat/completions"
 
     def _make_request(self, body: dict) -> urllib.request.Request:
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        payload_body = dict(body)
+        extra = payload_body.pop("extra_body", None)
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if k not in payload_body:
+                    payload_body[k] = v
+        payload = json.dumps(payload_body, ensure_ascii=False).encode("utf-8")
         return urllib.request.Request(
             self._url,
             data=payload,
@@ -85,7 +93,6 @@ class AIClient:
 
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:
-        """判断异常是否值得重试（瞬态网络错误）。"""
         if isinstance(exc, ConnectionResetError):
             return True
         if isinstance(exc, urllib.error.URLError):
@@ -99,7 +106,6 @@ class AIClient:
         return False
 
     def _cancellable_sleep(self, seconds: float) -> bool:
-        """分段 sleep，每 0.5 秒检查一次 cancel_check。返回 True 表示被取消。"""
         elapsed = 0.0
         step = 0.5
         while elapsed < seconds:
@@ -119,33 +125,17 @@ class AIClient:
             except Exception:
                 pass
 
-    def _apply_thinking_params(self, body: dict):
-        """根据配置向请求体注入思考模式参数。
-
-        DeepSeek 格式: thinking.type + reasoning_effort
-        本地模型格式: chat_template_kwargs.enable_thinking
-        """
-        if self._reasoning_effort in ("low", "high", "max"):
-            body["thinking"] = {"type": "enabled"}
-            body["reasoning_effort"] = self._reasoning_effort
-        elif self._disable_thinking:
-            body["thinking"] = {"type": "disabled"}
-            body["chat_template_kwargs"] = {"enable_thinking": False}
-
     def _apply_call_delay(self):
-        """在发送请求前主动等待，避免 API 频率限制。"""
         if self._call_delay > 0:
             if self._cancellable_sleep(self._call_delay):
                 raise AIError("用户取消")
 
     def _do_single_request(self, body: dict, timeout: int = 180) -> dict:
-        """执行一次 HTTP 请求，返回解析后的 JSON。"""
         req = self._make_request(body)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     def _request_with_cancel(self, body: dict, timeout: int = 180) -> dict:
-        """在后台线程中发请求，主线程可通过 cancel_check 取消等待。"""
         result_holder: list = []
         error_holder: list = []
 
@@ -157,12 +147,10 @@ class AIClient:
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
-
         while t.is_alive():
             if self.cancel_check and self.cancel_check():
                 raise AIError("用户取消")
             t.join(timeout=0.5)
-
         if error_holder:
             raise error_holder[0]
         if result_holder:
@@ -170,7 +158,6 @@ class AIClient:
         raise AIError("请求未返回结果")
 
     def _request_with_retry(self, body: dict, timeout: int = 180, max_retries: int = 3) -> dict:
-        """发送请求并在瞬态网络错误或 429 限速时自动重试。"""
         self._apply_call_delay()
         last_exc: Exception | None = None
         attempt = 0
@@ -207,51 +194,59 @@ class AIClient:
                 raise AIError(f"请求异常: {e}") from e
         raise AIError(f"网络连接失败 (重试{max_retries}次后仍失败): {last_exc}") from last_exc
 
-    def chat(
+    def _build_body(
         self,
         messages: list[dict],
+        settings: SessionSettings | None = None,
         *,
-        temperature: float = 0.7,
-        top_p: float = 1.0,
-        max_tokens: int | None = None,
+        stream: bool = False,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = "auto",
-        timeout: int = 180,
-        frequency_penalty: float = 0.0,
-        presence_penalty: float = 0.0,
-        top_k: int = 0,
-        stop: list[str] | None = None,
-    ) -> ChatResponse:
-        """同步非流式调用，返回完整 ChatResponse。"""
-        body: dict = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": top_p,
-        }
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
-        if frequency_penalty != 0.0:
-            body["frequency_penalty"] = frequency_penalty
-        if presence_penalty != 0.0:
-            body["presence_penalty"] = presence_penalty
-        if top_k > 0:
-            body["top_k"] = top_k
-        if stop:
-            body["stop"] = stop
+        temperature: float | None = None,
+        top_p: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
+        if settings is not None:
+            body = {
+                "model": self._model,
+                "messages": messages,
+                **build_completion_params(
+                    settings, model_id=self._model, family=self._family, stream=stream,
+                ),
+            }
+        else:
+            body = {"model": self._model, "messages": messages}
+            if stream:
+                body["stream"] = True
+            if temperature is not None:
+                body["temperature"] = temperature
+            if top_p is not None:
+                body["top_p"] = top_p
+            if max_tokens is not None:
+                body["max_tokens"] = max_tokens
         if tools is not None:
             body["tools"] = tools
             if tool_choice is not None:
                 body["tool_choice"] = tool_choice
-        self._apply_thinking_params(body)
+        return body
 
-        msg_chars = sum(len(str(m.get("content", ""))) for m in messages)
-        logger.debug("chat() 开始: %d条消息, 约%d字符", len(messages), msg_chars)
-        t0 = time.monotonic()
+    def chat(
+        self,
+        messages: list[dict],
+        *,
+        settings: SessionSettings | None = None,
+        temperature: float | None = 0.7,
+        top_p: float | None = 1.0,
+        max_tokens: int | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = "auto",
+        timeout: int = 180,
+    ) -> ChatResponse:
+        body = self._build_body(
+            messages, settings, stream=False, tools=tools, tool_choice=tool_choice,
+            temperature=temperature, top_p=top_p, max_tokens=max_tokens,
+        )
         data = self._request_with_retry(body, timeout=timeout)
-        elapsed = time.monotonic() - t0
-        logger.debug("chat() 完成: 耗时 %.1fs", elapsed)
-
         try:
             choice = data["choices"][0]
             message = choice["message"]
@@ -282,40 +277,17 @@ class AIClient:
         self,
         messages: list[dict],
         *,
-        temperature: float = 0.7,
-        top_p: float = 1.0,
+        settings: SessionSettings | None = None,
+        temperature: float | None = 0.7,
+        top_p: float | None = 1.0,
         max_tokens: int | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = "auto",
-        frequency_penalty: float = 0.0,
-        presence_penalty: float = 0.0,
-        top_k: int = 0,
-        stop: list[str] | None = None,
     ) -> Generator[StreamChunk, None, None]:
-        """流式调用 chat/completions，逐块 yield StreamChunk。"""
-        body: dict = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": True,
-        }
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
-        if frequency_penalty != 0.0:
-            body["frequency_penalty"] = frequency_penalty
-        if presence_penalty != 0.0:
-            body["presence_penalty"] = presence_penalty
-        if top_k > 0:
-            body["top_k"] = top_k
-        if stop:
-            body["stop"] = stop
-        if tools is not None:
-            body["tools"] = tools
-            if tool_choice is not None:
-                body["tool_choice"] = tool_choice
-        self._apply_thinking_params(body)
-
+        body = self._build_body(
+            messages, settings, stream=True, tools=tools, tool_choice=tool_choice,
+            temperature=temperature, top_p=top_p, max_tokens=max_tokens,
+        )
         self._apply_call_delay()
         last_exc: Exception | None = None
         resp = None
@@ -324,7 +296,7 @@ class AIClient:
         rate_limit_count = 0
         while attempt < max_retries:
             try:
-                req = self._make_request(body)
+                req = self._make_request(dict(body))
                 resp = urllib.request.urlopen(req, timeout=180)
                 break
             except urllib.error.HTTPError as e:

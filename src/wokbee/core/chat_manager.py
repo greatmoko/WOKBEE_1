@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 
-from wokbee.core.chat_params import ChatParams
+from wokbee.core.session_settings import SessionSettings, GlobalSessionDefaults
 from wokbee.core.safe_io import safe_write_json
 
 
@@ -20,13 +20,22 @@ class ChatSession:
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     updated_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     messages: list[dict] = field(default_factory=list)
-    params: dict = field(default_factory=lambda: ChatParams().to_dict())
+    params: dict = field(default_factory=dict)
 
-    def get_params(self) -> ChatParams:
-        return ChatParams.from_dict(self.params)
+    def get_params(self) -> SessionSettings:
+        raw = dict(self.params or {})
+        if not raw.get("provider") and self.model_provider:
+            raw["provider"] = self.model_provider
+        if not raw.get("model_id") and self.model_name:
+            raw["model_id"] = self.model_name
+        return SessionSettings.from_dict(raw)
 
-    def set_params(self, p: ChatParams):
+    def set_params(self, p: SessionSettings):
         self.params = p.to_dict()
+        if p.provider:
+            self.model_provider = p.provider
+        if p.model_id:
+            self.model_name = p.model_id
 
 
 class ChatManager:
@@ -38,13 +47,20 @@ class ChatManager:
         else:
             self._path = Path.home() / ".wokbee" / "chats.json"
         self._sessions: list[ChatSession] = []
+        self._defaults = GlobalSessionDefaults()
         self._load()
 
     def _load(self):
         if self._path.exists():
             try:
                 data = json.loads(self._path.read_text(encoding="utf-8"))
-                self._sessions = [ChatSession(**item) for item in data]
+                self._sessions = []
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    allowed = {f.name for f in ChatSession.__dataclass_fields__.values()}
+                    filtered = {k: v for k, v in item.items() if k in allowed}
+                    self._sessions.append(ChatSession(**filtered))
             except (json.JSONDecodeError, OSError, TypeError):
                 self._sessions = []
 
@@ -75,7 +91,17 @@ class ChatManager:
     def create(self, title: str = "", provider: str = "", model: str = "") -> ChatSession:
         if not title:
             title = f"对话 {datetime.now().strftime('%m-%d %H:%M')}"
-        session = ChatSession(title=title, model_provider=provider, model_name=model)
+        defaults = self._defaults.get()
+        if provider:
+            defaults.provider = provider
+        if model:
+            defaults.model_id = model
+        session = ChatSession(
+            title=title,
+            model_provider=defaults.provider,
+            model_name=defaults.model_id,
+            params=defaults.to_dict(),
+        )
         self._sessions.append(session)
         self.save()
         return session
@@ -100,7 +126,6 @@ class ChatManager:
             self.save()
 
     def delete_unpinned(self) -> int:
-        """删除所有非置顶对话，返回删除的数量。"""
         before = len(self._sessions)
         self._sessions = [s for s in self._sessions if s.pinned]
         self.save()
@@ -110,3 +135,7 @@ class ChatManager:
         s = self.get(session_id)
         if s:
             s.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    @property
+    def session_defaults(self) -> GlobalSessionDefaults:
+        return self._defaults
