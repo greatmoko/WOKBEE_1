@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wokbee"
+name = "tokbee"
 version = "0.1.0"
-description = "WokBee（工蜂）— AI 桌面助手；含 AutoBee 项目工作流模块"
+description = "WokBee — AI 桌面助手；对话模块 TokBee + 项目工作流 WokBee"
 requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",
@@ -21,10 +21,10 @@ dependencies = [
 ]
 
 [project.scripts]
-wokbee = "wokbee.__main__:main"
+tokbee = "tokbee.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-wokbee = ["resources/**/*"]
+tokbee = ["resources/**/*"]

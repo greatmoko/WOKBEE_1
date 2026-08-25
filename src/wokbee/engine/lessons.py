@@ -1,0 +1,606 @@
+"""经验总结：每次总结生成带时间戳的新文档；运行时只加载最新一份。
+
+经验只记录：实现步骤 / 脚本执行顺序 / 运行环境 / 注意事项。
+不记录结果、产物或交付内容。
+"""
+
+from __future__ import annotations
+
+import json
+import platform
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from tokbee.core.safe_io import safe_write_text
+
+from wokbee.core.paths import ensure_project_layout, memory_dir, scripts_dir
+
+EXPERIENCES_SUBDIR = "experiences"
+LEGACY_SINGLE = "EXPERIENCE.md"
+_EXP_NAME_RE = re.compile(r"^exp_(\d{8}_\d{6}(?:_\d{3})?)(?:_[a-z0-9]+)?\.md$", re.I)
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _stamp() -> str:
+    # 含毫秒，避免同一秒内多次总结互相覆盖/排序错乱
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+
+def _slug(text: str, max_len: int = 40) -> str:
+    s = re.sub(r"\s+", "-", (text or "").strip())
+    s = re.sub(r"[^\w\u4e00-\u9fff\-]+", "", s)
+    s = s.strip("-")[:max_len] or "exp"
+    return s.lower() if s.isascii() else s
+
+
+@dataclass
+class Lesson:
+    """一条经验（Skills 风格 Markdown）；每次总结新建一份带时间戳文件。"""
+
+    id: str = field(default_factory=lambda: f"exp_{uuid.uuid4().hex[:10]}")
+    project_id: str = ""
+    goal: str = ""
+    outcome: str = "unknown"  # success | failed | cancelled | partial
+    summary: str = ""  # 流程/方法摘要，非结果
+    success_path: str = ""  # 实现步骤
+    environment: str = ""
+    notes: str = ""
+    artifacts: str = ""  # 弃用：不再写入文档
+    errors: str = ""
+    model: str = ""
+    policy: str = ""
+    script_section: str = ""
+    ai_section: str = ""
+    order_section: str = ""
+    scripts: list[str] = field(default_factory=list)
+    pipeline: str = "scripts/pipeline.json"
+    created_at: str = field(default_factory=_now)
+    updated_at: str = field(default_factory=_now)
+    filename: str = ""  # 相对 memory/，如 experiences/exp_....md
+
+    @property
+    def name(self) -> str:
+        return f"project-experience-{_stamp()}"
+
+    @property
+    def description(self) -> str:
+        base = (self.summary or self.goal or self.id).replace("\n", " ").strip()
+        return f"[{self.outcome}] {base}"[:180]
+
+
+def render_lesson_md(lesson: Lesson) -> str:
+    """渲染经验文档：不含结果/产物章节。"""
+    desc = lesson.description.replace('"', "'")
+    scripts_yaml = ", ".join(f'"{s}"' for s in lesson.scripts) if lesson.scripts else ""
+    display_name = lesson.filename or lesson.id
+    lines = [
+        "---",
+        f"name: {_slug(lesson.goal or 'experience', 32)}",
+        f"id: {lesson.id}",
+        f'description: "{desc}"',
+        f"outcome: {lesson.outcome}",
+        f'goal: "{(lesson.goal or "").replace(chr(34), chr(39))[:120]}"',
+        f"created_at: {lesson.created_at}",
+        f"updated_at: {lesson.updated_at}",
+        f"project_id: {lesson.project_id}",
+        "automation: hybrid",
+        f"pipeline: {lesson.pipeline or 'scripts/pipeline.json'}",
+        f"file: {display_name}",
+    ]
+    if scripts_yaml:
+        lines.append(f"scripts: [{scripts_yaml}]")
+    lines.extend(
+        [
+            "---",
+            "",
+            f"# 项目经验：{lesson.goal or lesson.summary or lesson.id}",
+            "",
+            f"> 流程记录 · {lesson.outcome} · {lesson.created_at}",
+            "",
+            "> 本文件只记录**怎么做**（步骤/顺序/环境/注意），不记录运行结果或交付产物。",
+            "",
+            "## 摘要（方法，非结果）",
+            "",
+            lesson.summary.strip() or "（无摘要）",
+            "",
+            "## 实现步骤",
+            "",
+            (
+                lesson.success_path.strip()
+                or "（未记录具体步骤；请在下次运行中补充工具调用与关键决策。）"
+            ),
+            "",
+            "## 执行顺序（脚本 ↔ AI，必须按序）",
+            "",
+            (
+                lesson.order_section.strip()
+                or "（暂无；总结经验后会写入有序步骤。）"
+            ),
+            "",
+            "## 可本地脚本步骤（清单）",
+            "",
+            lesson.script_section.strip() or "（无；详见执行顺序。）",
+            "",
+            "## 需 AI 完成的步骤（清单）",
+            "",
+            lesson.ai_section.strip() or "（无；详见执行顺序。）",
+            "",
+            "## 运行环境",
+            "",
+            lesson.environment.strip() or "（未记录）",
+            "",
+            "## 注意事项",
+            "",
+            lesson.notes.strip() or "（无特殊注意点）",
+            "",
+            "## 复用建议",
+            "",
+            "- 再次运行：只加载**最新一份**经验；按「执行顺序」与 `scripts/pipeline.json` 的 steps **有序**执行。",
+            "- 顺序在总结时确定，例如：脚本1→脚本2→脚本3→AI1→AI2→脚本4…（不强制 script/AI 一一交错）。",
+            "- 可复用脚本落在 `scripts/`；运行输出（callback）落在 `workspace/script_callback_*.md`。",
+            "- 后续 AI 必须先读 workspace callback 再写 deliverables；禁止编造。",
+            "- 禁止把 archives/ 归档数据当作本轮数据来源。",
+            "- `scripts/` 不参与归档；经验可多份并存，以最新为准。",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_environment_block(
+    *,
+    model: str = "",
+    policy: str = "",
+    project_root: str = "",
+    extra: str = "",
+) -> str:
+    parts = [
+        f"- OS: {platform.system()} {platform.release()} ({platform.machine()})",
+        f"- Python: {platform.python_version()}",
+        f"- 模型: {model or '（未知）'}",
+        f"- 审核策略: {policy or '（未知）'}",
+        f"- 项目目录: {project_root or '（未知）'}",
+        "- 能力: 联网工具(web_search/http_get/http_request) + 本机 execute + Skills/MCP（若已配置）",
+        "- 禁止: 访问 archives/ 归档目录及其内容",
+    ]
+    if extra.strip():
+        parts.append(extra.strip())
+    return "\n".join(parts)
+
+
+def collect_scripts_context(project_root: Path, *, max_chars: int = 12000) -> str:
+    """收集 scripts/pipeline.json 与脚本源码摘要，供 AI 总结。"""
+    root = Path(project_root)
+    sdir = scripts_dir(root)
+    parts: list[str] = []
+    pipe = sdir / "pipeline.json"
+    if pipe.exists():
+        try:
+            parts.append(
+                "### scripts/pipeline.json\n```json\n"
+                + pipe.read_text(encoding="utf-8")[:4000]
+                + "\n```"
+            )
+        except OSError:
+            pass
+    if sdir.exists():
+        for p in sorted(sdir.glob("*.py"))[:20]:
+            try:
+                body = p.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if len(body) > 2500:
+                body = body[:2500] + "\n# …(截断)"
+            parts.append(f"### scripts/{p.name}\n```python\n{body}\n```")
+    text = "\n\n".join(parts) if parts else "（尚无 scripts/ 内容）"
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n…(脚本上下文截断)"
+    return text
+
+
+def collect_events_log(events: list | None, *, max_chars: int = 20000) -> str:
+    """把时间线事件压成日志文本，供 AI 总结。"""
+    lines: list[str] = []
+    for ev in events or []:
+        kind = getattr(ev, "kind", "") or ""
+        content = (getattr(ev, "content", None) or "").strip()
+        ts = getattr(ev, "ts", None) or getattr(ev, "created_at", "") or ""
+        if not content:
+            continue
+        if kind in ("tool", "agent", "error", "user", "info", "approval", "lesson"):
+            chunk = content if len(content) <= 1200 else content[:1200] + "…"
+            prefix = f"[{ts}] " if ts else ""
+            lines.append(f"{prefix}{kind}: {chunk}")
+    text = "\n".join(lines) if lines else "（无运行日志）"
+    if len(text) > max_chars:
+        text = "…(日志前部截断)\n" + text[-max_chars:]
+    return text
+
+
+_AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上一份经验 + 本次运行日志 + 现有脚本」总结可复用的流程经验。
+
+硬性要求：
+1. 只写「怎么做」：实现步骤、脚本↔AI 执行顺序、运行环境要点、注意事项。
+2. 禁止写入：最终结果数值、交付产物内容、报告正文、截图描述、成功产出的具体文案。
+3. 不要引用或依赖 archives/ 归档数据。
+4. 自动化脚本与管线约定（重要）：
+   - 可复用本地命令落到项目 `scripts/`；运行输出落到 `workspace/script_callback_*.md`。
+   - 你可在 script_files 中手写完整脚本（.py/.bat/.cmd/.ps1/.json/.sh/.js/.vbs）。
+   - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾一路执行。
+     允许连续多个 script，也允许连续多个 ai，例如：
+     script → script → script → ai → ai → script
+     不要理解为必须「脚本、AI」交替。
+   - pipeline_steps 里 script 的 path 须指向 scripts/ 下真实文件（与 script_files.filename 或已有脚本一致）。
+   - 禁止用 script_files 覆盖 pipeline.json（由系统根据 pipeline_steps 维护）。
+5. 用中文。输出必须是一个 JSON 对象（不要 Markdown 围栏），字段如下：
+{
+  "summary": "方法/流程摘要（一两段，非结果）",
+  "success_path": "有序实现步骤（编号列表文本）",
+  "order_section": "执行顺序说明（与 pipeline_steps 一致，强调有序而非强制交错）",
+  "script_section": "脚本步骤清单",
+  "ai_section": "AI 步骤清单（须注明先读 workspace/script_callback_*.md）",
+  "environment": "运行环境要点",
+  "notes": "注意事项",
+  "script_files": [
+    {"filename": "query_weather.bat", "content": "@echo off\\n...", "description": "...", "in_pipeline": true}
+  ],
+  "pipeline_steps": [
+    {"type": "script", "path": "scripts/query_weather.bat", "description": "拉取天气"},
+    {"type": "script", "path": "scripts/other.py", "description": "清洗数据"},
+    {"type": "ai", "description": "提取要点", "prompt_hint": "先读 workspace/script_callback_*.md"},
+    {"type": "ai", "description": "写出行建议到 deliverables/"},
+    {"type": "script", "path": "scripts/publish.py", "description": "合并交付"}
+  ]
+}
+说明：有可复用命令时尽量同时给出 script_files 与 pipeline_steps；没有则可为空数组。
+"""
+
+
+def summarize_lesson_with_ai(
+    *,
+    model: Any,
+    goal: str,
+    outcome: str,
+    previous_experience: str,
+    run_log: str,
+    scripts_context: str,
+    environment_hint: str = "",
+) -> dict[str, Any]:
+    """调用模型总结经验；失败时抛出异常由调用方回退。
+
+    返回字段均为 str，另含 script_files: list[dict]（AI 手写脚本，可为空）。
+    生成过程在内部收齐，结束后一次性返回，避免向时间线刷进度气泡。
+    """
+    user = (
+        f"项目目标：{goal or '（未设置）'}\n"
+        f"本轮 outcome：{outcome}\n\n"
+        f"## 上一份经验（可能为空）\n{previous_experience or '（无）'}\n\n"
+        f"## 本次运行日志\n{run_log}\n\n"
+        f"## 现有脚本与 pipeline\n{scripts_context}\n\n"
+        f"## 环境提示\n{environment_hint or '（无）'}\n\n"
+        "请输出符合要求的 JSON。若日志里出现可复用的本地脚本/命令（如 execute 跑 .py/.bat、"
+        "Skill 脚本），请在 script_files 写出完整源码，并在 pipeline_steps 给出下次运行的"
+        "有序步骤（可连续多个脚本再 AI，勿强制交错）。"
+    )
+    messages = [
+        {"role": "system", "content": _AI_SUMMARY_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    text = ""
+    # 优先 stream 仅用于内部拼装；不向外刷进度。失败则 invoke。
+    try:
+        parts: list[str] = []
+        for chunk in model.stream(messages):
+            piece = getattr(chunk, "content", None)
+            if piece is None:
+                continue
+            if isinstance(piece, list):
+                piece = "".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in piece
+                )
+            piece = str(piece)
+            if piece:
+                parts.append(piece)
+        text = "".join(parts).strip()
+    except Exception:
+        text = ""
+    if not text:
+        resp = model.invoke(messages)
+        raw = getattr(resp, "content", None) or str(resp)
+        if isinstance(raw, list):
+            raw = "\n".join(
+                b.get("text", "") if isinstance(b, dict) else str(b) for b in raw
+            )
+        text = str(raw).strip()
+
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("AI 总结返回非对象 JSON")
+    out: dict[str, Any] = {}
+    for key in (
+        "summary",
+        "success_path",
+        "order_section",
+        "script_section",
+        "ai_section",
+        "environment",
+        "notes",
+    ):
+        val = data.get(key)
+        out[key] = str(val).strip() if val is not None else ""
+    out["script_files"] = _normalize_ai_script_files(data.get("script_files"))
+    out["pipeline_steps"] = _normalize_ai_pipeline_steps(data.get("pipeline_steps"))
+    return out
+
+
+def _normalize_ai_script_files(raw: Any) -> list[dict[str, Any]]:
+    """校验并规整 AI 返回的 script_files。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[:20]:
+        if not isinstance(item, dict):
+            continue
+        filename = str(
+            item.get("filename") or item.get("name") or item.get("path") or ""
+        ).strip()
+        content = item.get("content")
+        if content is None:
+            content = item.get("source") or item.get("code") or ""
+        content = str(content)
+        if not filename or not content.strip():
+            continue
+        if len(content) > 256_000:
+            content = content[:256_000]
+        desc = str(item.get("description") or item.get("desc") or "").strip()
+        in_pipeline = item.get("in_pipeline")
+        if in_pipeline is None:
+            in_pipeline = item.get("pipeline", True)
+        out.append(
+            {
+                "filename": filename,
+                "content": content,
+                "description": desc,
+                "in_pipeline": bool(in_pipeline),
+            }
+        )
+    return out
+
+
+def _normalize_ai_pipeline_steps(raw: Any) -> list[dict[str, Any]]:
+    """规整 AI 给出的有序管线步骤。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(raw[:80]):
+        if not isinstance(item, dict):
+            continue
+        t = str(item.get("type") or "").lower().strip()
+        if t not in ("script", "ai"):
+            continue
+        step: dict[str, Any] = {
+            "id": str(item.get("id") or f"{t}_{i+1}"),
+            "type": t,
+            "description": str(item.get("description") or "").strip()[:300],
+        }
+        if t == "script":
+            path = str(item.get("path") or item.get("filename") or "").strip().replace("\\", "/")
+            if path and not path.startswith("scripts/"):
+                path = f"scripts/{Path(path).name}"
+            if not path:
+                continue
+            step["path"] = path
+            step["tool"] = str(item.get("tool") or "ai_authored")
+            step["args"] = item.get("args") if isinstance(item.get("args"), dict) else {}
+        else:
+            step["prompt_hint"] = str(item.get("prompt_hint") or item.get("hint") or "").strip()
+            if not step["description"]:
+                step["description"] = "AI 步骤"
+        out.append(step)
+    return out
+
+
+class LessonStore:
+    """`memory/experiences/exp_YYYYMMDD_HHMMSS.md` 多份经验；运行只读最新。"""
+
+    def __init__(self, project_root: Path):
+        self.root = Path(project_root)
+        ensure_project_layout(self.root)
+        self.memory = memory_dir(self.root)
+        self.memory.mkdir(parents=True, exist_ok=True)
+        self.experiences_dir = self.memory / EXPERIENCES_SUBDIR
+        self.experiences_dir.mkdir(parents=True, exist_ok=True)
+        self._maybe_migrate_legacy()
+
+    @property
+    def experience_path(self) -> Path | None:
+        return self.latest_path()
+
+    @property
+    def index_path(self) -> Path:
+        latest = self.latest_path()
+        return latest if latest else self.experiences_dir
+
+    def _maybe_migrate_legacy(self) -> None:
+        legacy_single = self.memory / LEGACY_SINGLE
+        if legacy_single.exists() and legacy_single.is_file():
+            if not any(self.experiences_dir.glob("exp_*.md")):
+                dest = self.experiences_dir / f"exp_{_stamp()}_migrated.md"
+                try:
+                    safe_write_text(dest, legacy_single.read_text(encoding="utf-8"))
+                except OSError:
+                    pass
+            try:
+                bak = self.memory / "EXPERIENCE.md.bak"
+                if not bak.exists():
+                    legacy_single.replace(bak)
+            except OSError:
+                pass
+
+        old_idx = self.memory / "EXPERIENCES.md"
+        if old_idx.exists() and not any(self.experiences_dir.glob("exp_*.md")):
+            try:
+                safe_write_text(
+                    self.experiences_dir / f"exp_{_stamp()}_index.md",
+                    old_idx.read_text(encoding="utf-8"),
+                )
+            except OSError:
+                pass
+
+    def list_paths(self) -> list[Path]:
+        files = [p for p in self.experiences_dir.glob("exp_*.md") if p.is_file()]
+
+        def sort_key(p: Path):
+            m = _EXP_NAME_RE.match(p.name)
+            stamp = m.group(1) if m else ""
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return (stamp, mtime, p.name)
+
+        return sorted(files, key=sort_key, reverse=True)
+
+    def list_recent(self, limit: int = 20) -> list[Path]:
+        return self.list_paths()[:limit]
+
+    def latest_path(self) -> Path | None:
+        paths = self.list_paths()
+        return paths[0] if paths else None
+
+    def is_empty(self) -> bool:
+        latest = self.latest_path()
+        if not latest:
+            return True
+        try:
+            text = latest.read_text(encoding="utf-8").strip()
+        except OSError:
+            return True
+        if not text:
+            return True
+        if "（暂无经验" in text and "## 实现步骤" not in text and "## 成功实现路径" not in text:
+            return True
+        # 至少要有 front matter 或某个核心章节
+        if text.startswith("---") or "## 实现步骤" in text or "## 成功实现路径" in text or "## 执行顺序" in text:
+            return False
+        return len(text) < 80
+
+    def read_latest_text(self, *, max_chars: int = 0) -> str:
+        path = self.latest_path()
+        if not path:
+            return ""
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+        if max_chars > 0 and len(text) > max_chars:
+            return text[:max_chars] + "\n…(截断)"
+        return text
+
+    def save(self, lesson: Lesson) -> Path:
+        """始终新建带时间戳的经验文件（不覆盖旧文件）。"""
+        lesson.created_at = lesson.created_at or _now()
+        lesson.updated_at = _now()
+        stamp = _stamp()
+        fname = f"exp_{stamp}.md"
+        path = self.experiences_dir / fname
+        if path.exists():
+            fname = f"exp_{stamp}_{lesson.id[-4:]}.md"
+            path = self.experiences_dir / fname
+        lesson.filename = f"{EXPERIENCES_SUBDIR}/{fname}"
+        safe_write_text(path, render_lesson_md(lesson))
+        return path
+
+    def virtual_memory_paths(self, *, recent: int = 8) -> list[str]:
+        paths = ["/memory/AGENTS.md"]
+        latest = self.latest_path()
+        if latest:
+            rel = latest.relative_to(self.memory).as_posix()
+            paths.append(f"/memory/{rel}")
+        return paths
+
+    def prompt_digest(self, *, limit: int = 5, max_chars: int = 3500) -> str:
+        text = self.read_latest_text(max_chars=max_chars)
+        if not text:
+            return ""
+        latest = self.latest_path()
+        name = latest.name if latest else "latest"
+        return (
+            f"【项目经验记忆】以下来自最新经验 `{name}`（历史经验不自动注入；"
+            "只关注实现步骤/执行顺序/环境/注意事项，忽略任何结果或产物描述）：\n\n"
+            + text
+        )
+
+    def rebuild_index(self) -> None:
+        self.experiences_dir.mkdir(parents=True, exist_ok=True)
+
+    def open_in_browser(self) -> bool:
+        path = self.latest_path()
+        if not path:
+            return False
+        try:
+            import webbrowser
+
+            webbrowser.open(path.resolve().as_uri())
+            return True
+        except OSError:
+            return False
+
+
+def build_success_path_from_timeline_events(
+    events: list,
+    *,
+    limit: int = 40,
+) -> tuple[str, str, str]:
+    """从时间线事件提炼 (success_path, summary, errors) — 作 AI 回退用。"""
+    steps: list[str] = []
+    agent_bits: list[str] = []
+    errors: list[str] = []
+    for ev in events or []:
+        kind = getattr(ev, "kind", "") or ""
+        content = (getattr(ev, "content", None) or "").strip()
+        if not content:
+            continue
+        if kind == "tool":
+            if len(steps) >= limit:
+                continue
+            line = content
+            for prefix in (
+                "call: ",
+                "callback: ",
+                "⟶ 调用工具：",
+                "⟵ ",
+            ):
+                if line.startswith(prefix):
+                    line = line[len(prefix) :].strip()
+                    break
+            if len(line) > 280:
+                line = line[:280] + "…"
+            if "本地脚本" in line and "成功" in line:
+                line = re.split(r"成功[:：]", line, maxsplit=1)[0] + "成功"
+            steps.append(f"{len(steps) + 1}. {line}")
+        elif kind == "agent":
+            agent_bits.append(content[:400])
+        elif kind == "error":
+            errors.append(content[:400])
+        elif kind == "info" and ("失败" in content or "取消" in content):
+            errors.append(content[:400])
+
+    success_path = "\n".join(steps) if steps else ""
+    summary = ""
+    if steps:
+        summary = f"本轮记录了 {len(steps)} 个工具/脚本相关流程步骤（不含结果正文）。"
+    elif agent_bits:
+        summary = "本轮以 Agent 过程说明为主，详见注意事项与实现步骤。"
+    err_text = "\n".join(errors[-5:]) if errors else ""
+    return success_path, summary, err_text

@@ -1,9 +1,4 @@
-"""WokBee 应用启动入口。"""
-
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+"""python -m tokbee 入口。"""
 
 from tokbee.app import Application
 from tokbee.utils.logger import setup_logger
@@ -17,7 +12,7 @@ def main():
     exit_code = app.run()
 
     logger.info("WokBee 已退出")
-    sys.exit(exit_code)
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
