@@ -171,6 +171,7 @@ class Project:
     artifacts_summary: str = ""
     provider: str = ""
     model_id: str = ""
+    pinned: bool = False
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -195,6 +196,7 @@ class Project:
             "artifacts_summary": self.artifacts_summary,
             "provider": self.provider,
             "model_id": self.model_id,
+            "pinned": bool(self.pinned),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -221,6 +223,7 @@ class Project:
             artifacts_summary=data.get("artifacts_summary") or "",
             provider=data.get("provider") or "",
             model_id=data.get("model_id") or "",
+            pinned=bool(data.get("pinned", False)),
             created_at=data.get("created_at") or _now(),
             updated_at=data.get("updated_at") or _now(),
         )

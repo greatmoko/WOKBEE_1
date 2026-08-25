@@ -12,6 +12,7 @@ from wokbee.engine.runner import AgentRunner, RunRequest, RunResult
 class AgentWorker(QThread):
     event_emitted = Signal(str, str, object)  # kind, content, meta
     approval_needed = Signal(object)  # list[dict]
+    ask_user_needed = Signal(object)  # dict payload
     finished_result = Signal(object)  # RunResult
 
     def __init__(
@@ -30,6 +31,7 @@ class AgentWorker(QThread):
     def run(self):
         self.runner.on_event = self._on_event
         self.runner.on_approval_needed = self._on_approval
+        self.runner.on_ask_user_needed = self._on_ask_user
 
         if self.mode == "chat":
             result = self.runner.run_chat(self.request)
@@ -43,6 +45,9 @@ class AgentWorker(QThread):
     def _on_approval(self, pending: list):
         self.approval_needed.emit(pending)
 
+    def _on_ask_user(self, payload: dict):
+        self.ask_user_needed.emit(payload)
+
     def cancel(self):
         self.runner.request_cancel()
 
@@ -54,6 +59,9 @@ class AgentWorker(QThread):
         self.runner.resolve_approval(
             [{"type": "reject", "message": message}] * 16
         )
+
+    def resolve_ask_user(self, answers: dict):
+        self.runner.resolve_ask_user(answers)
 
 
 class LessonWorker(QThread):

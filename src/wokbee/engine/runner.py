@@ -37,6 +37,11 @@ from wokbee.engine.lessons import (
 )
 from wokbee.engine.model_factory import build_chat_model
 from wokbee.engine.network_tools import NETWORK_TOOLS
+from wokbee.engine.ask_user import (
+    build_ask_user_tool,
+    is_ask_user_interrupt,
+    normalize_ask_user_value,
+)
 from wokbee.engine.project_tools import PROJECT_META_TOOL_NAMES, build_project_meta_tools
 from wokbee.engine.script_factory import (
     apply_ai_authored_scripts,
@@ -367,6 +372,10 @@ def _emit_message_events(emit: EventCallback, msg: Any, seen: set[str]) -> None:
                 format_tool_call_for_timeline(name, args),
                 {"phase": "call", "tool": name, "args": args},
             )
+        # 方案1：同条消息若带 tool_calls，旁白不插在 call/callback 中间；
+        # 仅当本轮无工具调用时，才把文字当作「AI 回复」展示 → 顺序为 call→callback→AI
+        if tcs:
+            return
         text = _message_text(
             getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
         )
@@ -401,53 +410,76 @@ def _collect_messages_from_update(update: Any) -> list:
     return msgs
 
 
-def _pending_from_state(agent, config: dict) -> list[dict]:
-    """从 checkpoint state 解析待审批动作。"""
-    pending: list[dict] = []
+def _iter_interrupt_values(agent, config: dict):
+    """遍历 checkpoint 中未处理的 interrupt 值。"""
     try:
         state = agent.get_state(config)
     except Exception as e:
         logger.warning("get_state 失败: %s", e)
-        return pending
-
+        return
     tasks = getattr(state, "tasks", None) or ()
     for task in tasks:
         interrupts = getattr(task, "interrupts", None) or ()
         for intr in interrupts:
-            value = getattr(intr, "value", intr)
-            action_requests = None
-            if isinstance(value, dict):
-                action_requests = value.get("action_requests") or value.get("actions")
+            yield getattr(intr, "value", intr)
+
+
+def _first_ask_user_payload(agent, config: dict) -> dict | None:
+    for value in _iter_interrupt_values(agent, config):
+        if is_ask_user_interrupt(value):
+            return normalize_ask_user_value(value)
+        # 兼容：仅含 questions 的载荷
+        if isinstance(value, dict) and value.get("questions") and not (
+            value.get("action_requests") or value.get("actions")
+        ):
+            return normalize_ask_user_value({**value, "type": "ask_user"})
+    return None
+
+
+def _pending_from_state(agent, config: dict) -> list[dict]:
+    """从 checkpoint state 解析待审批动作（跳过 ask_user 澄清中断）。"""
+    pending: list[dict] = []
+    for value in _iter_interrupt_values(agent, config):
+        if is_ask_user_interrupt(value):
+            continue
+        if isinstance(value, dict) and value.get("questions") and not (
+            value.get("action_requests") or value.get("actions")
+        ):
+            continue
+
+        action_requests = None
+        if isinstance(value, dict):
+            action_requests = value.get("action_requests") or value.get("actions")
+        else:
+            action_requests = getattr(value, "action_requests", None)
+
+        if not action_requests:
+            # 兜底：整包当作一条（非 ask_user）
+            pending.append(
+                {
+                    "name": "tool",
+                    "args": {},
+                    "description": str(value)[:500],
+                    "risk": "操作",
+                }
+            )
+            continue
+
+        for action in action_requests:
+            if isinstance(action, dict):
+                name = action.get("name") or action.get("tool") or "tool"
+                args = action.get("args") or action.get("arguments") or {}
             else:
-                action_requests = getattr(value, "action_requests", None)
-
-            if not action_requests:
-                # 兜底：整包当作一条
-                pending.append(
-                    {
-                        "name": "tool",
-                        "args": {},
-                        "description": str(value)[:500],
-                        "risk": "操作",
-                    }
-                )
-                continue
-
-            for action in action_requests:
-                if isinstance(action, dict):
-                    name = action.get("name") or action.get("tool") or "tool"
-                    args = action.get("args") or action.get("arguments") or {}
-                else:
-                    name = getattr(action, "name", None) or "tool"
-                    args = getattr(action, "args", {}) or {}
-                pending.append(
-                    {
-                        "name": str(name),
-                        "args": args if isinstance(args, dict) else {"raw": str(args)},
-                        "description": f"{name}({args})"[:400],
-                        "risk": risk_label_for_tool(str(name)),
-                    }
-                )
+                name = getattr(action, "name", None) or "tool"
+                args = getattr(action, "args", {}) or {}
+            pending.append(
+                {
+                    "name": str(name),
+                    "args": args if isinstance(args, dict) else {"raw": str(args)},
+                    "description": f"{name}({args})"[:400],
+                    "risk": risk_label_for_tool(str(name)),
+                }
+            )
     return pending
 
 
@@ -472,18 +504,26 @@ class AgentRunner:
         self._cancel = threading.Event()
         self._approval_event = threading.Event()
         self._approval_decisions: list[dict] | None = None
+        self._ask_user_event = threading.Event()
+        self._ask_user_answers: dict | None = None
         self._run_events: list[Any] = []
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
+        self.on_ask_user_needed: Callable[[dict], None] | None = None
 
     def request_cancel(self) -> None:
         self._cancel.set()
-        # 若卡在审批，视为拒绝以解开等待
+        # 若卡在审批/澄清，解开等待
         self.resolve_approval([{"type": "reject", "message": "用户取消运行"}])
+        self.resolve_ask_user({"cancelled": True})
 
     def resolve_approval(self, decisions: list[dict]) -> None:
         self._approval_decisions = decisions
         self._approval_event.set()
+
+    def resolve_ask_user(self, answers: dict) -> None:
+        self._ask_user_answers = answers if isinstance(answers, dict) else {"cancelled": True}
+        self._ask_user_event.set()
 
     def _emit(self, kind: str, content: str, meta: dict | None = None) -> None:
         meta = meta or {}
@@ -516,6 +556,16 @@ class AgentRunner:
                 for _ in range(len(pending) - len(decisions))
             ]
         return decisions[: len(pending) or 1]
+
+    def _wait_ask_user(self, payload: dict) -> dict:
+        self._ask_user_event.clear()
+        self._ask_user_answers = None
+        if self.on_ask_user_needed:
+            self.on_ask_user_needed(payload)
+        while not self._ask_user_event.wait(timeout=0.5):
+            if self._cancel.is_set():
+                return {"cancelled": True}
+        return self._ask_user_answers or {"cancelled": True}
 
     def build_agent(self, req: RunRequest, *, mode: str = "run"):
         """构建完整能力 Agent。
@@ -611,7 +661,8 @@ class AgentRunner:
                 "用户提问**可以与项目目标无关**；请正常回答并在需要时调用工具。\n"
                 "可用能力：web_search / http_get / http_request、文件读写/搜索、"
                 "execute 本机命令、Skills（/skills/）、MCP（若已加载）、"
-                "get_project_info / update_project_title / update_project_goal。\n"
+                "get_project_info / update_project_title / update_project_goal、ask_user（澄清意图）。\n"
+                "意图不清时必须先调用 ask_user 弹窗提问（单选/多选），禁止擅自猜测关键选择。\n"
                 "**严禁**访问 archives/。\n"
                 "当用户要求改名、改目标，或「根据对话总结后更新目标/名称」时，"
                 "请先理解对话再调用项目工具，并用中文确认。\n"
@@ -634,6 +685,7 @@ class AgentRunner:
                 "若已加载 MCP 工具，可直接调用它们完成外部系统操作。\n"
                 "需要实时信息（天气、新闻、资料）时，必须先联网查询，禁止凭空编造数据；"
                 "若查询失败再说明原因并给出备选方案。\n"
+                "意图不清或有多种做法时：先调用 ask_user 弹窗向用户提问（单选/多选），再继续。\n"
                 "项目经验在 memory/experiences/；本次只注入**最新一份**；"
                 "关注实现步骤 / 执行顺序 / 运行环境 / 注意事项，忽略结果与产物描述。\n"
                 "开干前先对照执行顺序 / 成功路径 / 注意事项；主机按 pipeline.json 的 steps 顺序推进，"
@@ -660,7 +712,14 @@ class AgentRunner:
             settings=self.settings,
             emit=self._emit,
         )
-        tools = list(NETWORK_TOOLS) + list(project_tools) + list(mcp_tools)
+        tools = (
+            list(NETWORK_TOOLS)
+            + list(project_tools)
+            + [build_ask_user_tool()]
+            + list(mcp_tools)
+        )
+        # ask_user 在工具内 interrupt，绝不能再套一层 interrupt_on
+        interrupt_on.pop("ask_user", None)
 
         agent_name = (
             f"wokbee-chat-{req.project.id}"
@@ -755,6 +814,30 @@ class AgentRunner:
             guard += 1
             if self._cancel.is_set():
                 return _cancel_result()
+
+            # 优先处理澄清提问（ask_user），与工具审批分流
+            ask_payload = _first_ask_user_payload(agent, config)
+            if ask_payload:
+                n = len(ask_payload.get("questions") or [])
+                self._emit(
+                    "info",
+                    f"AI 需要你澄清意图（{n} 题），请在弹窗中作答…",
+                    {"ask_user": ask_payload},
+                )
+                answers = self._wait_ask_user(ask_payload)
+                if self._cancel.is_set():
+                    return _cancel_result()
+                if answers.get("cancelled"):
+                    self._emit("info", "你取消了澄清提问。")
+                else:
+                    self._emit("info", "已收到你的澄清回答，继续执行…")
+                self._stream_until_pause(
+                    agent,
+                    Command(resume=answers),
+                    config,
+                    seen_msg_ids,
+                )
+                continue
 
             pending = _pending_from_state(agent, config)
             if not pending:

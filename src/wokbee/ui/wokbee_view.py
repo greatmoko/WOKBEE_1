@@ -53,6 +53,7 @@ from wokbee.engine.lessons import (
 )
 from wokbee.engine.runner import AgentRunner, RunRequest, resolve_model_for_project
 from wokbee.engine.worker import AgentWorker, LessonWorker
+from wokbee.ui.ask_user_dialog import AskUserDialog
 from wokbee.ui.settings_workspace import (
     apply_flags_to_checks,
     build_approval_checkboxes,
@@ -634,6 +635,13 @@ class _ProjectItem(QFrame):
             "background: transparent; border: none;"
         )
         top.addWidget(title, 1)
+        if p.pinned:
+            pin = QLabel("📌")
+            pin.setStyleSheet(
+                "font-size: 11px; background: transparent; border: none;"
+            )
+            pin.setFixedWidth(16)
+            top.addWidget(pin, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(top)
 
         try:
@@ -790,8 +798,15 @@ class _ProjectSidebar(QFrame):
         """)
         rename_a = menu.addAction("重命名")
         open_a = menu.addAction("打开工作文件夹")
+        project = self.store.get(project_id)
+        pin_a = menu.addAction(
+            "取消置顶" if project and project.pinned else "置顶"
+        )
         menu.addSeparator()
         del_a = menu.addAction("删除（移入回收）")
+        if project and project.pinned:
+            del_a.setEnabled(False)
+            del_a.setText("删除（请先取消置顶）")
         action = menu.exec(pos)
         if action == rename_a:
             project = self.store.get(project_id)
@@ -814,7 +829,14 @@ class _ProjectSidebar(QFrame):
         elif action == open_a:
             path = self.store.path_for(project_id)
             _open_in_explorer(path)
+        elif action == pin_a:
+            self.store.toggle_pin(project_id)
+            self.refresh()
+            self.project_changed.emit()
         elif action == del_a:
+            project = self.store.get(project_id)
+            if project and project.pinned:
+                return
             if _confirm(
                 self,
                 self.theme,
@@ -822,7 +844,8 @@ class _ProjectSidebar(QFrame):
                 f"确定将该项目移入工作区 _trash？\n"
                 f"回收站最多保留 {TRASH_RETENTION_DAYS} 天，过期将永久删除。",
             ):
-                self.store.delete(project_id, trash=True)
+                if not self.store.delete(project_id, trash=True):
+                    return
                 if self._selected_id == project_id:
                     self._selected_id = None
                 self.refresh()
@@ -1215,7 +1238,10 @@ class _ExpandableBody(QWidget):
         self._toggle.setStyleSheet(
             f"QPushButton {{ color: {c['accent']}; font-size: 12px; border: none; "
             f"text-align: left; padding: 0; background: transparent; }}"
-            f"QPushButton:hover {{ color: {c.get('accent_light', c['accent'])}; }}"
+            f"QPushButton:hover {{ color: {c.get('accent_hover', '#06ad56')}; "
+            f"background: transparent; }}"
+            f"QPushButton:pressed {{ color: {c.get('accent_hover', '#06ad56')}; "
+            f"background: transparent; }}"
         )
         self._toggle.clicked.connect(self._on_toggle)
         lay.addWidget(self._toggle)
@@ -2233,6 +2259,7 @@ class _ProjectWorkspace(QWidget):
         self._worker = AgentWorker(self._runner, req, parent=self, mode="chat")
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
+        self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
         self._actions.hide_approval()
@@ -2322,6 +2349,7 @@ class _ProjectWorkspace(QWidget):
         self._worker = AgentWorker(self._runner, req, parent=self, mode="run")
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
+        self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
         self._actions.hide_approval()
@@ -2370,6 +2398,22 @@ class _ProjectWorkspace(QWidget):
                 current_step="等待审批",
             )
             self._schedule_essentials_refresh()
+
+    def _on_ask_user_needed(self, payload: object):
+        """主线程弹窗收集澄清答案，再回传后台 Agent。"""
+        data = payload if isinstance(payload, dict) else {"type": "ask_user", "questions": []}
+        if self._project_id:
+            self.store.set_status(
+                self._project_id,
+                ProjectStatus.AWAITING_APPROVAL,
+                current_step="等待澄清意图",
+            )
+            self._schedule_essentials_refresh()
+        dlg = AskUserDialog(data, self.theme, parent=self.window() or self)
+        accepted = dlg.exec() == AskUserDialog.DialogCode.Accepted
+        answers = dlg.result_payload() if accepted else {"cancelled": True}
+        if self._worker and self._worker.isRunning():
+            self._worker.resolve_ask_user(answers)
 
     def _on_approve(self):
         if self._worker and self._worker.isRunning():

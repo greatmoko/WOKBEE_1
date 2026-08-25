@@ -151,8 +151,17 @@ class ProjectStore:
                 projects.append(Project.from_dict(data))
             except (json.JSONDecodeError, OSError, TypeError) as e:
                 logger.warning("跳过损坏的项目元数据 %s: %s", meta, e)
-        projects.sort(key=lambda p: p.updated_at, reverse=True)
-        return projects
+        pinned = sorted(
+            [p for p in projects if p.pinned],
+            key=lambda p: p.updated_at,
+            reverse=True,
+        )
+        normal = sorted(
+            [p for p in projects if not p.pinned],
+            key=lambda p: p.updated_at,
+            reverse=True,
+        )
+        return pinned + normal
 
     def search(self, keyword: str) -> list[Project]:
         kw = (keyword or "").strip().lower()
@@ -212,6 +221,8 @@ class ProjectStore:
                 project.provider = str(fields["provider"])
             if "model_id" in fields and fields["model_id"] is not None:
                 project.model_id = str(fields["model_id"])
+            if "pinned" in fields and fields["pinned"] is not None:
+                project.pinned = bool(fields["pinned"])
             # 直接写盘（已在锁内，勿再进 save 的同锁递归也可，RLock 安全）
             self.save(project)
             return project
@@ -299,7 +310,18 @@ class ProjectStore:
             fields["progress_total"] = progress_total
         return self.patch(project_id, **fields)
 
+    def toggle_pin(self, project_id: str) -> Project | None:
+        """切换置顶；置顶项目不可删除，防止误操作。"""
+        project = self.get(project_id)
+        if not project:
+            return None
+        return self.patch(project_id, pinned=not project.pinned)
+
     def delete(self, project_id: str, *, trash: bool = True) -> bool:
+        project = self.get(project_id)
+        if project and project.pinned:
+            logger.info("拒绝删除置顶项目：%s", project_id)
+            return False
         root = self.path_for(project_id)
         if not root.exists():
             return False
