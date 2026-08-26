@@ -494,7 +494,7 @@ def build_user_message_for_ai_phase(
         parts.append(
             "请先读取 workspace/script_callback_*.md 中的脚本 callback；"
             "完成后把中间结果写入 workspace/（或最终交付写入 deliverables/）；"
-            "用户上传文件在 uploads/。"
+            "用户上传文件在 uploads/；同名或相近文件以最新修改时间为准。"
         )
 
     # 预告后续阶段，避免 AI 包办

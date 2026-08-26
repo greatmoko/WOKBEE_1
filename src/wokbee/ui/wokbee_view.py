@@ -909,7 +909,7 @@ class _ProjectEssentials(QFrame):
         row1.addWidget(self._title)
 
         self._ai_refine_btn = QPushButton("AI")
-        self._ai_refine_btn.setToolTip("用 AI 根据当前目标与最近记录更新项目名称和目标")
+        self._ai_refine_btn.setToolTip("AI 更新项目名与目标")
         self._ai_refine_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._ai_refine_btn.setFixedSize(32, 28)
         self._ai_refine_btn.setEnabled(False)
@@ -959,7 +959,7 @@ class _ProjectEssentials(QFrame):
         row3.addWidget(self._artifacts, stretch=1)
         self._references = QLabel("参考：—")
         self._references.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
-        self._references.setToolTip("references/ 参考材料（不归档）")
+        self._references.setToolTip("参考材料不归档")
         row3.addWidget(self._references)
         self._uploads = QLabel("上传：—")
         self._uploads.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
@@ -1037,7 +1037,7 @@ class _ProjectEssentials(QFrame):
                 items = count_reference_files(project_root, limit=5)
                 if items:
                     ref_text = ", ".join(items)
-                    self._references.setToolTip("references/ 参考材料（不归档）")
+                    self._references.setToolTip("参考材料不归档")
             except Exception:
                 ref_text = "暂无（目录 references/）"
         self._references.setText(f"参考：{ref_text}")
@@ -2182,14 +2182,10 @@ class _ActionBar(QFrame):
 
         for icon, tip, slot in (
             ("📁", "打开目录", self.open_folder_clicked.emit),
-            ("📦", "交付物：打开 deliverables/ 目录", self.open_deliverables_clicked.emit),
-            ("⬆️", "上传文件到 uploads/，Agent 可读取；运行前会自动归档", self.upload_clicked.emit),
-            ("📝", "总结经验：上一份经验 + 运行日志 + scripts → AI 新建经验", self.summarize_clicked.emit),
-            (
-                "🧹",
-                "清空经验：归档会话，并把 memory 经验与 scripts 一并归档后清空",
-                self.clear_experience_clicked.emit,
-            ),
+            ("📦", "打开交付物目录", self.open_deliverables_clicked.emit),
+            ("⬆️", "上传文件", self.upload_clicked.emit),
+            ("📝", "AI 总结经验", self.summarize_clicked.emit),
+            ("🧹", "清空经验", self.clear_experience_clicked.emit),
         ):
             btn = QPushButton(icon)
             btn.setToolTip(tip)
@@ -2205,7 +2201,7 @@ class _ActionBar(QFrame):
         self._model_combo.setFixedHeight(34)
         self._model_combo.setMinimumWidth(200)
         self._model_combo.setMaximumWidth(320)
-        self._model_combo.setToolTip("切换本项目使用的 AI 模型（来自厂商设置中已启用的模型）")
+        self._model_combo.setToolTip("切换本项目模型")
         self._model_combo.setStyleSheet(f"""
             QComboBox {{
                 background: {c["input_bg"]}; color: {c["text"]};
@@ -2221,15 +2217,12 @@ class _ActionBar(QFrame):
         row.addWidget(self._model_combo)
 
         self._ctx_ring = ContextUsageRing(self.theme)
-        self._ctx_ring.setToolTip("上下文用量（点击压缩）")
+        self._ctx_ring.setToolTip("上下文用量")
         self._ctx_ring.compress_clicked.connect(self.compress_clicked.emit)
         row.addWidget(self._ctx_ring)
 
         self._cache_label = QLabel("")
-        self._cache_label.setToolTip(
-            "DeepSeek 前缀缓存：本轮命中率 · 会话累计命中率\n"
-            "对齐 Reasonix 双指标；无用量时为空"
-        )
+        self._cache_label.setToolTip("DeepSeek 缓存命中率")
         self._cache_label.setStyleSheet(
             f"font-size: 11px; color: {c['text_hint']}; padding: 0 4px;"
         )
@@ -3213,7 +3206,7 @@ class _ProjectWorkspace(QWidget):
             content=(
                 f"已上传 {len(saved)} 个文件到 uploads/：\n"
                 + "\n".join(f"- `{n}`" for n in saved)
-                + "\nAgent 运行时可直接读取调用；归档时会一并归档。"
+                + "\nAgent 运行时可直接读取调用；归档时保留上传资料，不会清空。"
             ),
         )
         self.store.append_event(self._project_id, ev)
@@ -3396,9 +3389,9 @@ class _ProjectWorkspace(QWidget):
             self.theme,
             "清空经验",
             "确认后将：\n"
-            "• 执行一次归档（对话、工作区、交付物、上传等）\n"
+            "• 执行一次归档（对话、工作区、交付物等；uploads 上传资料保留）\n"
             "• 并把 memory/ 经验文档与 scripts/ 本地脚本一并归档后清空\n"
-            "• 保留：项目名称、目标、审核策略\n"
+            "• 保留：项目名称、目标、审核策略、uploads/\n"
             f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n"
             "• 之后 Agent 禁止访问 archives/\n\n"
             "是否继续？",

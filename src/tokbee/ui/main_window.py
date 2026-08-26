@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
 from tokbee import __app_name__, __version__
 from tokbee.core.config import Config
 from tokbee.ui.styles.theme import Theme
-from tokbee.ui.styles.system import apply_app_tooltip_style
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
 
@@ -31,7 +30,7 @@ class _PrimaryNav(QFrame):
     # position: "top" 正常顺序, "bottom" 贴底
     NAV_ITEMS = [
         ("chat",       "chat",  "TokBee",  18, "top"),
-        ("wokbee",     "logo",  "WokBee",  18, "top"),
+        ("wokbee",     "🐝",    "WokBee",  18, "top"),
         ("autobee",    "⏰",    "AutoBee", 18, "top"),
         ("automation", "⚡",    "AIConfig",  20, "top"),
         ("settings",   "⚙",    "Settings",    22, "bottom"),
@@ -205,7 +204,6 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         self.setStyleSheet(self.theme.stylesheet())
-        apply_app_tooltip_style(None, self.theme.colors)
 
     def _build_layout(self):
         central = QWidget()

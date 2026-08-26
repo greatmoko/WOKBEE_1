@@ -240,7 +240,7 @@ class _TaskItem(QFrame):
         toggle = QPushButton("停用" if t.enabled else "启用")
         toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         toggle.setFixedSize(44, 22)
-        toggle.setToolTip("停用后不再按计划触发；可随时重新启用" if t.enabled else "启用后按 cron 计划触发")
+        toggle.setToolTip("停用定时" if t.enabled else "启用定时")
         if t.enabled:
             toggle.setStyleSheet(f"""
                 QPushButton {{
@@ -532,7 +532,7 @@ class _TaskDetail(QWidget):
         self._gen_combo = QComboBox()
         self._gen_combo.setFixedHeight(34)
         self._gen_combo.setMinimumWidth(160)
-        self._gen_combo.setToolTip("AI 生成所用模型（初始为默认模型）")
+        self._gen_combo.setToolTip("AI 生成所用模型")
         apply_combo_popup_style(self._gen_combo, c, rounded=True)
         ai_row.addWidget(self._gen_combo, 1)
 

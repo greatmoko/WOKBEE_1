@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QPoint, QObject, QEvent
+from PySide6.QtCore import Qt, QSize, QPoint
 from PySide6.QtGui import QColor, QImage, QPainter, QPolygon, QPalette
 from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QComboBox, QFrame,
     QStyleFactory, QApplication, QLineEdit, QCheckBox, QAbstractSpinBox,
-    QPushButton, QTextEdit, QLabel, QToolTip,
+    QPushButton, QTextEdit, QLabel,
 )
 
 # 资源目录：src/tokbee/resources
@@ -306,87 +306,6 @@ def checkbox_qss(colors: dict) -> str:
             background: {border}; border-color: {border};
         }}
     """
-
-
-def tooltip_qss(colors: dict) -> str:
-    """悬停浮层：黑字白底；带边框以便 border-radius 在更多平台生效。"""
-    bg = colors.get("tooltip_bg", "#ffffff")
-    text = colors.get("tooltip_text", colors.get("text", "#1a1a1a"))
-    border = colors.get("tooltip_border", colors.get("input_border", "#e0e0e0"))
-    r = RADIUS
-    return f"""
-        QToolTip {{
-            background-color: {bg};
-            color: {text};
-            border: 1px solid {border};
-            border-radius: {r}px;
-            padding: 6px 10px;
-            font-size: 12px;
-        }}
-    """
-
-
-class _TooltipShadowFixFilter(QObject):
-    """去掉 Windows 系统投影：投影为直角，会盖住 QToolTip 右下圆角。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._fixing: set[int] = set()
-
-    def eventFilter(self, obj, event):  # noqa: N802
-        if event.type() != QEvent.Type.Show or obj is None:
-            return False
-        try:
-            if obj.metaObject().className() != "QTipLabel":
-                return False
-        except Exception:
-            return False
-        oid = id(obj)
-        if oid in self._fixing:
-            return False
-        flags = obj.windowFlags()
-        if flags & Qt.WindowType.NoDropShadowWindowHint:
-            return False
-        self._fixing.add(oid)
-        try:
-            obj.setWindowFlags(
-                flags
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.NoDropShadowWindowHint
-            )
-            obj.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-            obj.show()
-        finally:
-            self._fixing.discard(oid)
-        return False
-
-
-_tooltip_filter: _TooltipShadowFixFilter | None = None
-
-
-def apply_app_tooltip_style(app: QApplication | None, colors: dict):
-    """应用全局 Tooltip 配色（QSS + Palette）；并去掉系统阴影以保留四角圆角。"""
-    global _tooltip_filter
-    if app is None:
-        app = QApplication.instance()
-    if app is None:
-        return
-    bg = QColor(colors.get("tooltip_bg", "#ffffff"))
-    text = QColor(colors.get("tooltip_text", colors.get("text", "#1a1a1a")))
-    pal = app.palette()
-    pal.setColor(QPalette.ColorRole.ToolTipBase, bg)
-    pal.setColor(QPalette.ColorRole.ToolTipText, text)
-    app.setPalette(pal)
-    tip_pal = QToolTip.palette()
-    tip_pal.setColor(QPalette.ColorRole.ToolTipBase, bg)
-    tip_pal.setColor(QPalette.ColorRole.ToolTipText, text)
-    tip_pal.setColor(QPalette.ColorRole.Window, bg)
-    tip_pal.setColor(QPalette.ColorRole.WindowText, text)
-    QToolTip.setPalette(tip_pal)
-
-    if _tooltip_filter is None:
-        _tooltip_filter = _TooltipShadowFixFilter(app)
-        app.installEventFilter(_tooltip_filter)
 
 
 def hint_label_qss(colors: dict) -> str:

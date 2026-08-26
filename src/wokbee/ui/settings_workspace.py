@@ -69,10 +69,10 @@ def build_approval_checkboxes(
     lay.setSpacing(6)
 
     defs = [
-        ("skip_read", "读免审", "读取文件、列目录、检索等只读操作无需审批"),
-        ("skip_write", "写免审", "创建/修改文件、写类 API 等无需审批"),
-        ("skip_routine", "常规操作免审", "常规命令、非破坏性工具调用无需审批"),
-        ("skip_high_risk", "高危操作免审", "删除、安装依赖、高危系统命令等无需审批"),
+        ("skip_read", "读免审", "读操作免审"),
+        ("skip_write", "写免审", "写操作免审"),
+        ("skip_routine", "常规操作免审", "常规操作免审"),
+        ("skip_high_risk", "高危操作免审", "高危操作免审"),
     ]
     checks: dict[str, QCheckBox] = {}
     cb_qss = checkbox_qss(c)
@@ -169,7 +169,7 @@ class WokBeeSettingsWorkspace(QWidget):
         bl.addLayout(ws_row)
         hint = QLabel(
             "新建项目将创建：memory|workspace|deliverables|uploads|runs|archives|scripts…；"
-            "交付物→deliverables/；上传→uploads/（均可归档）；"
+            "交付物→deliverables/；上传→uploads/（归档时保留）；"
             "经验→memory/experiences/exp_时间戳.md（只加载最新）；"
             "Agent 禁止访问 archives/；Skills 全局挂载不复制"
         )
@@ -215,7 +215,7 @@ class WokBeeSettingsWorkspace(QWidget):
         self._max_steps.setRange(1, 500)
         self._max_steps.setFixedWidth(100)
         self._max_steps.setStyleSheet(spin_qss)
-        self._max_steps.setToolTip("单次 Agent 对话/推理相关步数参考上限")
+        self._max_steps.setToolTip("Agent 步数上限")
         limits.addWidget(self._max_steps)
         max_par_lbl = QLabel("最大并行工具")
         max_par_lbl.setStyleSheet(lbl_qss)
@@ -232,10 +232,7 @@ class WokBeeSettingsWorkspace(QWidget):
         self._max_phases.setRange(1, 500)
         self._max_phases.setFixedWidth(100)
         self._max_phases.setStyleSheet(spin_qss)
-        self._max_phases.setToolTip(
-            "运行时按 pipeline.json 推进的阶段次数上限"
-            "（连续同类步骤算一阶段；如 script→AI→script 为 3 阶段）"
-        )
+        self._max_phases.setToolTip("pipeline 阶段上限")
         limits.addWidget(self._max_phases)
         limits.addStretch()
         bl.addLayout(limits)
@@ -259,10 +256,7 @@ class WokBeeSettingsWorkspace(QWidget):
         self._ai_interval.setFixedWidth(120)
         self._ai_interval.setSuffix(" ms")
         self._ai_interval.setStyleSheet(spin_qss)
-        self._ai_interval.setToolTip(
-            "两次调用 AI 接口「发起时间」的最小间隔；0 = 不限制。"
-            "用于本地模型短时调用限流。"
-        )
+        self._ai_interval.setToolTip("AI 调用最小间隔")
         ai_int_row.addWidget(self._ai_interval)
         ai_int_row.addStretch()
         bl.addLayout(ai_int_row)
@@ -278,9 +272,7 @@ class WokBeeSettingsWorkspace(QWidget):
         ds_box.setSpacing(4)
         self._enable_search = QCheckBox("启用 DeepSeek 服务端搜索工具")
         self._enable_search.setStyleSheet(checkbox_qss(c))
-        self._enable_search.setToolTip(
-            "需在「厂商设置」添加 DeepSeek 官方 API；主模型可用其他模型。"
-        )
+        self._enable_search.setToolTip("需 DeepSeek 官方 API")
         ds_box.addWidget(self._enable_search)
         ds_hint = QLabel(
             "把 DeepSeek 官方联网搜索包成工具给 Agent 用（多轮检索+引用）。"

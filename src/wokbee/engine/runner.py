@@ -118,7 +118,8 @@ def _ensure_memory_files(project_root: Path, project: Project) -> None:
         "你是具备完整联网能力的本地工作助手（非离线沙箱）。\n"
         "优先使用 `web_search` / `http_get` 获取实时信息；需要时可用 `execute` 跑本机命令。\n"
         "工作文件放 `workspace/`；最终交付物放 `deliverables/`；"
-        "用户上传文件在 `uploads/`（可直接读取调用）；"
+        "用户上传文件在 `uploads/`（可直接读取调用；"
+        "若有同名或内容相近的多份文件，默认以修改时间最新的一份为准）；"
         "参考材料放 `references/`（第三方代码/登录/环境参数/用到的 Skills 快照，归档时不清理）。\n"
         "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、配置、"
         "环境参数与登录信息保存到 `references/`，并在 `references/MANIFEST.md` 登记，确保下次能稳定复跑；"
@@ -1627,7 +1628,8 @@ class AgentRunner:
                 if outcome == "success":
                     path_f = (
                         "1. 明确目标与约束\n"
-                        "2. 使用联网工具或读取 uploads/ 获取真实数据（禁止用 archives/）\n"
+                        "2. 使用联网工具或读取 uploads/ 获取真实数据（禁止用 archives/；"
+                        "同名或相近文件以最新修改时间为准）\n"
                         "3. 在 workspace/ 起草，最终写入 deliverables/\n"
                         "4. 用中文说明过程与数据来源（经验中不记录结果正文）"
                     )

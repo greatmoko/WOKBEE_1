@@ -69,7 +69,7 @@ class _ModelSettingsPopup(QFrame):
         self._ctx_spin.setRange(0, 10_000_000)
         self._ctx_spin.setSingleStep(1024)
         self._ctx_spin.setValue(int(model.context_window or 0))
-        self._ctx_spin.setToolTip("tokens；0 表示未设置")
+        self._ctx_spin.setToolTip("0 表示未设置 tokens")
         self._ctx_spin.setMinimumWidth(120)
         self._ctx_spin.setStyleSheet(f"""
             QSpinBox {{

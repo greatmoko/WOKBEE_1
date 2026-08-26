@@ -692,6 +692,7 @@ def infer_ai_steps(goal: str, summary: str, script_count: int) -> list[AiStep]:
                 prompt_hint=(
                     "基于 workspace/script_callback_*.md 与 ai_extract.md 完成创作/成文；"
                     "最终写入 deliverables/；用户上传在 uploads/ 请直接读取；"
+                    "同名或相近文件以最新修改时间为准；"
                     "禁止编造脚本未提供的事实；若数据不足再说明，勿重复跑已成功的拉取脚本"
                 ),
             )

@@ -42,9 +42,6 @@ COLORS = {
     "scrollbar": "#d0d0d0",
     "scrollbar_hover": "#b0b0b0",
     "tag_bg": "#f0f0f0",
-    "tooltip_bg": "#ffffff",
-    "tooltip_text": "#1a1a1a",
-    "tooltip_border": "#e0e0e0",
 }
 
 
@@ -105,15 +102,5 @@ class Theme:
             }}
             QLineEdit[readOnly="true"] {{
                 color: {c["text_hint"]};
-            }}
-
-            /* --- 工具提示：黑字白底；带边框以便圆角尽量生效 --- */
-            QToolTip {{
-                background-color: {c["tooltip_bg"]};
-                color: {c["tooltip_text"]};
-                border: 1px solid {c["tooltip_border"]};
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-size: 12px;
             }}
         """

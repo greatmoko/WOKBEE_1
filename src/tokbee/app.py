@@ -12,7 +12,7 @@ os.environ.setdefault(
 )
 
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyleFactory
 
 from tokbee.ui.main_window import MainWindow
 from tokbee.ui.styles.theme import Theme
@@ -44,6 +44,15 @@ def _pick_ui_font() -> QFont:
     return font
 
 
+def _pick_qt_style() -> str:
+    """Windows 用系统原生样式，Tooltip 由 OS 绘制；其它平台用 Fusion。"""
+    if sys.platform == "win32":
+        for name in ("windowsvista", "Windows", "Fusion"):
+            if QStyleFactory.create(name) is not None:
+                return name
+    return "Fusion"
+
+
 class Application:
     """WokBee 应用程序入口类。"""
 
@@ -52,7 +61,7 @@ class Application:
         self.theme = Theme()
 
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
-        self.qt_app.setStyle("Fusion")
+        self.qt_app.setStyle(_pick_qt_style())
         self.qt_app.setApplicationName("WokBee")
         self.qt_app.setFont(_pick_ui_font())
         icon_path = _RESOURCES / "icon.ico"

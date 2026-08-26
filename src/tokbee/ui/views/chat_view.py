@@ -58,7 +58,7 @@ class _InputResizeHandle(QWidget):
         self.theme = theme
         self.setFixedHeight(8)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setToolTip("拖动调整输入框高度")
+        self.setToolTip("拖动调整高度")
         self._dragging = False
         self._last_y = 0
 
@@ -1186,15 +1186,13 @@ class _ChatWorkspace(QWidget):
             display = f"🤖 {self._current_model.model_id}"
             self._model_btn.setText(display)
             ctx = int(self._current_model.context_window or 0)
-            tip = f"{self._current_model.provider_name} / {self._current_model.model_id}"
+            tip = f"{self._current_model.provider_name}/{self._current_model.model_id}"
             if ctx > 0:
-                tip += f"\n上下文窗口: {ctx:,} tokens"
-            else:
-                tip += "\n未设置上下文窗口（可在厂商设置中填写）"
-            self._model_btn.setToolTip(tip)
+                tip = f"{tip} {ctx // 1000}k"
+            self._model_btn.setToolTip(tip[:30])
         else:
             self._model_btn.setText("未配置模型")
-            self._model_btn.setToolTip("请选择已启用的模型")
+            self._model_btn.setToolTip("请选择模型")
         self._refresh_context_ring()
 
     def _show_tip(self, message: str):

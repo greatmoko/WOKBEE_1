@@ -6,7 +6,7 @@ from pathlib import Path
 
 # 每个项目目录下的标准子目录
 # deliverables：项目交付物（归档时一并归档并清空）
-# uploads：用户上传文件（Agent 可读取；归档时一并归档并清空）
+# uploads：用户上传文件（Agent 可读取；归档时保留，不随会话清空）
 # archives：归档快照（自身不再被归档）
 # scripts：可本地复用脚本（不参与归档）
 # references：可复用外部材料（第三方代码/登录/环境参数/用到的 Skills 快照；不参与归档）
@@ -31,13 +31,12 @@ DELIVERABLES_DIR = "deliverables"
 UPLOADS_DIR = "uploads"
 REFERENCES_DIR = "references"
 
-# 归档时复制后清空（不含 archives / memory / scripts / references）
+# 归档时复制后清空（不含 archives / memory / scripts / references / uploads）
 ARCHIVABLE_DIRS = (
     "runs",
     "workspace",
     "artifacts",
     "deliverables",
-    "uploads",
 )
 
 
@@ -68,7 +67,8 @@ def ensure_project_layout(root: Path) -> None:
         try:
             ureadme.write_text(
                 "本目录存放用户上传的文件，Agent 可直接读取调用。\n"
-                "归档时会随本次会话一并归档并清空。\n",
+                "若有同名或内容相近的多份文件，默认以修改时间最新的一份为准。\n"
+                "归档时**不会**归档本目录，上传资料会长期保留。\n",
                 encoding="utf-8",
             )
         except OSError:

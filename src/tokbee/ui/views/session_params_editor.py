@@ -149,7 +149,7 @@ class SessionParamsEditor(QWidget):
         self.auto_compact_chk.setStyleSheet(self._chk_style)
         layout.addWidget(self.auto_compact_chk)
 
-        enable_tip = "勾选后可编辑并随请求发送；不勾选则不传该参数，使用接口默认"
+        enable_tip = "勾选后随请求发送"
         params_row = QHBoxLayout()
         params_row.setSpacing(16)
 

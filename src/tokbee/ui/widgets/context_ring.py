@@ -42,13 +42,12 @@ class ContextUsageRing(QWidget):
 
     def _update_tooltip(self):
         if self._limit <= 0:
-            self.setToolTip("未设置模型上下文窗口\n可在「厂商设置」中为模型填写上下文 tokens")
+            self.setToolTip("未设置上下文窗口")
             return
         pct = min(self._ratio * 100.0, 999.0)
-        tip = f"上下文用量 {self._format(self._used)} / {self._format(self._limit)}（{pct:.1f}%）"
-        if self._enabled_ring:
-            tip += "\n点击压缩对话上下文"
-        self.setToolTip(tip)
+        self.setToolTip(
+            f"上下文 {self._format(self._used)}/{self._format(self._limit)} {pct:.0f}%"
+        )
 
     @staticmethod
     def _format(n: int) -> str:
