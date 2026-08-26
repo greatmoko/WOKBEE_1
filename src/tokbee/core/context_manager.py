@@ -105,7 +105,11 @@ def slice_after_compaction(
     messages: list[dict],
     points: list[dict] | None,
 ) -> tuple[str, list[dict], int]:
-    """返回 (summary, active_messages, boundary_index)。"""
+    """返回 (summary, active_messages, boundary_index)。
+
+    若 compaction point 带 pin_end（Reasonix 式钉住前缀），则保留
+    messages[:pin_end] 不被 boundary 吃掉，避免压缩破坏稳定任务头。
+    """
     cp = latest_compaction(points)
     if not cp:
         return "", list(messages), 0
@@ -113,8 +117,15 @@ def slice_after_compaction(
         boundary = int(cp.get("boundary_index", 0))
     except (TypeError, ValueError):
         boundary = 0
+    try:
+        pin_end = int(cp.get("pin_end", 0) or 0)
+    except (TypeError, ValueError):
+        pin_end = 0
     boundary = max(0, min(boundary, len(messages)))
+    pin_end = max(0, min(pin_end, len(messages)))
     summary = str(cp.get("summary") or "").strip()
+    if pin_end > 0 and pin_end < boundary:
+        return summary, list(messages[:pin_end]) + list(messages[boundary:]), boundary
     return summary, list(messages[boundary:]), boundary
 
 
@@ -152,15 +163,24 @@ def trim_to_token_budget(
     return msgs
 
 
-def find_compaction_cut(active: list[dict], retain_ratio: float = RETAIN_RECENT_RATIO) -> int:
-    """返回 active 内的切分下标：[:cut] 将被摘要，[cut:] 保留。切在 user 消息上。"""
-    if len(active) < 4:
+def find_compaction_cut(
+    active: list[dict],
+    retain_ratio: float = RETAIN_RECENT_RATIO,
+    *,
+    pin_head: int = 0,
+) -> int:
+    """返回 active 内的切分下标：[pin_head:cut] 将被摘要，钉住头 + [cut:] 保留。
+
+    pin_head：保留开头若干条（通常为首条任务 user），对齐 Reasonix pinned prefix。
+    """
+    pin_head = max(0, int(pin_head or 0))
+    if len(active) < 4 + pin_head:
         return -1
     retain = max(2, int(len(active) * retain_ratio))
     cut = len(active) - retain
-    while cut > 0 and active[cut].get("role") != "user":
+    while cut > pin_head and active[cut].get("role") != "user":
         cut -= 1
-    if cut < 1:
+    if cut <= pin_head:
         return -1
     return cut
 
@@ -243,13 +263,21 @@ def append_compaction_point(
     *,
     summary: str,
     boundary_index: int,
+    pin_end: int | None = None,
 ) -> list[dict]:
     out = list(points or [])
-    out.append({
+    entry: dict = {
         "summary": summary,
         "boundary_index": int(boundary_index),
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    })
+    }
+    if pin_end is not None:
+        entry["pin_end"] = int(pin_end)
+    elif out:
+        prev_pin = out[-1].get("pin_end")
+        if prev_pin is not None:
+            entry["pin_end"] = int(prev_pin)
+    out.append(entry)
     return out
 
 
@@ -305,19 +333,45 @@ def needs_compaction(
 def plan_compaction(
     messages: list[dict],
     points: list[dict] | None,
-) -> tuple[list[dict], list[dict], int, str] | None:
+) -> tuple[list[dict], list[dict], int, str, int] | None:
     """
     规划一次压缩。
-    返回 (to_compact, retained, new_boundary_index, previous_summary)；无法压缩时 None。
+    返回 (to_compact, retained, new_boundary_index, previous_summary, pin_end)；无法压缩时 None。
+
+    pin_end：全量 messages 中钉住前缀的结束下标（不含），通常为首条 user 之后。
     """
     summary, active, boundary = slice_after_compaction(messages, points)
-    cut = find_compaction_cut(active)
+    prev = latest_compaction(points)
+    pin_end = 0
+    if prev:
+        try:
+            pin_end = int(prev.get("pin_end", 0) or 0)
+        except (TypeError, ValueError):
+            pin_end = 0
+    if pin_end <= 0:
+        for i, m in enumerate(messages or []):
+            if (m.get("role") or "") == "user":
+                pin_end = i + 1
+                break
+
+    pin_head = 0
+    if pin_end > 0 and boundary == 0:
+        pin_head = min(pin_end, len(active))
+    elif pin_end > 0 and pin_end < boundary:
+        pin_head = min(pin_end, len(active))
+
+    cut = find_compaction_cut(active, pin_head=pin_head)
     if cut < 0:
         return None
-    to_compact = active[:cut]
-    retained = active[cut:]
-    new_boundary = boundary + cut
-    return to_compact, retained, new_boundary, summary
+    to_compact = active[pin_head:cut]
+    retained = active[:pin_head] + active[cut:]
+    if not to_compact:
+        return None
+    if pin_end > 0 and pin_end < boundary:
+        new_boundary = boundary + (cut - pin_head)
+    else:
+        new_boundary = boundary + cut
+    return to_compact, retained, new_boundary, summary, pin_end
 
 
 def build_context_message_dicts(

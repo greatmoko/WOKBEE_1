@@ -16,7 +16,7 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame, QLabel, QPushButton,
     QLineEdit, QScrollArea, QTextEdit, QSizePolicy, QDialog,
-    QMenu, QFileDialog, QComboBox, QTextBrowser,
+    QMenu, QFileDialog, QComboBox, QTextBrowser, QApplication,
 )
 
 from tokbee.ui.styles.theme import Theme
@@ -36,6 +36,7 @@ from wokbee.core.models import (
 from wokbee.core.paths import (
     deliverables_dir,
     list_deliverable_names,
+    references_dir,
     uploads_dir,
 )
 from wokbee.core.project_store import ProjectStore, TRASH_RETENTION_DAYS, MAX_ARCHIVES
@@ -84,7 +85,7 @@ TITLE_FROM_GOAL_LEN = MAX_PROJECT_TITLE_LEN
 class _CompactWorker(QThread):
     """后台生成上下文摘要，写入 compaction point。"""
 
-    finished = Signal(str, int)  # summary, boundary_index
+    finished = Signal(str, int, int)  # summary, boundary_index, pin_end
     failed = Signal(str)
 
     def __init__(
@@ -94,12 +95,15 @@ class _CompactWorker(QThread):
         previous_summary: str,
         new_boundary: int,
         parent=None,
+        *,
+        pin_end: int = 0,
     ):
         super().__init__(parent)
         self._client = client
         self._to_compact = to_compact
         self._previous_summary = previous_summary
         self._new_boundary = new_boundary
+        self._pin_end = int(pin_end or 0)
 
     def run(self):
         summary = ""
@@ -121,7 +125,7 @@ class _CompactWorker(QThread):
         if not summary.strip():
             self.failed.emit("无法生成摘要")
             return
-        self.finished.emit(summary, self._new_boundary)
+        self.finished.emit(summary, self._new_boundary, self._pin_end)
 
 
 class _RefineMetaWorker(QThread):
@@ -798,6 +802,7 @@ class _ProjectSidebar(QFrame):
         """)
         rename_a = menu.addAction("重命名")
         open_a = menu.addAction("打开工作文件夹")
+        copy_a = menu.addAction("复制项目 ID")
         project = self.store.get(project_id)
         pin_a = menu.addAction(
             "取消置顶" if project and project.pinned else "置顶"
@@ -829,6 +834,9 @@ class _ProjectSidebar(QFrame):
         elif action == open_a:
             path = self.store.path_for(project_id)
             _open_in_explorer(path)
+        elif action == copy_a:
+            QApplication.clipboard().setText(project_id)
+            _tip(self, self.theme, f"已复制项目 ID：{project_id}", "复制成功")
         elif action == pin_a:
             self.store.toggle_pin(project_id)
             self.refresh()
@@ -951,6 +959,10 @@ class _ProjectEssentials(QFrame):
         self._artifacts = QLabel("交付物：—")
         self._artifacts.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
         row3.addWidget(self._artifacts, stretch=1)
+        self._references = QLabel("参考：—")
+        self._references.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        self._references.setToolTip("references/ 参考材料（不归档）")
+        row3.addWidget(self._references)
         self._uploads = QLabel("上传：—")
         self._uploads.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
         row3.addWidget(self._uploads)
@@ -1018,6 +1030,19 @@ class _ProjectEssentials(QFrame):
                 if ups:
                     up_text = ", ".join(ups)
         self._uploads.setText(f"上传：{up_text}")
+
+        ref_text = "暂无（目录 references/）"
+        if project_root is not None:
+            try:
+                from wokbee.core.references import count_reference_files
+
+                items = count_reference_files(project_root, limit=5)
+                if items:
+                    ref_text = ", ".join(items)
+                    self._references.setToolTip("references/ 参考材料（不归档；点击「🗂」打开目录）")
+            except Exception:
+                ref_text = "暂无（目录 references/）"
+        self._references.setText(f"参考：{ref_text}")
 
         summary = project.approval.summary()
         self._policy.setText(f"策略：{summary}")
@@ -1135,6 +1160,18 @@ class _AutoHeightMd(QTextBrowser):
         self.setMarkdown(_stabilize_markdown(text or ""))
         self._update_height()
 
+    def set_danger(self, danger: bool):
+        c = self.theme.colors
+        color = c.get("danger", "#c0392b") if danger else c["text"]
+        self.setStyleSheet(f"""
+            QTextBrowser {{
+                background: transparent; border: none;
+                font-size: 13px; color: {color};
+                padding: 0;
+            }}
+            QTextBrowser a {{ color: {c.get("accent", "#2f6fed")}; }}
+        """)
+
 
 def _tool_event_display_text(ev: ProjectEvent) -> str:
     """工具气泡正文：优先用结构化 meta 格式化，避免 call 挤成一行。"""
@@ -1219,12 +1256,25 @@ def _tool_event_display_text(ev: ProjectEvent) -> str:
 class _ExpandableBody(QWidget):
     """正文：Markdown 渲染；默认高度上限，可展开全部。"""
 
-    def __init__(self, text: str, theme: Theme, *, danger: bool = False, parent=None):
+    def __init__(
+        self,
+        text: str,
+        theme: Theme,
+        *,
+        danger: bool = False,
+        default_collapsed: bool = False,
+        toggle_text: str = "",
+        hide_toggle: bool = False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.theme = theme
         self._full = text or ""
         self._danger = danger
-        self._expanded = False
+        self._default_collapsed = default_collapsed
+        self._toggle_text = toggle_text
+        self._hide_toggle = hide_toggle
+        self._expanded = not default_collapsed
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         c = theme.colors
         lay = QVBoxLayout(self)
@@ -1254,26 +1304,42 @@ class _ExpandableBody(QWidget):
         full = self._full
         if not full:
             return False
+        if self._default_collapsed:
+            return True
         _, need = _preview_text(full)
         if need:
             return True
         # 行少但 Markdown 渲染后仍可能很高：用折叠高度兜底
         return len(full) > BUBBLE_PREVIEW_CHARS or len(full.splitlines()) > BUBBLE_PREVIEW_LINES
 
+    def set_content(self, text: str, *, danger: bool | None = None) -> None:
+        """原位替换内容/配色（工具步骤行用），保持折叠状态。"""
+        self._full = text or ""
+        if danger is not None and danger != self._danger:
+            self._danger = danger
+            self._browser.set_danger(danger)
+        self._apply()
+        QTimer.singleShot(0, self.refresh_height)
+        QTimer.singleShot(30, self.refresh_height)
+
     def _apply(self):
         full = self._full
         need = self._needs_expand()
+        toggle_visible = need and not self._hide_toggle
         if not need or self._expanded:
             self._browser.set_height_cap(0)
             self._browser.set_markdown(full)
-            self._toggle.setVisible(need)
+            self._toggle.setVisible(toggle_visible)
             self._toggle.setText("收起" if need else "")
         else:
             self._browser.set_height_cap(BUBBLE_COLLAPSED_HEIGHT)
             self._browser.set_markdown(full)
-            self._toggle.setVisible(True)
-            n_lines = len(full.splitlines())
-            self._toggle.setText(f"展开全部（{n_lines} 行 / {len(full)} 字）")
+            self._toggle.setVisible(toggle_visible)
+            if self._toggle_text:
+                self._toggle.setText(self._toggle_text)
+            else:
+                n_lines = len(full.splitlines())
+                self._toggle.setText(f"展开全部（{n_lines} 行 / {len(full)} 字）")
 
     def _on_toggle(self):
         self._expanded = not self._expanded
@@ -1283,12 +1349,303 @@ class _ExpandableBody(QWidget):
         QTimer.singleShot(30, self.refresh_height)
 
 
+class _LiveStatusBar(QFrame):
+    """实时状态条：显示「正在思考… / 正在调用工具…」等，配脉冲光点，避免界面像死机。"""
+
+    def __init__(self, theme: Theme, parent=None):
+        super().__init__(parent)
+        self.theme = theme
+        c = theme.colors
+        accent = c.get("accent", "#2f6fed")
+        self.setStyleSheet("background: transparent;")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(6)
+        self._dot = QLabel("●")
+        self._dot.setStyleSheet(
+            f"color: {accent}; font-size: 11px; background: transparent; border: none;"
+        )
+        lay.addWidget(self._dot)
+        self._label = QLabel("")
+        self._label.setStyleSheet(
+            f"font-size: 12px; color: {c['text_hint']}; "
+            "background: transparent; border: none;"
+        )
+        lay.addWidget(self._label)
+        lay.addStretch(1)
+        self.setVisible(False)
+        self._pulse_on = False
+        self._t = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(400)
+
+    def _tick(self):
+        if not self._pulse_on:
+            return
+        self._t += 1
+        self._dot.setText("●" if self._t % 2 == 0 else "◐")
+
+    def set_status(self, text: str):
+        self._label.setText(text or "")
+        self.setVisible(True)
+
+    def set_pulse(self, on: bool):
+        self._pulse_on = bool(on)
+        if not on:
+            self._dot.setText("●")
+
+    def clear(self):
+        self._label.setText("")
+        self._pulse_on = False
+        self.setVisible(False)
+
+
+class _ThinkingBlock(QFrame):
+    """AI 思考块：可折叠的「💭 思考过程」，默认折叠，借鉴 tokbee 的思路。"""
+
+    def __init__(self, text: str, theme: Theme, parent=None):
+        super().__init__(parent)
+        self.theme = theme
+        c = theme.colors
+        accent = c.get("accent", "#2f6fed")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {c.get("accent_light", "#eaf1fe")};
+                border: 1px solid {accent}55;
+                border-left: 3px solid {accent};
+                border-radius: 8px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(4)
+        head = QLabel("💭 思考过程")
+        head.setStyleSheet(
+            f"font-size: 12px; font-weight: bold; color: {accent}; "
+            "background: transparent; border: none;"
+        )
+        lay.addWidget(head)
+        self._body = _ExpandableBody(
+            text or "",
+            self.theme,
+            default_collapsed=True,
+            toggle_text="查看思考",
+        )
+        lay.addWidget(self._body)
+        self.bubble = self  # 作为气泡被 _bubbles 追踪
+
+
+class _ToolStepRow(QFrame):
+    """工具步骤行：把一次「工具调用 call + 结果 callback」合并成一行。
+
+    头行默认只显示 工具名 + 状态chip + 折叠箭头；点击展开可见已传参数与返回详情。
+    状态在 callback 到达时原位更新：running/pending → ok/empty/failed/skipped。
+    """
+
+    STATUS_LABELS = {
+        "running": "调用中",
+        "pending": "待确认",
+        "ok": "成功",
+        "empty": "返回为空",
+        "failed": "失败",
+        "skipped": "未完成",
+    }
+    STATUS_COLORS = {
+        "running": "#f59e0b",
+        "pending": "#f59e0b",
+        "ok": "#10b981",
+        "empty": "#6b7280",
+        "failed": "#ef4444",
+        "skipped": "#9ca3af",
+    }
+    _PULSE = ["调用中", "调用中·", "调用中··", "调用中···"]
+
+    def __init__(
+        self,
+        step_id: str,
+        tool: str,
+        theme: Theme,
+        *,
+        args: dict | None = None,
+        index: int = 0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.step_id = step_id
+        self.tool = (tool or "tool").strip() or "tool"
+        self.theme = theme
+        self._index = index
+        self._status = "running"
+        self._args = args if isinstance(args, dict) else None
+        self._callback_display = ""
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._tick_pulse)
+        self._pulse_i = 0
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
+        self._build()
+        self.set_running(args=self._args)
+
+    def _build(self):
+        c = self.theme.colors
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {c.get("tool_bg", "#fff8e1")};
+                border: 1px solid {c.get("tool_border", "#f2d97e")};
+                border-radius: 10px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(4)
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        label = f"#{self._index} {self.tool}" if self._index else self.tool
+        self._name = QLabel(label)
+        self._name.setStyleSheet(
+            f"font-size: 13px; font-weight: bold; color: {c['text']}; "
+            "background: transparent; border: none;"
+        )
+        header.addWidget(self._name)
+        self._chip = QLabel()
+        self._chip.setStyleSheet(
+            f"font-size: 11px; padding: 0 8px; border-radius: 8px; "
+            f"background: transparent; border: none;"
+        )
+        header.addWidget(self._chip)
+        header.addStretch(1)
+        self._toggle = QPushButton("▸")
+        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle.setFlat(True)
+        self._toggle.setFixedSize(22, 20)
+        self._toggle.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; "
+            f"color: {c['text_hint']}; font-size: 12px; }}"
+        )
+        self._toggle.clicked.connect(self._toggle_body)
+        header.addWidget(self._toggle)
+        lay.addLayout(header)
+        self._body = _ExpandableBody(
+            "",
+            self.theme,
+            default_collapsed=True,
+            hide_toggle=True,
+            toggle_text="查看已传参数与返回",
+        )
+        lay.addWidget(self._body)
+
+    # ── 状态机 ───────────────────────────────────────────────
+    def set_running(self, args: dict | None = None):
+        if args is not None and isinstance(args, dict):
+            self._args = args
+        self._status = "running"
+        if not self._pulse_timer.isActive():
+            self._pulse_timer.start(500)
+        self._apply_header()
+        self._apply_body()
+
+    def set_success(self, callback_content: str):
+        content = (callback_content or "").strip()
+        self._status = "empty" if (not content or "（无输出）" in content) else "ok"
+        self._callback_display = content
+        self._stop_pulse()
+        self._apply_header()
+        self._apply_body()
+
+    def set_failed(self, callback_content: str):
+        content = (callback_content or "").strip()
+        self._status = "failed"
+        self._callback_display = content or (
+            f"**callback:** `{self.tool}`\n\n```\n（工具抛出的错误未返回正文）\n```"
+        )
+        self._stop_pulse()
+        self._apply_header()
+        self._apply_body()
+
+    def set_pending(self):
+        self._status = "pending"
+        self._stop_pulse()
+        self._apply_header()
+        self._apply_body()
+
+    def set_skipped(self):
+        self._status = "skipped"
+        self._stop_pulse()
+        self._apply_header()
+        self._apply_body()
+
+    def _stop_pulse(self):
+        if self._pulse_timer.isActive():
+            self._pulse_timer.stop()
+
+    # ── 内部 ───────────────────────────────────────────────
+    def _tick_pulse(self):
+        if self._status != "running":
+            return
+        self._pulse_i = (self._pulse_i + 1) % len(self._PULSE)
+        self._set_chip(self._PULSE[self._pulse_i], self.STATUS_COLORS["running"])
+
+    def _apply_header(self):
+        label = self.STATUS_LABELS.get(self._status, "调用中")
+        color = self.STATUS_COLORS.get(self._status, "#f59e0b")
+        self._chip.setText(label)
+        self._chip.setStyleSheet(
+            f"font-size: 11px; padding: 0 8px; border-radius: 8px; "
+            f"background: {color}1f; color: {color}; border: none;"
+        )
+
+    def _apply_body(self):
+        self._body.set_content(self._body_text(), danger=(self._status == "failed"))
+
+    def _set_chip(self, text: str, color: str):
+        self._chip.setText(text)
+        self._chip.setStyleSheet(
+            f"font-size: 11px; padding: 0 8px; border-radius: 8px; "
+            f"background: {color}1f; color: {color}; border: none;"
+        )
+
+    def _body_text(self) -> str:
+        parts = []
+        if self._args:
+            try:
+                from wokbee.engine.runner import format_tool_call_for_timeline
+
+                parts.append(format_tool_call_for_timeline(self.tool, self._args))
+            except Exception:
+                parts.append(f"**call:** `{self.tool}`")
+        else:
+            parts.append(f"**call:** `{self.tool}`")
+        if self._callback_display:
+            parts.append(self._callback_display)
+        elif self._status in ("running", "pending"):
+            parts.append(f"**callback:** `{self.tool}`\n\n（等待返回…）")
+        else:
+            parts.append(
+                f"**callback:** `{self.tool}`\n\n（{self.STATUS_LABELS.get(self._status, '—')}）"
+            )
+        return "\n\n".join(parts)
+
+    def _toggle_body(self):
+        self._body._on_toggle()
+        expanded = getattr(self._body, "_expanded", False)
+        self._toggle.setText("▾" if expanded else "▸")
+        QTimer.singleShot(0, self._body.refresh_height)
+        QTimer.singleShot(30, self._body.refresh_height)
+
+
 class _Timeline(QFrame):
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
         self.theme = theme
         self._bubbles: list[QFrame] = []
         self._bodies: list[_ExpandableBody] = []
+        # 工具步骤行注册表（Phase B）：按 tool_call_id 配对 call ↔ callback
+        self._tool_steps: dict[str, _ToolStepRow] = {}
+        self._batch_order: list[str] = []
+        self._unmatched_calls: list[_ToolStepRow] = []
+        self._pending_rows: set[str] = set()
+        self._status_bar: _LiveStatusBar | None = None  # Phase C 填充
         self._build()
 
     def _build(self):
@@ -1296,6 +1653,10 @@ class _Timeline(QFrame):
         self.setStyleSheet(f"_Timeline {{ background: {c['content_bg']}; }}")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._status_bar = _LiveStatusBar(self.theme)
+        layout.addWidget(self._status_bar)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1325,6 +1686,10 @@ class _Timeline(QFrame):
                 item.widget().deleteLater()
         self._bubbles = []
         self._bodies = []
+        self._tool_steps = {}
+        self._batch_order = []
+        self._unmatched_calls = []
+        self._pending_rows = set()
 
     def render_events(self, events: list[ProjectEvent]):
         """完整重绘（仅切换项目 / 归档后使用，运行中勿频繁调用）。"""
@@ -1332,8 +1697,11 @@ class _Timeline(QFrame):
         if not events:
             self.show_empty("尚无执行记录。在下方输入目标或指令，然后点击运行。")
             return
-        for ev in events:
-            self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
+        for widget in self._build_rows_from_events(events):
+            if isinstance(widget, _ToolStepRow):
+                self._track_row(widget)
+                widget = self._wrap_tool_row(widget)
+            self._layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
         self._sync_bubble_widths()
         self._schedule_scroll_to_bottom()
 
@@ -1344,8 +1712,182 @@ class _Timeline(QFrame):
             w = self._layout.itemAt(0).widget()
             if isinstance(w, QLabel) and "尚无执行记录" in (w.text() or ""):
                 self._clear()
-        self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
+        if ev.kind == "tool":
+            self._route_tool_event(ev)
+        else:
+            self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
         self._schedule_scroll_to_bottom()
+
+    def begin_run(self):
+        """一次运行开始：清空配对注册表，显示状态条。"""
+        self._tool_steps.clear()
+        self._batch_order.clear()
+        self._unmatched_calls.clear()
+        self._pending_rows.clear()
+        if self._status_bar is not None:
+            self._status_bar.set_pulse(True)
+            self._status_bar.set_status("正在启动…")
+
+    def end_run(self):
+        """一次运行结束：残留 running 步骤行标记为未完成，隐藏状态条。"""
+        for row in list(self._tool_steps.values()):
+            if row._status == "running":
+                row.set_skipped()
+        for row in self._unmatched_calls:
+            if row._status == "running":
+                row.set_skipped()
+        self._tool_steps.clear()
+        self._batch_order.clear()
+        self._unmatched_calls.clear()
+        self._pending_rows.clear()
+        if self._status_bar is not None:
+            self._status_bar.clear()
+
+    def _track_row(self, row: _ToolStepRow):
+        self._bubbles.append(row)
+        self._bodies.append(row._body)
+
+    def _status(self, text: str, *, pulse: bool = True):
+        if self._status_bar is not None:
+            self._status_bar.set_status(text)
+            if pulse:
+                self._status_bar.set_pulse(True)
+
+    def _route_tool_event(self, ev: ProjectEvent):
+        """把 tool 事件按 call/callback 定位到某个 _ToolStepRow 原位更新。"""
+        meta = ev.meta if isinstance(ev.meta, dict) else {}
+        phase = str(meta.get("phase") or "").lower()
+        tool = str(meta.get("tool") or "").strip() or "tool"
+        tid = str(meta.get("tool_call_id") or "").strip()
+
+        if phase == "call":
+            index = len(self._batch_order) + 1
+            args = meta.get("args") if isinstance(meta.get("args"), dict) else None
+            row = _ToolStepRow(tid or f"call:{id(ev)}", tool, self.theme, args=args, index=index)
+            self._add_row(row)
+            if tid:
+                self._tool_steps[tid] = row
+                self._batch_order.append(tid)
+            else:
+                self._unmatched_calls.append(row)
+            self._status(f"正在调用 {tool}…")
+            return
+
+        if phase == "callback":
+            if tid and tid in self._tool_steps:
+                row = self._tool_steps.pop(tid)
+                if tid in self._batch_order:
+                    self._batch_order.remove(tid)
+                self._finish_tool_row(row, ev)
+            else:
+                row = self._find_unmatched(tool)
+                if row is not None:
+                    self._finish_tool_row(row, ev)
+                else:
+                    # 无配对 call：追加独立 callback 行，绝不丢信息
+                    self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
+            return
+
+        # 其它工具事件（如脚本 snippet）仍用普通气泡
+        self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
+
+    def _add_row(self, row: _ToolStepRow):
+        self._track_row(row)
+        self._layout.addWidget(self._wrap_tool_row(row), 0, Qt.AlignmentFlag.AlignTop)
+        self._sync_bubble_widths()
+
+    def _wrap_tool_row(self, row: _ToolStepRow) -> QWidget:
+        """给工具步骤行套一层与消息气泡一致的外观：左侧头部无 avatar、统一宽度。"""
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(wrapper)
+        h.setContentsMargins(4, 0, 4, 0)
+        h.setSpacing(8)
+        av_bg, av_fg = self._avatar_spec("tool")
+        avatar = QLabel("🔧")
+        avatar.setFixedSize(40, 40)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(
+            f"background: {av_bg}; color: {av_fg}; border-radius: 20px; font-size: 18px;"
+        )
+        h.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
+        h.addWidget(row, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        h.addStretch(1)
+        return wrapper
+
+    def _finish_tool_row(self, row: _ToolStepRow, ev: ProjectEvent):
+        meta = ev.meta if isinstance(ev.meta, dict) else {}
+        if str(meta.get("status") or "success").lower() == "error":
+            row.set_failed(ev.content)
+        else:
+            row.set_success(ev.content)
+        self._status(f"{row.tool} 完成")
+
+    def _find_unmatched(self, tool: str) -> _ToolStepRow | None:
+        for row in self._unmatched_calls:
+            if row.tool == tool and row._status == "running":
+                return row
+        for row in self._tool_steps.values():
+            if row.tool == tool and row._status == "running":
+                return row
+        return None
+
+    def on_approval_pending(self):
+        """审批拦截：把仍在等待返回的工具步骤行标记为「待确认」。"""
+        for row in list(self._tool_steps.values()) + list(self._unmatched_calls):
+            if row._status == "running":
+                row.set_pending()
+                self._pending_rows.add(row.step_id)
+        if self._status_bar is not None:
+            self._status_bar.set_status("等待审批…")
+
+    def resume_after_approval(self, approved: bool):
+        """审批结果回来：通过则恢复 running（清除待确认），拒绝则标未完成。"""
+        for row in list(self._tool_steps.values()) + list(self._unmatched_calls):
+            if row.step_id in self._pending_rows:
+                if approved:
+                    row.set_running()
+                else:
+                    row.set_skipped()
+        self._pending_rows.clear()
+
+    def _build_rows_from_events(self, events: list[ProjectEvent]) -> list[QWidget]:
+        """reload：把历史 tool 事件也按 tool_call_id 配成步骤行（纯函数式）。"""
+        pending: dict[str, _ToolStepRow] = {}
+        out: list[QWidget] = []
+        for ev in events:
+            if ev.kind != "tool":
+                out.append(self._make_row(ev))
+                continue
+            meta = ev.meta if isinstance(ev.meta, dict) else {}
+            phase = str(meta.get("phase") or "").lower()
+            tid = str(meta.get("tool_call_id") or "").strip()
+            tool = str(meta.get("tool") or "").strip() or "tool"
+            if phase == "call":
+                args = meta.get("args") if isinstance(meta.get("args"), dict) else None
+                key = tid or f"__noid__{tool}:{len(out)}"
+                row = _ToolStepRow(key, tool, self.theme, args=args, index=len(out) + 1)
+                out.append(row)
+                pending[key] = row
+            elif phase == "callback":
+                row = None
+                if tid and tid in pending:
+                    row = pending.pop(tid)
+                else:
+                    for k in list(pending):
+                        if pending[k].tool == tool and pending[k]._status == "running":
+                            row = pending.pop(k)
+                            break
+                if row is not None:
+                    if str(meta.get("status") or "success").lower() == "error":
+                        row.set_failed(ev.content)
+                    else:
+                        row.set_success(ev.content)
+                else:
+                    out.append(self._make_row(ev))
+            else:
+                out.append(self._make_row(ev))
+        return out
 
     def _scroll_to_bottom(self):
         bar = self._scroll.verticalScrollBar()
@@ -1406,7 +1948,7 @@ class _Timeline(QFrame):
         specs = {
             "user": (c.get("btn_primary", "#2f6fed"), "#ffffff"),
             "ai": ("#dbeafe", "#1e40af"),
-            "tool": ("#e5e7eb", "#374151"),
+            "tool": ("#fde68a", "#854d0e"),
             "system": ("#f3f4f6", "#4b5563"),
             "error": ("#ffe4e6", c.get("danger", "#e11d48")),
         }
@@ -1424,7 +1966,18 @@ class _Timeline(QFrame):
         }
         return mapping.get(role, (c.get("card_bg", "#fff"), c.get("border", "#e5e7eb")))
 
-    def _role_tag(self, role: str, kind: str) -> str:
+    def _agent_phase_tag(self, phase: str) -> str:
+        return {
+            "reasoning": "思考",
+            "narration": "AI · 执行中",
+            "answer": "AI",
+            "hint": "提示",
+            "lesson": "经验",
+        }.get(phase, "AI")
+
+    def _role_tag(self, role: str, kind: str, phase: str = "") -> str:
+        if role == "ai" and kind == "agent" and phase:
+            return self._agent_phase_tag(phase)
         tags = {
             "user": "用户",
             "ai": "AI",
@@ -1438,10 +1991,15 @@ class _Timeline(QFrame):
         role = _event_ui_role(ev.kind)
         align_right = role == "user"
         c = self.theme.colors
+        meta = ev.meta if isinstance(ev.meta, dict) else {}
+        phase = str(meta.get("phase") or "")
+        is_reasoning = ev.kind == "agent" and phase == "reasoning"
         av_bg, av_fg = self._avatar_spec(role)
-        emoji = self._avatar_emoji(role, ev.kind)
+        emoji = "💭" if is_reasoning else self._avatar_emoji(role, ev.kind)
         bub_bg, bub_border = self._bubble_colors(role)
-        if ev.kind == "approval":
+        if is_reasoning:
+            bub_bg, bub_border = c.get("accent_light", "#eaf1fe"), c.get("accent", "#2f6fed")
+        elif ev.kind == "approval":
             bub_bg, bub_border = ("#fff7e6", "#f59e0b")
         elif ev.kind == "lesson":
             bub_bg, bub_border = ("#ecfdf5", "#6ee7b7")
@@ -1488,7 +2046,7 @@ class _Timeline(QFrame):
         bl = QVBoxLayout(bubble)
         bl.setContentsMargins(12, 8, 12, 8)
         bl.setSpacing(4)
-        tag = self._role_tag(role, ev.kind)
+        tag = self._role_tag(role, ev.kind, phase)
         head = QLabel(f"{tag} · {ev.created_at}")
         head_color = c.get("danger", "#e11d48") if role == "error" else c["text_hint"]
         head.setStyleSheet(
@@ -1500,13 +2058,18 @@ class _Timeline(QFrame):
             if ev.kind == "tool"
             else (ev.content or "")
         )
-        body = _ExpandableBody(
-            display,
-            self.theme,
-            danger=(role == "error"),
-        )
-        self._bodies.append(body)
-        bl.addWidget(body)
+        if is_reasoning:
+            thinking = _ThinkingBlock(display, self.theme)
+            self._bodies.append(thinking._body)
+            bl.addWidget(thinking)
+        else:
+            body = _ExpandableBody(
+                display,
+                self.theme,
+                danger=(role == "error"),
+            )
+            self._bodies.append(body)
+            bl.addWidget(body)
 
         if align_right:
             h.addStretch(1)
@@ -1529,6 +2092,8 @@ class _ActionBar(QFrame):
     clear_experience_clicked = Signal()
     upload_clicked = Signal()
     open_deliverables_clicked = Signal()
+    open_references_clicked = Signal()
+    import_references_clicked = Signal()
     send_clicked = Signal(str)
     approve_clicked = Signal()
     reject_clicked = Signal()
@@ -1623,6 +2188,8 @@ class _ActionBar(QFrame):
             ("📁", "打开目录", self.open_folder_clicked.emit),
             ("📦", "交付物：打开 deliverables/ 目录", self.open_deliverables_clicked.emit),
             ("⬆️", "上传文件到 uploads/，Agent 可读取；运行前会自动归档", self.upload_clicked.emit),
+            ("🗂", "参考材料：打开 references/ 目录（不归档）", self.open_references_clicked.emit),
+            ("📎", "导入材料到 references/（第三方代码/配置/环境参数）", self.import_references_clicked.emit),
             ("📝", "总结经验：上一份经验 + 运行日志 + scripts → AI 新建经验", self.summarize_clicked.emit),
             (
                 "🧹",
@@ -1663,6 +2230,17 @@ class _ActionBar(QFrame):
         self._ctx_ring.setToolTip("上下文用量（点击压缩）")
         self._ctx_ring.compress_clicked.connect(self.compress_clicked.emit)
         row.addWidget(self._ctx_ring)
+
+        self._cache_label = QLabel("")
+        self._cache_label.setToolTip(
+            "DeepSeek 前缀缓存：本轮命中率 · 会话累计命中率\n"
+            "对齐 Reasonix 双指标；无用量时为空"
+        )
+        self._cache_label.setStyleSheet(
+            f"font-size: 11px; color: {c['text_hint']}; padding: 0 4px;"
+        )
+        self._cache_label.setMinimumWidth(0)
+        row.addWidget(self._cache_label)
 
         self._run_btn = QPushButton("运行")
         self._run_btn.setFixedSize(59, 34)
@@ -1815,6 +2393,12 @@ class _ActionBar(QFrame):
         self._ctx_ring.set_usage(used, limit)
         self._ctx_ring.set_ring_enabled(enabled)
 
+    def set_cache_stats(self, text: str = "", *, tooltip: str = ""):
+        self._cache_label.setText(text or "")
+        if tooltip:
+            self._cache_label.setToolTip(tooltip)
+        self._cache_label.setVisible(bool(text))
+
     def draft_text(self) -> str:
         return self._input.toPlainText()
 
@@ -1872,6 +2456,8 @@ class _ProjectWorkspace(QWidget):
         self._actions.open_folder_clicked.connect(self._on_open_folder)
         self._actions.open_deliverables_clicked.connect(self._on_open_deliverables)
         self._actions.upload_clicked.connect(self._on_upload)
+        self._actions.open_references_clicked.connect(self._on_open_references)
+        self._actions.import_references_clicked.connect(self._on_import_references)
         self._actions.summarize_clicked.connect(self._on_summarize)
         self._actions.clear_experience_clicked.connect(self._on_clear_experience)
         self._actions.send_clicked.connect(self._on_send)
@@ -2025,7 +2611,7 @@ class _ProjectWorkspace(QWidget):
             _tip(self, self.theme, "当前上下文较短，无需压缩。")
             return
 
-        to_compact, _retained, new_boundary, prev_summary = plan
+        to_compact, _retained, new_boundary, prev_summary, pin_end = plan
         client = None
         provider_id, model_id = self._actions.selected_model()
         try:
@@ -2041,7 +2627,12 @@ class _ProjectWorkspace(QWidget):
             client = None
 
         worker = _CompactWorker(
-            client, to_compact, prev_summary, new_boundary, parent=self,
+            client,
+            to_compact,
+            prev_summary,
+            new_boundary,
+            parent=self,
+            pin_end=pin_end,
         )
         self._compact_worker = worker
         worker.finished.connect(self._on_compact_done)
@@ -2049,7 +2640,7 @@ class _ProjectWorkspace(QWidget):
         worker.start()
         self._refresh_context_usage()
 
-    def _on_compact_done(self, summary: str, boundary: int):
+    def _on_compact_done(self, summary: str, boundary: int, pin_end: int = 0):
         self._compact_worker = None
         if not self._project_id:
             return
@@ -2059,10 +2650,11 @@ class _ProjectWorkspace(QWidget):
             state.get("compaction_points") or [],
             summary=summary,
             boundary_index=boundary,
+            pin_end=pin_end,
         )
         save_context_state(root, state)
         self._refresh_context_usage()
-        _tip(self, self.theme, "已压缩上下文。")
+        _tip(self, self.theme, "已压缩上下文（已钉住首条任务前缀）。")
 
     def _on_compact_failed(self, err: str):
         self._compact_worker = None
@@ -2257,11 +2849,13 @@ class _ProjectWorkspace(QWidget):
         self._runner = AgentRunner(self.store.settings)
         self._worker_mode = "chat"
         self._worker = AgentWorker(self._runner, req, parent=self, mode="chat")
+        self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
+        self._actions.set_cache_stats("")
         self._actions.hide_approval()
         self._worker.start()
 
@@ -2347,25 +2941,53 @@ class _ProjectWorkspace(QWidget):
         )
         self._runner = AgentRunner(self.store.settings)
         self._worker = AgentWorker(self._runner, req, parent=self, mode="run")
+        self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
+        self._actions.set_cache_stats("")
         self._actions.hide_approval()
         self._worker.start()
 
     def _on_engine_event(self, kind: str, content: str, meta: object):
         if not self._project_id:
             return
+        meta_d = meta if isinstance(meta, dict) else {}
+        if kind == "cache" or meta_d.get("cache"):
+            now_pct = meta_d.get("now_pct")
+            avg_pct = meta_d.get("avg_pct")
+            if now_pct is not None or avg_pct is not None:
+                now_s = f"{now_pct}%" if now_pct is not None else "—"
+                avg_s = f"{avg_pct}%" if avg_pct is not None else "—"
+                tag = f"cache {now_s} · avg {avg_s}"
+                tip = (
+                    f"本轮 hit={meta_d.get('last_hit', 0)} miss={meta_d.get('last_miss', 0)}\n"
+                    f"会话 hit={meta_d.get('hit_total', 0)} miss={meta_d.get('miss_total', 0)}\n"
+                    f"prefix={meta_d.get('prefix_fp') or '—'}"
+                )
+                self._actions.set_cache_stats(tag, tooltip=tip)
+            if kind == "cache":
+                # 不刷时间线，避免每轮刷屏
+                return
         ev = ProjectEvent(
             kind=kind,
             content=content,
-            meta=meta if isinstance(meta, dict) else {},
+            meta=meta_d,
         )
         self.store.append_event(self._project_id, ev)
         # 增量追加（含工具 call / callback）
         self._timeline.append_event(ev)
+        # 实时状态条：工具事件由 _route_tool_event 内部驱动，这里补其余类型
+        if kind == "agent":
+            self._timeline._status(
+                "正在思考…" if str(meta_d.get("phase") or "") == "reasoning" else "正在执行…"
+            )
+        elif kind == "approval":
+            self._timeline._status("等待审批…", pulse=False)
+        elif kind == "error":
+            self._timeline._status("出现错误")
         if kind == "approval":
             self.store.set_status(
                 self._project_id,
@@ -2373,7 +2995,6 @@ class _ProjectWorkspace(QWidget):
                 current_step="等待审批",
             )
         # 名称/目标被工具改写后立刻刷新顶栏与侧栏
-        meta_d = meta if isinstance(meta, dict) else {}
         if meta_d.get("project_meta") in ("title", "goal"):
             self._refresh_essentials()
             self.status_changed.emit()
@@ -2391,6 +3012,7 @@ class _ProjectWorkspace(QWidget):
                 )
         text = "需要你审批以下工具调用：\n" + ("\n".join(lines) if lines else str(pending))
         self._actions.show_approval(text)
+        self._timeline.on_approval_pending()
         if self._project_id:
             self.store.set_status(
                 self._project_id,
@@ -2418,16 +3040,19 @@ class _ProjectWorkspace(QWidget):
     def _on_approve(self):
         if self._worker and self._worker.isRunning():
             self._actions.hide_approval()
+            self._timeline.resume_after_approval(approved=True)
             self._worker.approve_all()
 
     def _on_reject(self):
         if self._worker and self._worker.isRunning():
             self._actions.hide_approval()
+            self._timeline.resume_after_approval(approved=False)
             self._worker.reject_all("用户拒绝该操作")
 
     def _on_engine_finished(self, result: object):
         self._actions.set_running(False)
         self._actions.hide_approval()
+        self._timeline.end_run()
         if not self._project_id:
             return
         outcome = getattr(result, "outcome", "failed")
@@ -2607,6 +3232,64 @@ class _ProjectWorkspace(QWidget):
             self.theme,
             f"已保存到 uploads/：\n" + "\n".join(saved),
             title="上传完成",
+        )
+
+    def _on_open_references(self):
+        if not self._project_id:
+            _tip(self, self.theme, "请先选择项目。")
+            return
+        path = references_dir(self.store.path_for(self._project_id))
+        path.mkdir(parents=True, exist_ok=True)
+        _open_in_explorer(path)
+
+    def _on_import_references(self):
+        if not self._project_id:
+            _tip(self, self.theme, "请先选择项目。")
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择要导入参考材料（第三方代码/配置/环境参数）的文件",
+            "",
+            "所有文件 (*.*)",
+        )
+        if not files:
+            return
+        dest_dir = references_dir(self.store.path_for(self._project_id))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        from datetime import datetime as _dt
+
+        saved: list[str] = []
+        for src in files:
+            src_path = Path(src)
+            name = src_path.name
+            target = dest_dir / name
+            if target.exists():
+                stem, suf = src_path.stem, src_path.suffix
+                stamp = _dt.now().strftime("%H%M%S")
+                target = dest_dir / f"{stem}_{stamp}{suf}"
+            try:
+                shutil.copy2(src_path, target)
+                saved.append(target.name)
+            except OSError as e:
+                _tip(self, self.theme, f"导入失败：{name}\n{e}")
+                return
+        ev = ProjectEvent(
+            kind="info",
+            content=(
+                f"已导 {len(saved)} 个文件到 references/：\n"
+                + "\n".join(f"- `{n}`" for n in saved)
+                + "\n参考材料不会被归档，供下次稳定复跑；敏感信息仅供本机使用，勿外发。"
+            ),
+        )
+        self.store.append_event(self._project_id, ev)
+        self._timeline.append_event(ev)
+        self._schedule_essentials_refresh()
+        _tip(
+            self,
+            self.theme,
+            f"已保存到 references/：\n" + "\n".join(saved),
+            title="导入完成",
         )
 
     def _on_summarize(self):

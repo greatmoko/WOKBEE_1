@@ -391,7 +391,7 @@ class ProjectStore:
         ):
             return True
         root = self.path_for(project_id)
-        skip = {"archives", "scripts", "memory"}
+        skip = {"archives", "scripts", "memory", "references"}
         for name in ARCHIVABLE_DIRS:
             if name in skip:
                 continue
@@ -464,8 +464,8 @@ class ProjectStore:
 
         moved: list[str] = []
         for name in ARCHIVABLE_DIRS:
-            # 明确跳过 archives / scripts / memory，防止误归档
-            if name in ("archives", "scripts", "memory"):
+            # 明确跳过 archives / scripts / memory / references，防止误归档
+            if name in ("archives", "scripts", "memory", "references"):
                 continue
             src = root / name
             if not src.exists():
@@ -480,7 +480,7 @@ class ProjectStore:
             # 清空源目录内容（保留空目录）
             self._empty_dir(src)
 
-        kept = ["project.json", "archives/"]
+        kept = ["project.json", "archives/", "references/"]
         if include_memory:
             for extra in ("memory", "scripts"):
                 src = root / extra
@@ -497,12 +497,12 @@ class ProjectStore:
             kept.insert(2, "scripts/")
 
         mode_line = (
-            "- 模式：清空经验（含 memory/、scripts/）\n"
+            "- 模式：清空经验（含 memory/、scripts/；保留 references/）\n"
             if include_memory
             else (
-                "- 模式：运行前自动归档（保留 memory/、scripts/）\n"
+                "- 模式：运行前自动归档（保留 memory/、scripts/、references/）\n"
                 if reason == "auto_before_run"
-                else "- 模式：普通归档（保留 memory/、scripts/）\n"
+                else "- 模式：普通归档（保留 memory/、scripts/、references/）\n"
             )
         )
         manifest = (
@@ -539,21 +539,21 @@ class ProjectStore:
                 f"已归档到 `archives/{dest.name}`"
                 f"（含会话目录、memory 经验与 scripts）。\n"
                 "对话、工作区、交付物、上传、经验文档、本地脚本已清空；"
-                "项目名称与目标已保留。\n"
+                "项目名称、目标与 references/ 参考材料已保留。\n"
                 "注意：后续 Agent 运行禁止访问 archives/。"
                 f"{prune_note}"
             )
         elif reason == "auto_before_run":
             notice = (
                 f"运行前已自动归档到 `archives/{dest.name}`"
-                f"（保留经验与 scripts）。{prune_note}"
+                f"（保留经验、scripts/ 与 references/）。{prune_note}"
             )
         else:
             notice = (
                 f"已归档到 `archives/{dest.name}`"
                 f"（含 runs / workspace / deliverables / uploads / artifacts）。\n"
                 "对话与工作区、交付物、上传文件已清空；"
-                "目标、memory/experiences/、scripts/ 已保留，可直接再次运行。\n"
+                "目标、memory/experiences/、scripts/、references/ 已保留，可直接再次运行。\n"
                 "注意：后续 Agent 运行禁止访问 archives/。"
                 f"{prune_note}"
             )

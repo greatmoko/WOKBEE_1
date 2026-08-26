@@ -110,7 +110,10 @@ def render_lesson_md(lesson: Lesson) -> str:
             "",
             lesson.summary.strip() or "（无摘要）",
             "",
-            "## 实现步骤",
+            "## 成功实现路径",
+            "",
+            "> 本节只记录**成功**的有序步骤；每步注明「做什么操作 × 达成什么目的」。"
+            "失败/试错/被弃用的尝试不写入。",
             "",
             (
                 lesson.success_path.strip()
@@ -147,7 +150,8 @@ def render_lesson_md(lesson: Lesson) -> str:
             "- 可复用脚本落在 `scripts/`；运行输出（callback）落在 `workspace/script_callback_*.md`。",
             "- 后续 AI 必须先读 workspace callback 再写 deliverables；禁止编造。",
             "- 禁止把 archives/ 归档数据当作本轮数据来源。",
-            "- `scripts/` 不参与归档；经验可多份并存，以最新为准。",
+            "- `scripts/` 与 `references/` 均不参与归档；经验可多份并存，以最新为准。",
+            "- 复跑前先读 `references/MANIFEST.md` 确认第三方代码/登录/环境参数齐全；敏感信息仅供本机使用。",
             "",
         ]
     )
@@ -230,7 +234,12 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
 1. 只写「怎么做」：实现步骤、脚本↔AI 执行顺序、运行环境要点、注意事项。
 2. 禁止写入：最终结果数值、交付产物内容、报告正文、截图描述、成功产出的具体文案。
 3. 不要引用或依赖 archives/ 归档数据。
-4. 自动化脚本与管线约定（重要）：
+4. **success_path（成功实现路径）只保留真正成功且有序的步骤**：
+   - 剔除所有失败调用、试错、被弃用/重复的尝试、未采用的方案。
+   - 每步编号并写明「**做什么操作 × 达成什么目的**」，例如：
+     「用 web_search 查深圳今日天气，以获取实时数据源」「用 execute 跑 .py 清洗数据，以得到干净表格」。
+   - order_section / script_section / ai_section 同样按「操作 + 目的」描述，强调有序而非强制交错。
+5. 自动化脚本与管线约定（重要）：
    - 可复用本地命令落到项目 `scripts/`；运行输出落到 `workspace/script_callback_*.md`。
    - 你可在 script_files 中手写完整脚本（.py/.bat/.cmd/.ps1/.json/.sh/.js/.vbs）。
    - **pipeline_steps** 决定下次「运行」的真实顺序：按数组从头到尾一路执行。
@@ -239,15 +248,19 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
      不要理解为必须「脚本、AI」交替。
    - pipeline_steps 里 script 的 path 须指向 scripts/ 下真实文件（与 script_files.filename 或已有脚本一致）。
    - 禁止用 script_files 覆盖 pipeline.json（由系统根据 pipeline_steps 维护）。
-5. 用中文。输出必须是一个 JSON 对象（不要 Markdown 围栏），字段如下：
+6. 用中文。输出必须是一个 JSON 对象（不要 Markdown 围栏），字段如下：
 {
   "summary": "方法/流程摘要（一两段，非结果）",
-  "success_path": "有序实现步骤（编号列表文本）",
+  "success_path": "仅成功步骤的有序清单（编号列表，每步=操作+目的）",
   "order_section": "执行顺序说明（与 pipeline_steps 一致，强调有序而非强制交错）",
-  "script_section": "脚本步骤清单",
+  "script_section": "脚本步骤清单（每步=操作+目的）",
   "ai_section": "AI 步骤清单（须注明先读 workspace/script_callback_*.md）",
   "environment": "运行环境要点",
   "notes": "注意事项",
+  "used_skills": ["skill-folder-name"],
+  "reference_materials": [
+    {"path": "references/config.json", "note": "服务端环境参数，复跑需用"}
+  ],
   "script_files": [
     {"filename": "query_weather.bat", "content": "@echo off\\n...", "description": "...", "in_pipeline": true}
   ],
@@ -259,7 +272,10 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
     {"type": "script", "path": "scripts/publish.py", "description": "合并交付"}
   ]
 }
-说明：有可复用命令时尽量同时给出 script_files 与 pipeline_steps；没有则可为空数组。
+说明：
+- **used_skills**：本次真实调用过的全局 Skill 目录名（如 "web-search"、"pdf-tools"），供快照到 references/skills/。
+- **reference_materials**：本次用到的可复用外部材料（第三方代码/登录与密钥配置/环境参数等），需保存进 references/ 并登记；敏感信息仅供本机使用。没有则为空数组。
+- 有可复用命令时尽量同时给出 script_files 与 pipeline_steps；没有则可为空数组。
 """
 
 
@@ -275,7 +291,11 @@ def summarize_lesson_with_ai(
 ) -> dict[str, Any]:
     """调用模型总结经验；失败时抛出异常由调用方回退。
 
-    返回字段均为 str，另含 script_files: list[dict]（AI 手写脚本，可为空）。
+    返回字段均为 str，另含：
+    - script_files: list[dict]（AI 手写脚本，可为空）
+    - pipeline_steps: list[dict]（有序管线步骤）
+    - used_skills: list[str]（本次用到的 Skill 目录名）
+    - reference_materials: list[dict]（需保存进 references/ 的材料）
     生成过程在内部收齐，结束后一次性返回，避免向时间线刷进度气泡。
     """
     user = (
@@ -285,9 +305,12 @@ def summarize_lesson_with_ai(
         f"## 本次运行日志\n{run_log}\n\n"
         f"## 现有脚本与 pipeline\n{scripts_context}\n\n"
         f"## 环境提示\n{environment_hint or '（无）'}\n\n"
-        "请输出符合要求的 JSON。若日志里出现可复用的本地脚本/命令（如 execute 跑 .py/.bat、"
+        "请输出符合要求的 JSON。success_path 只保留**成功**的有序步骤（每步=操作+目的），"
+        "剔除失败/试错/被弃用尝试。若日志里出现可复用的本地脚本/命令（如 execute 跑 .py/.bat、"
         "Skill 脚本），请在 script_files 写出完整源码，并在 pipeline_steps 给出下次运行的"
         "有序步骤（可连续多个脚本再 AI，勿强制交错）。"
+        "若用到了第三方代码/登录/环境参数，请填到 used_skills 与 reference_materials，"
+        "供保存到 references/ 供下次稳定复跑。"
     )
     messages = [
         {"role": "system", "content": _AI_SUMMARY_SYSTEM},
@@ -340,6 +363,10 @@ def summarize_lesson_with_ai(
         out[key] = str(val).strip() if val is not None else ""
     out["script_files"] = _normalize_ai_script_files(data.get("script_files"))
     out["pipeline_steps"] = _normalize_ai_pipeline_steps(data.get("pipeline_steps"))
+    out["used_skills"] = _normalize_ai_used_skills(data.get("used_skills"))
+    out["reference_materials"] = _normalize_ai_reference_materials(
+        data.get("reference_materials")
+    )
     return out
 
 
@@ -407,6 +434,39 @@ def _normalize_ai_pipeline_steps(raw: Any) -> list[dict[str, Any]]:
             if not step["description"]:
                 step["description"] = "AI 步骤"
         out.append(step)
+    return out
+
+
+def _normalize_ai_used_skills(raw: Any) -> list[str]:
+    """规整 AI 返回的 used_skills（Skill 目录名列表，去重保序）。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw[:50]:
+        if isinstance(item, str):
+            s = item.strip()
+        elif isinstance(item, dict):
+            s = str(item.get("name") or "").strip()
+        else:
+            s = ""
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _normalize_ai_reference_materials(raw: Any) -> list[dict[str, Any]]:
+    """规整 AI 返回的 reference_materials（path + note）。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[:50]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        note = str(item.get("note") or item.get("desc") or "").strip()[:300]
+        if not path and not note:
+            continue
+        out.append({"path": path, "note": note})
     return out
 
 
@@ -539,6 +599,7 @@ class LessonStore:
             f"【项目经验记忆】以下来自最新经验 `{name}`（历史经验不自动注入；"
             "只关注实现步骤/执行顺序/环境/注意事项，忽略任何结果或产物描述）：\n\n"
             + text
+            + "\n\n经验只含**成功路径**：按每步「操作+目的」理解，忽略任何失败/试错细节。\n"
         )
 
     def rebuild_index(self) -> None:

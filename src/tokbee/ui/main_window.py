@@ -31,6 +31,7 @@ class _PrimaryNav(QFrame):
     NAV_ITEMS = [
         ("chat",       "chat",  "TokBee",  18, "top"),
         ("wokbee",     "logo",  "WokBee",  18, "top"),
+        ("autobee",    "⏰",    "autobee", 18, "top"),
         ("automation", "⚡",    "AI配置",  20, "top"),
         ("settings",   "⚙",    "设置",    22, "bottom"),
     ]
@@ -218,7 +219,9 @@ class MainWindow(QMainWindow):
         from tokbee.ui.views.chat_view import ChatView
         from tokbee.ui.views.settings_view import SettingsView
         from tokbee.ui.views.automation_view import AutomationView
+        from tokbee.core.provider_store import ProviderStore
         from wokbee.ui.wokbee_view import WokBeeView
+        from autobee.ui.autobee_view import AutoBeeView
 
         svc = self._services
 
@@ -236,21 +239,40 @@ class MainWindow(QMainWindow):
             store=svc.wokbee_store,
             settings=svc.wokbee_settings,
         )
+        autobee = AutoBeeView(
+            self.theme,
+            store=svc.autobee_store,
+            scheduler=svc.autobee_scheduler,
+            provider_store=ProviderStore(),
+            project_store=svc.wokbee_store,
+        )
 
         self._views["chat"] = chat
         self._views["wokbee"] = wokbee
+        self._views["autobee"] = autobee
         self._views["automation"] = automation
         self._views["settings"] = settings
 
         self._stack.addWidget(chat)
         self._stack.addWidget(wokbee)
+        self._stack.addWidget(autobee)
         self._stack.addWidget(automation)
         self._stack.addWidget(settings)
+
+        # 启动定时任务调度（幂等）
+        svc.autobee_scheduler.start()
 
     def _switch_view(self, nav_id: str):
         view = self._views.get(nav_id)
         if view:
             self._stack.setCurrentWidget(view)
+
+    def closeEvent(self, event):
+        try:
+            self._services.autobee_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _set_titlebar_color(self):
         if sys.platform != "win32":

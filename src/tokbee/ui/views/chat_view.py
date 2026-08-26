@@ -327,7 +327,7 @@ class _AiNameWorker(QThread):
 
 class _CompactWorker(QThread):
     """后台线程：生成上下文摘要并返回新的 compaction point。"""
-    finished = Signal(str, int)  # summary, boundary_index
+    finished = Signal(str, int, int)  # summary, boundary_index, pin_end
     failed = Signal(str)
 
     def __init__(
@@ -337,12 +337,15 @@ class _CompactWorker(QThread):
         previous_summary: str,
         new_boundary: int,
         parent=None,
+        *,
+        pin_end: int = 0,
     ):
         super().__init__(parent)
         self._client = client
         self._to_compact = to_compact
         self._previous_summary = previous_summary
         self._new_boundary = new_boundary
+        self._pin_end = int(pin_end or 0)
 
     def run(self):
         summary = ""
@@ -362,7 +365,7 @@ class _CompactWorker(QThread):
         if not summary.strip():
             self.failed.emit("无法生成摘要")
             return
-        self.finished.emit(summary, self._new_boundary)
+        self.finished.emit(summary, self._new_boundary, self._pin_end)
 
 
 class _AIChatWorker(QThread):
@@ -1823,7 +1826,7 @@ class _ChatWorkspace(QWidget):
                 self._start_chat_request(ps["sid"], ps["api_user_content"], ps["params"])
             return
 
-        to_compact, _retained, new_boundary, prev_summary = plan
+        to_compact, _retained, new_boundary, prev_summary, pin_end = plan
         client = None
         if self._current_model and self._current_model.api_host:
             client = AIClient(
@@ -1837,17 +1840,24 @@ class _ChatWorkspace(QWidget):
             self._send_btn.setText("压缩中")
 
         worker = _CompactWorker(
-            client, to_compact, prev_summary, new_boundary, parent=self,
+            client,
+            to_compact,
+            prev_summary,
+            new_boundary,
+            parent=self,
+            pin_end=pin_end,
         )
         self._compact_worker = worker
         worker.finished.connect(
-            lambda summary, boundary, m=manual: self._on_compact_done(summary, boundary, m)
+            lambda summary, boundary, pin, m=manual: self._on_compact_done(
+                summary, boundary, m, pin_end=pin
+            )
         )
         worker.failed.connect(lambda err, m=manual: self._on_compact_failed(err, m))
         worker.start()
         self._refresh_context_ring()
 
-    def _on_compact_done(self, summary: str, boundary: int, manual: bool):
+    def _on_compact_done(self, summary: str, boundary: int, manual: bool, pin_end: int = 0):
         self._compact_worker = None
         if not self._session:
             self._set_sending(False)
@@ -1857,6 +1867,7 @@ class _ChatWorkspace(QWidget):
             self._session.compaction_points,
             summary=summary,
             boundary_index=boundary,
+            pin_end=pin_end,
         )
         self.manager.save()
         self._refresh_context_ring()

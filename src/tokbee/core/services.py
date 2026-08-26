@@ -21,6 +21,9 @@ class ServiceRegistry:
         self._role_manager: AIRoleManager | None = None
         self._wokbee_settings = None
         self._wokbee_store = None
+        self._autobee_store = None
+        self._autobee_executor = None
+        self._autobee_scheduler = None
 
     @property
     def config(self) -> Config:
@@ -45,3 +48,32 @@ class ServiceRegistry:
             from wokbee.core.project_store import ProjectStore
             self._wokbee_store = ProjectStore(self.wokbee_settings)
         return self._wokbee_store
+
+    @property
+    def autobee_store(self):
+        if self._autobee_store is None:
+            from autobee.core.store import AutoBeeStore
+            self._autobee_store = AutoBeeStore()
+        return self._autobee_store
+
+    @property
+    def autobee_executor(self):
+        if self._autobee_executor is None:
+            from tokbee.core.provider_store import ProviderStore
+            from autobee.engine.executor import TaskExecutor
+            self._autobee_executor = TaskExecutor(
+                store=self.autobee_store,
+                project_store=self.wokbee_store,
+                provider_store=ProviderStore(),
+                settings=self.wokbee_settings,
+            )
+        return self._autobee_executor
+
+    @property
+    def autobee_scheduler(self):
+        if self._autobee_scheduler is None:
+            from autobee.engine.scheduler import SchedulerService
+            self._autobee_scheduler = SchedulerService(
+                store=self.autobee_store, executor=self.autobee_executor,
+            )
+        return self._autobee_scheduler

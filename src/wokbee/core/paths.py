@@ -9,6 +9,7 @@ from pathlib import Path
 # uploads：用户上传文件（Agent 可读取；归档时一并归档并清空）
 # archives：归档快照（自身不再被归档）
 # scripts：可本地复用脚本（不参与归档）
+# references：可复用外部材料（第三方代码/登录/环境参数/用到的 Skills 快照；不参与归档）
 PROJECT_SUBDIRS = (
     "memory",
     "artifacts",  # 兼容旧路径；新交付请写入 deliverables/
@@ -19,6 +20,7 @@ PROJECT_SUBDIRS = (
     "workspace",
     "archives",
     "scripts",
+    "references",
 )
 
 PROJECT_META = "project.json"
@@ -27,8 +29,9 @@ ARCHIVES_DIR = "archives"
 SCRIPTS_DIR = "scripts"
 DELIVERABLES_DIR = "deliverables"
 UPLOADS_DIR = "uploads"
+REFERENCES_DIR = "references"
 
-# 归档时复制后清空（不含 archives / memory / scripts）
+# 归档时复制后清空（不含 archives / memory / scripts / references）
 ARCHIVABLE_DIRS = (
     "runs",
     "workspace",
@@ -70,6 +73,20 @@ def ensure_project_layout(root: Path) -> None:
             )
         except OSError:
             pass
+    references = root / REFERENCES_DIR
+    rreadme = references / "README.txt"
+    if not rreadme.exists():
+        try:
+            rreadme.write_text(
+                "本目录保存可复用的参考材料：第三方代码/脚本、登录与密钥配置、环境参数、"
+                "以及本次用到的全局 Skills 快照。\n"
+                "用于保证复杂任务下次能稳定复跑。\n"
+                "归档时**不会**归档本目录，会长期保留。\n"
+                "注意：登录/密钥等敏感信息仅供本机复跑，切勿外发。\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
 
 def meta_path(project_root: Path) -> Path:
@@ -107,6 +124,10 @@ def archives_dir(project_root: Path) -> Path:
 
 def scripts_dir(project_root: Path) -> Path:
     return project_root / SCRIPTS_DIR
+
+
+def references_dir(project_root: Path) -> Path:
+    return project_root / REFERENCES_DIR
 
 
 def list_deliverable_names(project_root: Path, limit: int = 8) -> list[str]:

@@ -76,11 +76,16 @@ Reasonix **不是「打开了 DeepSeek 缓存」**，而是把 Agent Loop 做成
 7. 子任务/总结模型用独立短会话（flash），主会话前缀不被污染。  
 8. 经验记忆：写盘不改本会话 system；需要时 append 一条 user note。
 
-## 明确不要照搬的
+## WokBee 落地（2026-08-25）
 
-- 「只支持 DeepSeek」产品锁定（WokBee 多厂商；但 **主力 DeepSeek 时启用 cache-first 路径** 即可）。  
-- 整套 Go TUI / 并行工具调度可后做。  
-- 不要误以为要接 Anthropic `cache_control`——Reasonix 证明 DeepSeek 只需 **形状正确**。
+已对照 Reasonix 四机制接入 `src/wokbee/engine/cache_prefix.py` + `runner.py`：
+
+1. **ImmutablePrefix** — `static_system_prompt()`；项目名/目标/审核/经验进用户消息【会话上下文】  
+2. **Append-Only + 钉住首条 user** — `tokbee` compact 的 `pin_end`；首条会话上下文只注入一次  
+3. **Volatile 不进 system** — 经验/审核不再拼 system  
+4. **裁剪 + 观测** — tool 结果 >12k 字截断落盘；ActionBar 显示 `cache 本轮% · avg 会话%`
+
+详见本文件上文与 `artifacts/prompt-cache-deepseek.md`。
 
 ## 参考链接
 

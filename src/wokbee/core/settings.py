@@ -26,6 +26,10 @@ DEFAULTS = {
     "max_parallel_tools": 4,
     # 有序管线：script/ai 阶段切换次数上限（非强制交错，按 pipeline steps 顺序）
     "max_pipeline_phases": 64,
+    # AI 调用间隔（毫秒）：两次 AI 调用「发起时间」的最小间隔；0 = 不限制
+    "ai_interval_ms": 0,
+    # 是否把 DeepSeek 官方服务端搜索注册成 deepseek_web_search 工具
+    "enable_deepseek_search": True,
 }
 
 
@@ -164,3 +168,22 @@ class WokBeeSettings:
     @max_pipeline_phases.setter
     def max_pipeline_phases(self, value: int) -> None:
         self.set("max_pipeline_phases", max(1, min(500, int(value))))
+
+    @property
+    def enable_deepseek_search(self) -> bool:
+        return bool(self.get("enable_deepseek_search", True))
+
+    @enable_deepseek_search.setter
+    def enable_deepseek_search(self, value: bool) -> None:
+        self.set("enable_deepseek_search", bool(value))
+
+    @property
+    def ai_interval_ms(self) -> int:
+        try:
+            return max(0, int(self.get("ai_interval_ms", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @ai_interval_ms.setter
+    def ai_interval_ms(self, value: int) -> None:
+        self.set("ai_interval_ms", max(0, int(value or 0)))

@@ -221,6 +221,46 @@ class WokBeeSettingsWorkspace(QWidget):
         phase_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
         bl.addWidget(phase_hint)
 
+        bl.addWidget(self._section_label("AI 调用节流"))
+        ai_int_row = QHBoxLayout()
+        ai_int_row.setSpacing(10)
+        ai_int_row.addWidget(QLabel("调用最小间隔（毫秒）"))
+        self._ai_interval = QSpinBox()
+        self._ai_interval.setRange(0, 60000)
+        self._ai_interval.setSingleStep(500)
+        self._ai_interval.setFixedWidth(110)
+        self._ai_interval.setSuffix(" ms")
+        self._ai_interval.setToolTip(
+            "两次调用 AI 接口「发起时间」的最小间隔；0 = 不限制。"
+            "用于本地模型短时调用限流。"
+        )
+        ai_int_row.addWidget(self._ai_interval)
+        ai_int_row.addStretch()
+        bl.addLayout(ai_int_row)
+        ai_int_hint = QLabel(
+            "间隔按「发起时间」计算（下一次 ≥ 上一次发起 + 间隔），而非响应结束时间。"
+            "设 0 表示关掉节流、完全无额外开销；设为如 2000 则每次 AI 调用至少相隔 2 秒。"
+        )
+        ai_int_hint.setWordWrap(True)
+        ai_int_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        bl.addWidget(ai_int_hint)
+
+        ds_row = QHBoxLayout()
+        ds_row.setSpacing(12)
+        self._enable_search = QCheckBox("启用 DeepSeek 服务端搜索工具")
+        self._enable_search.setToolTip(
+            "开启后在工具列表注册 deepseek_web_search；"
+            "需在「厂商设置」里配置官方 DeepSeek 的 API Key 才能成功调用。"
+        )
+        ds_row.addWidget(self._enable_search)
+        ds_hint = QLabel(
+            "把 DeepSeek 官方联网搜索包成工具给 Agent 用（多轮检索+引用，主模型可为本地模型）。"
+        )
+        ds_hint.setWordWrap(True)
+        ds_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        ds_row.addWidget(ds_hint, stretch=1)
+        bl.addLayout(ds_row)
+
         bl.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll, stretch=1)
@@ -281,6 +321,8 @@ class WokBeeSettingsWorkspace(QWidget):
         self._max_steps.setValue(self.settings.max_steps)
         self._max_parallel.setValue(self.settings.max_parallel_tools)
         self._max_phases.setValue(self.settings.max_pipeline_phases)
+        self._ai_interval.setValue(self.settings.ai_interval_ms)
+        self._enable_search.setChecked(self.settings.enable_deepseek_search)
         self._reload_models()
 
     def _reload_models(self):
@@ -319,6 +361,8 @@ class WokBeeSettingsWorkspace(QWidget):
         self.settings.max_steps = self._max_steps.value()
         self.settings.max_parallel_tools = self._max_parallel.value()
         self.settings.max_pipeline_phases = self._max_phases.value()
+        self.settings.ai_interval_ms = self._ai_interval.value()
+        self.settings.enable_deepseek_search = self._enable_search.isChecked()
         pair = self._model_combo.currentData() or ("", "")
         self.settings.default_provider = pair[0]
         self.settings.default_model_id = pair[1]
