@@ -1,14 +1,22 @@
 """设置页面 — 左侧二级导航 + 右侧工作区。"""
 
+import threading
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QStackedWidget, QScrollArea,
-    QDialog,
+    QDialog, QTextEdit,
 )
 
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.styles.system import apply_textedit, apply_secondary_btn, style_hint_label
 from tokbee.core.chat_manager import ChatManager
+from wokbee.core.settings import WokBeeSettings
+from wokbee.engine.runtime_env import (
+    build_runtime_env_settings_text,
+    ensure_runtime_env,
+)
 
 
 def _show_styled_tip(parent: QWidget, theme: "Theme", message: str):
@@ -156,15 +164,19 @@ class _SubNav(QFrame):
 # ═══════════════════════════════════════════════════════════════
 
 class _GeneralWorkspace(QWidget):
-    """通用设置页 — 聊天记录管理等。"""
+    """通用设置页 — 聊天记录管理、本机运行环境等。"""
 
     chats_cleared = Signal()
+    _env_text_ready = Signal(str)
 
     def __init__(self, theme: Theme, chat_manager: ChatManager, parent=None):
         super().__init__(parent)
         self.theme = theme
         self.manager = chat_manager
+        self._wokbee_settings = WokBeeSettings()
+        self._env_text_ready.connect(self._apply_env_text)
         self._build()
+        self._reload_env_text()
 
     def _build(self):
         c = self.theme.colors
@@ -221,10 +233,70 @@ class _GeneralWorkspace(QWidget):
         row.addWidget(clear_btn)
 
         layout.addLayout(row)
+
+        env_sep = QFrame()
+        env_sep.setFrameShape(QFrame.Shape.HLine)
+        env_sep.setStyleSheet(f"color: {c['border_light']};")
+        layout.addWidget(env_sep)
+
+        env_group = QLabel("本机运行环境")
+        env_group.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {c['text']}; margin-top: 4px;")
+        layout.addWidget(env_group)
+
+        env_hint = QLabel(
+            "首次为空时自动探测并保存到本机配置；之后所有 Agent 直接加载此缓存，不会每次重扫。"
+            "安装新软件后可点「重新探测」刷新。"
+        )
+        env_hint.setWordWrap(True)
+        style_hint_label(env_hint, c)
+        layout.addWidget(env_hint)
+
+        self._env_edit = QTextEdit()
+        self._env_edit.setReadOnly(True)
+        self._env_edit.setMinimumHeight(220)
+        apply_textedit(self._env_edit, c)
+        layout.addWidget(self._env_edit)
+
+        env_btn_row = QHBoxLayout()
+        env_btn_row.addStretch()
+        self._env_refresh_btn = QPushButton("重新探测")
+        self._env_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_secondary_btn(self._env_refresh_btn, c, height=34)
+        self._env_refresh_btn.clicked.connect(self._refresh_env)
+        env_btn_row.addWidget(self._env_refresh_btn)
+        layout.addLayout(env_btn_row)
+
         layout.addStretch()
 
         scroll.setWidget(container)
         outer.addWidget(scroll)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reload_env_text()
+
+    def _reload_env_text(self):
+        self._apply_env_text(build_runtime_env_settings_text(self._wokbee_settings))
+
+    def _apply_env_text(self, text: str):
+        self._env_edit.setPlainText(text)
+        self._env_refresh_btn.setEnabled(True)
+
+    def _refresh_env(self):
+        self._env_refresh_btn.setEnabled(False)
+        self._env_edit.setPlainText("正在重新探测本机环境，请稍候…")
+
+        settings = self._wokbee_settings
+
+        def _worker():
+            try:
+                ensure_runtime_env(settings, force=True)
+                text = build_runtime_env_settings_text(settings)
+            except Exception as e:
+                text = f"探测失败：{e}"
+            self._env_text_ready.emit(text)
+
+        threading.Thread(target=_worker, daemon=True, name="settings-runtime-env").start()
 
     def _confirm_clear(self):
         c = self.theme.colors

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from wokbee.core.paths import scripts_dir
+from wokbee.engine.runtime_env import collect_runtime_env, enrich_shell_env
 
 logger = logging.getLogger("wokbee")
 
@@ -215,9 +216,7 @@ def run_one_script(
             description=desc,
             step_id=step_id,
         )
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
+    env = enrich_shell_env(os.environ.copy(), project_root=project_root)
     suffix = script_file.suffix.lower()
     if suffix == ".py":
         cmd = [sys.executable, "-X", "utf8", str(script_file)]
@@ -226,14 +225,7 @@ def run_one_script(
         cmd = ["cmd", "/c", str(script_file)]
         use_shell = False
     elif suffix == ".ps1":
-        cmd = [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script_file),
-        ]
+        cmd = collect_runtime_env(project_root=project_root).powershell_argv_for_file(script_file)
         use_shell = False
     elif suffix == ".js":
         cmd = ["node", str(script_file)]

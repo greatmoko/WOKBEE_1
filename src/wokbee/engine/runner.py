@@ -30,11 +30,11 @@ from wokbee.engine.archive_guard import ArchiveDeniedBackend
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
-    build_environment_block,
     collect_events_log,
     collect_scripts_context,
     summarize_lesson_with_ai,
 )
+from wokbee.engine.runtime_env import build_runtime_env_block
 from wokbee.engine.model_factory import build_chat_model
 from wokbee.engine.network_tools import NETWORK_TOOLS
 from wokbee.engine.cache_prefix import (
@@ -728,6 +728,12 @@ class AgentRunner:
 
         # Reasonix ImmutablePrefix：system 静态；易变态进【会话上下文】user 块
         system_prompt = static_system_prompt(mode=mode)
+        runtime_env_block = build_runtime_env_block(
+            project_root=str(req.project_root),
+            model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
+            policy=req.approval.summary(),
+            settings=self.settings,
+        )
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
@@ -735,6 +741,7 @@ class AgentRunner:
             max_steps=req.max_steps if mode != "chat" else None,
             experience_digest=experience_digest,
             mode=mode,
+            runtime_env_block=runtime_env_block,
         )
 
         project_tools = build_project_meta_tools(
@@ -1529,10 +1536,11 @@ class AgentRunner:
             previous_text = store.read_latest_text(max_chars=8000)
             run_log = collect_events_log(events)
             scripts_ctx = collect_scripts_context(req.project_root)
-            env = build_environment_block(
+            env = build_runtime_env_block(
+                project_root=str(req.project_root),
                 model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
                 policy=req.approval.summary(),
-                project_root=str(req.project_root),
+                settings=self.settings,
             )
 
             self._emit(

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import platform
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -165,18 +164,15 @@ def build_environment_block(
     project_root: str = "",
     extra: str = "",
 ) -> str:
-    parts = [
-        f"- OS: {platform.system()} {platform.release()} ({platform.machine()})",
-        f"- Python: {platform.python_version()}",
-        f"- 模型: {model or '（未知）'}",
-        f"- 审核策略: {policy or '（未知）'}",
-        f"- 项目目录: {project_root or '（未知）'}",
-        "- 能力: 联网工具(web_search/http_get/http_request) + 本机 execute + Skills/MCP（若已配置）",
-        "- 禁止: 访问 archives/ 归档目录及其内容",
-    ]
-    if extra.strip():
-        parts.append(extra.strip())
-    return "\n".join(parts)
+    """经验总结用运行环境块（与 Agent 会话上下文同源）。"""
+    from wokbee.engine.runtime_env import build_runtime_env_block
+
+    return build_runtime_env_block(
+        project_root=project_root,
+        model=model,
+        policy=policy,
+        extra=extra,
+    )
 
 
 def collect_scripts_context(project_root: Path, *, max_chars: int = 12000) -> str:

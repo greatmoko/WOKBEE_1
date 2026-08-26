@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import (
@@ -31,6 +31,24 @@ _CMD_ARCHIVES_RE = re.compile(
 )
 
 
+_WIN_ABS_RE = re.compile(r"^[a-zA-Z]:[/\\]")
+
+
+def normalize_agent_path(path: str | None, project_root: Path | str | None) -> str | None:
+    """将项目内的 Windows 绝对路径转为虚拟相对路径（workspace/…）。"""
+    if not path or not project_root:
+        return path
+    raw = str(path).strip()
+    if not _WIN_ABS_RE.match(raw):
+        return path
+    try:
+        resolved = Path(raw).resolve()
+        rel = resolved.relative_to(Path(project_root).resolve())
+        return rel.as_posix()
+    except (ValueError, OSError):
+        return path
+
+
 def path_touches_archives(path: str | None) -> bool:
     if not path:
         return False
@@ -51,17 +69,23 @@ def command_touches_archives(command: str | None) -> bool:
     return bool(_CMD_ARCHIVES_RE.search(command))
 
 
-def _shell_env(base: dict | None = None) -> dict[str, str]:
-    env = dict(base or os.environ)
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
+from wokbee.engine.runtime_env import enrich_shell_env, build_execute_invocation
+
+
+def _shell_env(base: dict | None = None, *, project_root: str | Path | None = None) -> dict[str, str]:
+    return enrich_shell_env(base, project_root=project_root)
 
 
 class ArchiveDeniedBackend(LocalShellBackend):
     """LocalShellBackend 包装：拒绝一切触及 archives/ 的文件与 shell 操作。"""
 
+    def _coerce_path(self, path: str | None) -> str | None:
+        if path is None:
+            return None
+        return normalize_agent_path(path, getattr(self, "cwd", None))
+
     def ls(self, path: str) -> LsResult:
+        path = self._coerce_path(path) or path
         if path_touches_archives(path):
             return LsResult(error=_DENY_MSG)
         result = super().ls(path)
@@ -82,11 +106,13 @@ class ArchiveDeniedBackend(LocalShellBackend):
         return LsResult(error=None, entries=filtered)
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        file_path = self._coerce_path(file_path) or file_path
         if path_touches_archives(file_path):
             return ReadResult(error=_DENY_MSG)
         return super().read(file_path, offset=offset, limit=limit)
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        file_path = self._coerce_path(file_path) or file_path
         if path_touches_archives(file_path):
             return WriteResult(error=_DENY_MSG)
         return super().write(file_path, content)
@@ -98,16 +124,20 @@ class ArchiveDeniedBackend(LocalShellBackend):
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
+        file_path = self._coerce_path(file_path) or file_path
         if path_touches_archives(file_path):
             return EditResult(error=_DENY_MSG)
         return super().edit(file_path, old_string, new_string, replace_all=replace_all)
 
     def delete(self, file_path: str) -> DeleteResult:
+        file_path = self._coerce_path(file_path) or file_path
         if path_touches_archives(file_path):
             return DeleteResult(error=_DENY_MSG)
         return super().delete(file_path)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        path = self._coerce_path(path)
+        pattern = self._coerce_path(pattern) or pattern
         if path_touches_archives(path) or path_touches_archives(pattern):
             return GlobResult(error=_DENY_MSG)
         result = super().glob(pattern, path)
@@ -133,6 +163,7 @@ class ArchiveDeniedBackend(LocalShellBackend):
         max_count: int | None = None,
         context_lines: int = 0,
     ) -> GrepResult:
+        path = self._coerce_path(path)
         if path_touches_archives(path) or path_touches_archives(glob):
             return GrepResult(error=_DENY_MSG)
         result = super().grep(
@@ -173,14 +204,26 @@ class ArchiveDeniedBackend(LocalShellBackend):
             raise ValueError(f"timeout must be positive, got {effective_timeout}")
 
         max_bytes = int(getattr(self, "_max_output_bytes", 100_000) or 100_000)
-        env = _shell_env(getattr(self, "_env", None))
+        env = _shell_env(
+            getattr(self, "_env", None),
+            project_root=getattr(self, "root_dir", None),
+        )
         cwd = str(getattr(self, "cwd", os.getcwd()))
 
         try:
+            argv, shell_mode = build_execute_invocation(command)
+            if argv:
+                run_kw: dict = {
+                    "args": argv,
+                    "shell": False,
+                }
+            else:
+                run_kw = {
+                    "args": command,
+                    "shell": True,
+                }
             result = subprocess.run(  # noqa: S602
-                command,
                 check=False,
-                shell=True,
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
                 text=True,
@@ -189,6 +232,7 @@ class ArchiveDeniedBackend(LocalShellBackend):
                 timeout=effective_timeout,
                 env=env,
                 cwd=cwd,
+                **run_kw,
             )
             output_parts: list[str] = []
             if result.stdout:

@@ -38,15 +38,21 @@ def static_system_prompt(*, mode: str) -> str:
             "普通快捷查询用 web_search/http_get 即可。\n"
             "意图不清时必须先调用 ask_user 弹窗提问（单选/多选），禁止擅自猜测关键选择。\n"
             "**严禁**访问 archives/。\n"
+            "Windows 上 execute 由 WokBee 自动经 pwsh 执行（非 cmd）；列目录请用 ls 工具而非 dir。"
+            "勿用 head/tail/awk 等 Linux 命令。具体路径见【运行环境】。\n"
             "当用户要求改名、改目标，或「根据对话总结后更新目标/名称」时，"
             "请先理解对话再调用项目工具，并用中文确认。\n"
             f"项目名称须尽量简短，最多 {MAX_PROJECT_TITLE_LEN} 字，禁止用整句目标当名称。\n"
+            "文件工具路径（read_file/write_file/edit_file/ls/grep/glob）："
+            "必须用相对项目根的虚拟路径，如 workspace/a.json、deliverables/out.md、uploads/f.pdf；"
+            "可写 /workspace/a.json。**禁止** Windows 绝对路径（C:\\\\...、D:/...），否则报错。"
+            "execute 才可用本机真实路径；写入项目文件后读回仍用虚拟路径。\n"
             "工作区：workspace/；交付物：deliverables/；上传：uploads/（同名或相近以最新为准）；记忆：memory/；"
             "参考材料：references/。\n"
             "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、"
             "配置、环境参数与登录信息保存到 references/，并在 references/MANIFEST.md 登记，"
             "确保下次能稳定复跑；references/ 不会被归档。这些敏感信息仅供本机使用，勿外发。\n"
-            "本轮具体项目态（名称、目标、审核、经验摘要等）见用户消息中的"
+            "本轮具体项目态（名称、目标、审核、经验摘要、运行环境等）见用户消息中的"
             "【会话上下文】；勿假设 system 会随轮次改写。\n"
             "用中文说明你在做什么；需要落盘的结果可写入 workspace/ 或 deliverables/。\n"
             "完整自动化管线（按 pipeline 有序执行）请用户点击「运行」。"
@@ -59,6 +65,8 @@ def static_system_prompt(*, mode: str) -> str:
         "普通快捷查询用 web_search/http_get 即可。\n"
         "**严禁**读取、列举、搜索或通过 shell 访问 `archives/`；"
         "归档文档与归档数据不得作为当前运行的数据来源。\n"
+        "Windows 上 execute 由 WokBee 自动经 pwsh 执行（非 cmd）；列目录请用 ls 工具而非 dir。"
+        "勿用 head/tail/awk 等 Linux 命令。具体路径见【运行环境】。\n"
         "全局 Skills 只读挂载在 /skills/（来自本机公共 Skills 目录，未复制进本项目）；"
         "需要时请读取 /skills/<技能名>/SKILL.md 并遵循。\n"
         "若已加载 MCP 工具，可直接调用它们完成外部系统操作。\n"
@@ -71,6 +79,10 @@ def static_system_prompt(*, mode: str) -> str:
         "仅在 type=ai 的步骤唤你。\n"
         "脚本 callback 已落盘到 workspace/script_callback_*.md；"
         "你做提取/创作时必须先读这些文件，禁止凭空编造脚本未提供的事实。\n"
+        "文件工具路径（read_file/write_file/edit_file/ls/grep/glob）："
+        "必须用相对项目根的虚拟路径，如 workspace/a.json、deliverables/out.md、uploads/f.pdf；"
+        "可写 /workspace/a.json。**禁止** Windows 绝对路径（C:\\\\...、D:/...），否则报错。"
+        "execute 才可用本机真实路径；写入项目文件后读回仍用虚拟路径。\n"
         "项目根目录为工作根；工作区：workspace/；交付物：deliverables/；"
         "用户上传：uploads/（同名或相近以最新为准）；记忆：memory/；参考材料：references/。\n"
         "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、"
@@ -84,7 +96,7 @@ def static_system_prompt(*, mode: str) -> str:
         f"名称尽量简短，最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
         "经验总结：无经验时运行结束可自动总结；之后由用户「总结经验」新建带时间戳文档。\n"
         "若存在 scripts/pipeline.json：优先本地跑脚本；仅失败、数据异常或需创作时再调用模型。\n"
-        "本轮具体项目态（名称、目标、审核、步数上限、经验摘要）见用户消息【会话上下文】；"
+        "本轮具体项目态（名称、目标、审核、步数上限、经验摘要、运行环境）见用户消息【会话上下文】；"
         "system 在本会话内保持字节级稳定以利于 DeepSeek 前缀缓存。"
     )
 
@@ -97,6 +109,7 @@ def build_session_context_block(
     max_steps: int | None = None,
     experience_digest: str = "",
     mode: str = "run",
+    runtime_env_block: str = "",
 ) -> str:
     """易变内容：拼进首条/当轮 user，不进 system。"""
     lines = [
@@ -108,6 +121,9 @@ def build_session_context_block(
     ]
     if max_steps is not None and int(max_steps) > 0:
         lines.append(f"- 步数上限约：{int(max_steps)}（请聚焦目标）")
+    if runtime_env_block.strip():
+        lines.append("")
+        lines.append(runtime_env_block.strip())
     if experience_digest.strip():
         lines.append("")
         lines.append(experience_digest.strip())

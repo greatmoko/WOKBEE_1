@@ -18,6 +18,8 @@ from tokbee.ui.main_window import MainWindow
 from tokbee.ui.styles.theme import Theme
 from tokbee.ui.no_wheel import install_no_wheel_value_change, install_no_focus_frame_style
 from tokbee.core.config import Config
+from wokbee.core.settings import WokBeeSettings
+from wokbee.engine.runtime_env import ensure_runtime_env_async
 
 _RESOURCES = Path(__file__).parent / "resources"
 
@@ -72,6 +74,8 @@ class Application:
         self._no_wheel_filter = install_no_wheel_value_change(self.qt_app)
 
         self.window = MainWindow(self.config, self.theme)
+        # 仅当环境缓存为空时在后台探测一次，不阻塞 UI
+        ensure_runtime_env_async(WokBeeSettings(self.config))
 
     def run(self) -> int:
         """启动应用主循环，返回退出码。"""
