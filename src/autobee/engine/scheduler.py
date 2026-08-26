@@ -147,15 +147,20 @@ class SchedulerService:
             try:
                 self._scheduler.pause_job(task_id)
             except Exception:
-                logger.exception("暂停任务 %s 失败", task_id)
+                logger.exception("停用任务 %s 失败", task_id)
 
     def resume(self, task_id: str) -> None:
         with self._lock:
             self.store.set_enabled(task_id, True)
+            task = self.store.get(task_id)
             try:
                 self._scheduler.resume_job(task_id)
             except Exception:
-                logger.exception("恢复任务 %s 失败", task_id)
+                # job 可能尚未注册或已被重建：按当前任务重新挂上
+                if task is not None:
+                    self._register(task)
+                else:
+                    logger.exception("启用任务 %s 失败", task_id)
 
     def run_now(self, task_id: str) -> None:
         """立即执行（用自管线程池投递，避开 APScheduler 无公开 submit）。"""

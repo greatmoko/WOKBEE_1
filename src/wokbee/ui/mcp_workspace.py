@@ -57,11 +57,15 @@ class _McpCard(QFrame):
         self.server = server
         self.theme = theme
         c = theme.colors
+        self.setObjectName("mcpCard")
         self.setStyleSheet(f"""
-            _McpCard {{
+            QFrame#mcpCard {{
                 background: {c["card_bg"]};
                 border: 1px solid {c["border_light"]};
                 border-radius: 8px;
+            }}
+            QFrame#mcpCard QLabel, QFrame#mcpCard QCheckBox {{
+                background: transparent; border: none;
             }}
         """)
         lay = QHBoxLayout(self)
@@ -69,7 +73,7 @@ class _McpCard(QFrame):
 
         info = QVBoxLayout()
         title = QLabel(server.name)
-        title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {c['text']}; background: transparent;")
+        title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {c['text']}; background: transparent; border: none;")
         info.addWidget(title)
         if server.transport == "stdio":
             detail = f"stdio · {server.command} {' '.join(server.args)}".strip()
@@ -77,33 +81,34 @@ class _McpCard(QFrame):
             detail = f"{server.transport} · {server.url}"
         desc = QLabel(detail)
         desc.setWordWrap(True)
-        desc.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent;")
+        desc.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent; border: none;")
         info.addWidget(desc)
         lay.addLayout(info, stretch=1)
 
+        from tokbee.ui.combo_style import checkbox_qss, secondary_btn_qss
         chk = QCheckBox("启用")
         chk.setChecked(server.enabled)
+        chk.setStyleSheet(checkbox_qss(c))
         chk.toggled.connect(lambda v: self.toggled.emit(server.id, v))
         lay.addWidget(chk)
 
         for text, sig in (("测试", self.test_clicked), ("编辑", self.edit_clicked), ("删除", self.delete_clicked)):
             btn = QPushButton(text)
             btn.setFixedHeight(30)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
             if text == "删除":
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background: transparent; color: {c["danger"]};
-                        border: 1px solid {c["border"]}; border-radius: 6px; padding: 0 10px;
+                        border: 1px solid {c["border"]}; border-radius: 6px;
+                        padding: 0 10px; text-decoration: none;
                     }}
+                    QPushButton:hover {{ background: #fff1f0; }}
                 """)
             else:
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background: {c["btn_bg"]}; color: {c["text"]};
-                        border: none; border-radius: 6px; padding: 0 10px;
-                    }}
-                    QPushButton:hover {{ background: {c["btn_hover"]}; }}
-                """)
+                btn.setStyleSheet(secondary_btn_qss(c))
             btn.clicked.connect(lambda _, sid=server.id, s=sig: s.emit(sid))
             lay.addWidget(btn)
 
@@ -114,19 +119,32 @@ class _McpEditor(QDialog):
         self.theme = theme
         self._server = server or McpServerConfig(name="新 MCP")
         self.setWindowTitle("编辑 MCP" if server else "添加 MCP")
-        self.setFixedSize(520, 420)
+        self.setFixedSize(520, 540)
         c = theme.colors
         self.setStyleSheet(f"background: {c['content_bg']};")
+        from tokbee.ui.combo_style import (
+            apply_combo_popup_style,
+            rounded_lineedit_qss,
+            secondary_btn_qss,
+            DEFAULT_COMBO_WIDTH,
+            DEFAULT_COMBO_HEIGHT,
+        )
+        inp = rounded_lineedit_qss(c)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 18)
         lay.setSpacing(8)
 
-        lay.addWidget(QLabel("名称"))
+        name_lbl = QLabel("名称")
+        name_lbl.setStyleSheet(f"font-size: 13px; color: {c['text']}; background: transparent; border: none;")
+        lay.addWidget(name_lbl)
         self._name = QLineEdit(self._server.name)
-        self._name.setFixedHeight(32)
+        self._name.setFixedHeight(34)
+        self._name.setStyleSheet(inp)
         lay.addWidget(self._name)
 
-        lay.addWidget(QLabel("传输方式"))
+        transport_lbl = QLabel("传输方式")
+        transport_lbl.setStyleSheet(f"font-size: 13px; color: {c['text']}; background: transparent; border: none;")
+        lay.addWidget(transport_lbl)
         self._transport = QComboBox()
         self._transport.addItem("stdio（本地进程）", "stdio")
         self._transport.addItem("SSE", "sse")
@@ -134,44 +152,83 @@ class _McpEditor(QDialog):
         idx = self._transport.findData(self._server.transport)
         self._transport.setCurrentIndex(idx if idx >= 0 else 0)
         self._transport.currentIndexChanged.connect(self._sync_fields)
-        lay.addWidget(self._transport)
+        apply_combo_popup_style(
+            self._transport, c, rounded=True,
+            fixed_width=DEFAULT_COMBO_WIDTH, fixed_height=DEFAULT_COMBO_HEIGHT,
+        )
+        lay.addWidget(self._transport, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self._cmd_label = QLabel("命令（如 npx / uvx / python）")
+        self._cmd_label.setStyleSheet(f"font-size: 13px; color: {c['text']}; background: transparent; border: none;")
         lay.addWidget(self._cmd_label)
         self._command = QLineEdit(self._server.command)
-        self._command.setFixedHeight(32)
+        self._command.setFixedHeight(34)
+        self._command.setStyleSheet(inp)
         lay.addWidget(self._command)
 
         self._args_label = QLabel("参数（空格分隔）")
+        self._args_label.setStyleSheet(f"font-size: 13px; color: {c['text']}; background: transparent; border: none;")
         lay.addWidget(self._args_label)
         self._args = QLineEdit(shlex.join(self._server.args) if self._server.args else "")
-        self._args.setFixedHeight(32)
+        self._args.setFixedHeight(34)
+        self._args.setStyleSheet(inp)
         lay.addWidget(self._args)
 
         self._url_label = QLabel("URL（SSE / HTTP）")
+        self._url_label.setStyleSheet(f"font-size: 13px; color: {c['text']}; background: transparent; border: none;")
         lay.addWidget(self._url_label)
         self._url = QLineEdit(self._server.url)
-        self._url.setFixedHeight(32)
+        self._url.setFixedHeight(34)
+        self._url.setStyleSheet(inp)
         lay.addWidget(self._url)
 
-        lay.addWidget(QLabel("环境变量 JSON（可选，如 {\"KEY\":\"val\"}）"))
+        env_lbl = QLabel("环境变量 JSON（可选，如 {\"KEY\":\"val\"}）")
+        env_lbl.setStyleSheet(f"font-size: 13px; color: {c['text']}; background: transparent; border: none;")
+        lay.addWidget(env_lbl)
         self._env = QTextEdit()
-        self._env.setFixedHeight(70)
+        self._env.setFixedHeight(80)
         self._env.setPlainText(json.dumps(self._server.env, ensure_ascii=False) if self._server.env else "")
+        self._env.setStyleSheet(f"""
+            QTextEdit {{
+                background: {c["input_bg"]}; color: {c["text"]};
+                border: 1px solid {c["input_border"]}; border-radius: 6px;
+                padding: 6px 8px; font-size: 13px;
+            }}
+            QTextEdit:focus {{ border: 1px solid {c["input_focus_border"]}; }}
+        """)
         lay.addWidget(self._env)
 
         self._sync_fields()
 
+        lay.addSpacing(12)
+        lay.addStretch(1)
+
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
         row.addStretch()
         cancel = QPushButton("取消")
+        cancel.setFixedHeight(34)
+        cancel.setMinimumWidth(72)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.setAutoDefault(False)
+        cancel.setDefault(False)
+        cancel.setFlat(False)
+        cancel.setStyleSheet(secondary_btn_qss(c))
         cancel.clicked.connect(self.reject)
         ok = QPushButton("保存")
+        ok.setFixedHeight(34)
+        ok.setMinimumWidth(72)
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.setAutoDefault(False)
+        ok.setDefault(True)
         ok.setStyleSheet(f"""
             QPushButton {{
                 background: {c["btn_primary"]}; color: white;
-                border: none; border-radius: 6px; padding: 6px 16px;
+                border: none; border-radius: 6px; padding: 0 16px; font-size: 13px;
+                text-decoration: none;
             }}
+            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
         """)
         ok.clicked.connect(self.accept)
         row.addWidget(cancel)
@@ -229,18 +286,24 @@ class McpWorkspace(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
 
         header = QFrame()
-        header.setStyleSheet(f"background: {c['content_bg']}; border-bottom: 1px solid {c['border']};")
+        header.setStyleSheet(f"background: {c['content_bg']}; border: none;")
         hl = QVBoxLayout(header)
         hl.setContentsMargins(28, 20, 28, 12)
         title = QLabel("MCP")
-        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {c['text']};")
+        title.setStyleSheet(
+            f"font-size: 20px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(title)
         tip = QLabel(
             "配置 Model Context Protocol 服务器。启用后，WokBee 运行时会加载其工具供 Agent 调用。"
             "stdio 需本机已安装对应命令（如 npx）。"
         )
         tip.setWordWrap(True)
-        tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        tip.setStyleSheet(
+            f"font-size: 12px; color: {c['text_hint']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(tip)
         root.addWidget(header)
 
@@ -248,11 +311,12 @@ class McpWorkspace(QWidget):
         bar.setContentsMargins(28, 12, 28, 8)
         bar.addStretch()
         add_btn = QPushButton("添加 MCP")
-        add_btn.setFixedHeight(32)
+        add_btn.setFixedHeight(34)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {c["btn_primary"]}; color: white;
-                border: none; border-radius: 6px; padding: 0 14px;
+                border: none; border-radius: 6px; padding: 0 14px; font-size: 13px;
             }}
             QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
         """)

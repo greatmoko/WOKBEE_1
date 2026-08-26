@@ -19,10 +19,11 @@ _SYSTEM = (
     '{"name":"任务名称","type":"text|script|wokbee",'
     '"schedule":"5段cron表达式(空格分隔)","cron_text":"人类可读的中文说明","config":{}}\n'
     "3. type 只能是 text | script | wokbee 之一：\n"
-    "   - text：文本类。config 可含 {\"content\": \"正文内容\", \"use_ai\": true|false}\n"
-    "   - script：脚本代码。config 可含 {\"code\":\"python代码\",\"timeout_s\":120}\n"
-    "   - wokbee：跑 WokBee 项目任务。config 可含 {\"project_id\":\"prj_xxx(可空)\","
-    "\"user_message\":\"给Agent的指令(可空)\",\"max_steps\":40}\n"
+    "   - text：文本类。config 可含 {\"content\": \"正文内容\"}\n"
+    "   - script：脚本代码。config 可含 {\"code\":\"脚本代码\",\"script_lang\":\"python|javascript\"}；"
+    "超时默认 120 秒，无需输出 timeout_s\n"
+    "   - wokbee：跑 WokBee 项目任务。config 可含 {\"project_id\":\"prj_xxx(可空)\"}；"
+    "无需 user_message / max_steps，执行时自动用项目目标\n"
     "   - 若用户提到企业微信推送，它是推送渠道而非类型：type 仍按上述选，"
     "config 追加 {\"push_wecom\":true,\"webhook_url\":\"群机器人webhook(若有)\","
     "\"msgtype\":\"text|markdown\",\"mention\":\"@all或账号\"}。\n"

@@ -112,15 +112,21 @@ class TaskExecutor:
         code = (task.code or "").strip()
         if not code:
             return {"ok": False, "message": "", "error": "脚本代码为空"}
+        timeout = max(1, int(getattr(task, "timeout_s", 120) or 120))
+        lang = (getattr(task, "script_lang", None) or "python").strip().lower()
+        try:
+            cmd = self._script_cmd(lang, code)
+        except FileNotFoundError as e:
+            return {"ok": False, "message": "", "error": str(e)}
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", code],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=task.timeout_s,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
-            return {"ok": False, "message": "", "error": f"脚本执行超时（> {task.timeout_s} 秒）"}
+            return {"ok": False, "message": "", "error": f"脚本执行超时（> {timeout} 秒）"}
         except Exception as e:
             return {"ok": False, "message": "", "error": f"脚本执行失败：{e}"}
         out = (proc.stdout or "").strip()
@@ -133,6 +139,18 @@ class TaskExecutor:
             "error": err or f"退出码 {proc.returncode}",
         }
 
+    @staticmethod
+    def _script_cmd(lang: str, code: str) -> list[str]:
+        """按语言组装解释器命令行。"""
+        import shutil
+
+        if lang in ("js", "javascript", "node", "nodejs"):
+            node = shutil.which("node") or shutil.which("nodejs")
+            if not node:
+                raise FileNotFoundError("未找到 Node.js（node），请先安装并加入 PATH")
+            return [node, "-e", code]
+        return [sys.executable, "-c", code]
+
     # ── wokbee ─────────────────────────────────────────────
     def _run_wokbee(self, task: ScheduledTask) -> dict:
         pid = (task.project_id or "").strip()
@@ -143,6 +161,9 @@ class TaskExecutor:
             return {"ok": False, "message": "", "error": f"WokBee 项目不存在：{pid}"}
         with self._project_lock(pid):
             try:
+                # 与手动运行一致：有内容则先归档上一轮，再开跑
+                self._archive_before_wokbee_run(pid)
+                project = self.project_store.get(pid) or project
                 resolved = self._resolve_exec_model(task, project)
                 approval = ApprovalFlags(
                     skip_read=True, skip_write=True,
@@ -180,6 +201,21 @@ class TaskExecutor:
             "message": (result.final_text or "").strip() or result.outcome,
             "error": (result.error or "")[:4000],
         }
+
+    def _archive_before_wokbee_run(self, project_id: str) -> None:
+        """定时跑 WokBee 前：与 UI「运行」一致，有内容才归档上一轮。"""
+        try:
+            if not self.project_store.needs_auto_archive(project_id):
+                return
+            dest = self.project_store.archive_session(
+                project_id,
+                include_memory=False,
+                reason="auto_before_run",
+            )
+            if dest:
+                logger.info("AutoBee 运行前已归档项目 %s → %s", project_id, dest)
+        except Exception:
+            logger.exception("AutoBee 运行前归档失败（仍继续执行）: %s", project_id)
 
     def _resolve_exec_model(self, task: ScheduledTask, project: Project) -> ResolvedModel:
         """优先任务约束的 exec 模型，否则回落到项目自身解析链。"""

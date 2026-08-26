@@ -1,0 +1,73 @@
+"""样式包：主题配色 + 系统默认控件样式。
+
+权威入口：
+- ``theme``：颜色令牌 ``COLORS`` / ``Theme``
+- ``system``：默认控件 QSS 与 ``apply_*`` 助手
+"""
+
+from tokbee.ui.styles.theme import COLORS, Theme
+from tokbee.ui.styles.system import (  # noqa: F401
+    DEFAULT_COMBO_WIDTH,
+    DEFAULT_COMBO_HEIGHT,
+    DEFAULT_INPUT_HEIGHT,
+    DEFAULT_BTN_HEIGHT,
+    RADIUS,
+    apply_form_combo,
+    apply_combo_popup_style,
+    apply_lineedit,
+    apply_textedit,
+    apply_spin,
+    apply_checkbox,
+    apply_primary_btn,
+    apply_secondary_btn,
+    apply_danger_btn,
+    style_hint_label,
+    tooltip_qss,
+    apply_app_tooltip_style,
+    rounded_combo_qss,
+    rounded_lineedit_qss,
+    rounded_textedit_qss,
+    rounded_spin_qss,
+    primary_btn_qss,
+    secondary_btn_qss,
+    danger_btn_qss,
+    checkbox_qss,
+    hint_label_qss,
+    title_label_qss,
+    section_label_qss,
+    underline_combo_qss,
+)
+
+__all__ = [
+    "COLORS",
+    "Theme",
+    "DEFAULT_COMBO_WIDTH",
+    "DEFAULT_COMBO_HEIGHT",
+    "DEFAULT_INPUT_HEIGHT",
+    "DEFAULT_BTN_HEIGHT",
+    "RADIUS",
+    "apply_form_combo",
+    "apply_combo_popup_style",
+    "apply_lineedit",
+    "apply_textedit",
+    "apply_spin",
+    "apply_checkbox",
+    "apply_primary_btn",
+    "apply_secondary_btn",
+    "apply_danger_btn",
+    "style_hint_label",
+    "tooltip_qss",
+    "apply_app_tooltip_style",
+    "rounded_combo_qss",
+    "rounded_lineedit_qss",
+    "rounded_textedit_qss",
+    "rounded_spin_qss",
+    "primary_btn_qss",
+    "secondary_btn_qss",
+    "danger_btn_qss",
+    "checkbox_qss",
+    "hint_label_qss",
+    "title_label_qss",
+    "section_label_qss",
+    "underline_combo_qss",
+]

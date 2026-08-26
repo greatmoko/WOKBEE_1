@@ -12,6 +12,14 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.combo_style import (
+    apply_combo_popup_style,
+    rounded_lineedit_qss,
+    rounded_spin_qss,
+    secondary_btn_qss,
+    checkbox_qss,
+    hint_label_qss,
+)
 from tokbee.core.provider_store import ProviderStore
 
 from wokbee.core.models import ApprovalFlags
@@ -67,10 +75,11 @@ def build_approval_checkboxes(
         ("skip_high_risk", "高危操作免审", "删除、安装依赖、高危系统命令等无需审批"),
     ]
     checks: dict[str, QCheckBox] = {}
+    cb_qss = checkbox_qss(c)
     for key, label, tip in defs:
         cb = QCheckBox(label)
         cb.setToolTip(tip)
-        cb.setStyleSheet(f"color: {c['text']}; font-size: 13px;")
+        cb.setStyleSheet(cb_qss)
         lay.addWidget(cb)
         checks[key] = cb
     return box, checks
@@ -115,20 +124,24 @@ class WokBeeSettingsWorkspace(QWidget):
         root.setSpacing(0)
 
         header = QFrame()
-        header.setStyleSheet(
-            f"background: {c['content_bg']}; border-bottom: 1px solid {c['border']};"
-        )
+        header.setStyleSheet(f"background: {c['content_bg']}; border: none;")
         hl = QVBoxLayout(header)
         hl.setContentsMargins(28, 20, 28, 12)
         title = QLabel("WokBee 设置")
-        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {c['text']};")
+        title.setStyleSheet(
+            f"font-size: 20px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(title)
         tip = QLabel(
             "配置工作区根目录、默认审核勾选与模型。"
             "新建项目会拷贝此处的审核策略，之后可在项目内单独修改。"
         )
         tip.setWordWrap(True)
-        tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        tip.setStyleSheet(
+            f"font-size: 12px; color: {c['text_hint']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(tip)
         root.addWidget(header)
 
@@ -161,7 +174,7 @@ class WokBeeSettingsWorkspace(QWidget):
             "Agent 禁止访问 archives/；Skills 全局挂载不复制"
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(hint)
 
         bl.addWidget(self._section_label("默认审核策略（勾选 = 免审）"))
@@ -172,40 +185,53 @@ class WokBeeSettingsWorkspace(QWidget):
             "新项目会继承这些勾选，互不影响；改全局不会自动改已有项目。"
         )
         ap_hint.setWordWrap(True)
-        ap_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        ap_hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(ap_hint)
 
         bl.addWidget(self._section_label("默认模型（OpenAI 风格 API）"))
         self._model_combo = QComboBox()
-        self._model_combo.setFixedHeight(34)
-        self._model_combo.setMinimumWidth(360)
+        apply_combo_popup_style(
+            self._model_combo, c, rounded=True,
+            fixed_width=300, fixed_height=40,
+        )
         bl.addWidget(self._model_combo, alignment=Qt.AlignmentFlag.AlignLeft)
         model_hint = QLabel(
             "新建项目优先使用「厂商设置」里带「默认」徽章的模型；"
             "此处仅在未设置厂商默认时作为回退。Key / Host 仍在厂商设置中维护。"
         )
         model_hint.setWordWrap(True)
-        model_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        model_hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(model_hint)
 
         bl.addWidget(self._section_label("执行上限"))
+        spin_qss = rounded_spin_qss(c)
+        lbl_qss = f"font-size: 13px; color: {c['text']};"
         limits = QHBoxLayout()
         limits.setSpacing(16)
-        limits.addWidget(QLabel("最大步数"))
+        max_steps_lbl = QLabel("最大步数")
+        max_steps_lbl.setStyleSheet(lbl_qss)
+        limits.addWidget(max_steps_lbl)
         self._max_steps = QSpinBox()
         self._max_steps.setRange(1, 500)
-        self._max_steps.setFixedWidth(90)
+        self._max_steps.setFixedWidth(100)
+        self._max_steps.setStyleSheet(spin_qss)
         self._max_steps.setToolTip("单次 Agent 对话/推理相关步数参考上限")
         limits.addWidget(self._max_steps)
-        limits.addWidget(QLabel("最大并行工具"))
+        max_par_lbl = QLabel("最大并行工具")
+        max_par_lbl.setStyleSheet(lbl_qss)
+        limits.addWidget(max_par_lbl)
         self._max_parallel = QSpinBox()
         self._max_parallel.setRange(1, 16)
-        self._max_parallel.setFixedWidth(90)
+        self._max_parallel.setFixedWidth(100)
+        self._max_parallel.setStyleSheet(spin_qss)
         limits.addWidget(self._max_parallel)
-        limits.addWidget(QLabel("管线阶段上限"))
+        max_ph_lbl = QLabel("管线阶段上限")
+        max_ph_lbl.setStyleSheet(lbl_qss)
+        limits.addWidget(max_ph_lbl)
         self._max_phases = QSpinBox()
         self._max_phases.setRange(1, 500)
-        self._max_phases.setFixedWidth(90)
+        self._max_phases.setFixedWidth(100)
+        self._max_phases.setStyleSheet(spin_qss)
         self._max_phases.setToolTip(
             "运行时按 pipeline.json 推进的阶段次数上限"
             "（连续同类步骤算一阶段；如 script→AI→script 为 3 阶段）"
@@ -218,18 +244,21 @@ class WokBeeSettingsWorkspace(QWidget):
             "不是强制「脚本、AI」一一交错。"
         )
         phase_hint.setWordWrap(True)
-        phase_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        phase_hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(phase_hint)
 
         bl.addWidget(self._section_label("AI 调用节流"))
         ai_int_row = QHBoxLayout()
         ai_int_row.setSpacing(10)
-        ai_int_row.addWidget(QLabel("调用最小间隔（毫秒）"))
+        ai_int_lbl = QLabel("调用最小间隔（毫秒）")
+        ai_int_lbl.setStyleSheet(lbl_qss)
+        ai_int_row.addWidget(ai_int_lbl)
         self._ai_interval = QSpinBox()
         self._ai_interval.setRange(0, 60000)
         self._ai_interval.setSingleStep(500)
-        self._ai_interval.setFixedWidth(110)
+        self._ai_interval.setFixedWidth(120)
         self._ai_interval.setSuffix(" ms")
+        self._ai_interval.setStyleSheet(spin_qss)
         self._ai_interval.setToolTip(
             "两次调用 AI 接口「发起时间」的最小间隔；0 = 不限制。"
             "用于本地模型短时调用限流。"
@@ -242,24 +271,26 @@ class WokBeeSettingsWorkspace(QWidget):
             "设 0 表示关掉节流、完全无额外开销；设为如 2000 则每次 AI 调用至少相隔 2 秒。"
         )
         ai_int_hint.setWordWrap(True)
-        ai_int_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        ai_int_hint.setStyleSheet(hint_label_qss(c))
         bl.addWidget(ai_int_hint)
 
-        ds_row = QHBoxLayout()
-        ds_row.setSpacing(12)
+        ds_box = QVBoxLayout()
+        ds_box.setSpacing(4)
         self._enable_search = QCheckBox("启用 DeepSeek 服务端搜索工具")
+        self._enable_search.setStyleSheet(checkbox_qss(c))
         self._enable_search.setToolTip(
-            "开启后在工具列表注册 deepseek_web_search；"
-            "需在「厂商设置」里配置官方 DeepSeek 的 API Key 才能成功调用。"
+            "需在「厂商设置」添加 DeepSeek 官方 API；主模型可用其他模型。"
         )
-        ds_row.addWidget(self._enable_search)
+        ds_box.addWidget(self._enable_search)
         ds_hint = QLabel(
-            "把 DeepSeek 官方联网搜索包成工具给 Agent 用（多轮检索+引用，主模型可为本地模型）。"
+            "把 DeepSeek 官方联网搜索包成工具给 Agent 用（多轮检索+引用）。"
+            "需在「厂商设置」添加 DeepSeek 官方 API 才能使用；使用其他模型时也可以调用该工具。"
         )
         ds_hint.setWordWrap(True)
-        ds_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
-        ds_row.addWidget(ds_hint, stretch=1)
-        bl.addLayout(ds_row)
+        ds_hint.setFrameShape(QFrame.Shape.NoFrame)
+        ds_hint.setStyleSheet(hint_label_qss(c))
+        ds_box.addWidget(ds_hint)
+        bl.addLayout(ds_box)
 
         bl.addStretch()
         scroll.setWidget(body)
@@ -285,29 +316,17 @@ class WokBeeSettingsWorkspace(QWidget):
     def _section_label(self, text: str) -> QLabel:
         c = self.theme.colors
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {c['text']};")
+        lbl.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {c['text']};"
+            " background: transparent; border: none;"
+        )
         return lbl
 
     def _style_input(self, edit: QLineEdit):
-        c = self.theme.colors
-        edit.setStyleSheet(f"""
-            QLineEdit {{
-                background: {c["input_bg"]}; color: {c["text"]};
-                border: 1px solid {c["input_border"]}; border-radius: 6px;
-                padding: 0 10px; font-size: 13px;
-            }}
-            QLineEdit:focus {{ border: 1px solid {c["input_focus_border"]}; }}
-        """)
+        edit.setStyleSheet(rounded_lineedit_qss(self.theme.colors))
 
     def _secondary_btn_qss(self) -> str:
-        c = self.theme.colors
-        return f"""
-            QPushButton {{
-                background: {c["btn_bg"]}; color: {c["text"]};
-                border: none; border-radius: 6px; font-size: 13px;
-            }}
-            QPushButton:hover {{ background: {c["btn_hover"]}; }}
-        """
+        return secondary_btn_qss(self.theme.colors)
 
     def _browse_workspace(self):
         start = self._ws_edit.text().strip() or str(Path.home())

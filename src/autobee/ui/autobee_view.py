@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal, QTimer, QThread
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QSize
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QLineEdit,
     QTextEdit, QComboBox, QScrollArea, QPushButton, QStackedWidget,
-    QSizePolicy, QListWidget, QListWidgetItem, QCheckBox, QDialog,
-    QMessageBox,
+    QSizePolicy, QListWidget, QListWidgetItem, QDialog,
 )
 
 from apscheduler.triggers.cron import CronTrigger
 
 from tokbee.ui.styles.theme import Theme
-from tokbee.ui.combo_style import apply_combo_popup_style
+from tokbee.ui.combo_style import apply_combo_popup_style, secondary_btn_qss
 from tokbee.core.provider_store import ProviderStore
 
 from wokbee.core.project_store import ProjectStore
 
 from autobee.core.models import JobLog, ScheduledTask, TaskRunStatus, TaskType, new_task_id
-from autobee.core.store import AutoBeeStore
+from autobee.core.store import AutoBeeStore, MAX_LOGS_PER_TASK
 from autobee.engine.nl_builder import NLBuilder
 from autobee.engine.scheduler import SchedulerService, describe_cron
 
@@ -31,34 +30,146 @@ _STATUS_COLOR = {
 }
 
 
-def _tip(parent: QWidget, theme: Theme, message: str, title: str = "提示"):
-    dlg = QDialog(parent)
-    dlg.setWindowTitle(title)
-    dlg.setMinimumSize(400, 160)
-    dlg.resize(420, 200)
-    dlg.setStyleSheet(f"background: {theme.colors['content_bg']};")
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(24, 20, 24, 18)
-    msg = QLabel(message)
-    msg.setWordWrap(True)
-    msg.setStyleSheet(f"font-size: 14px; color: {theme.colors['text']};")
-    layout.addWidget(msg, stretch=1)
-    row = QHBoxLayout()
-    row.addStretch()
-    ok = QPushButton("知道了")
-    ok.setFixedSize(80, 34)
-    ok.setCursor(Qt.CursorShape.PointingHandCursor)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {theme.colors["btn_bg"]}; color: {theme.colors["text"]};
-            border: none; border-radius: 6px; font-size: 13px;
-        }}
-        QPushButton:hover {{ background: {theme.colors["btn_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(ok)
-    layout.addLayout(row)
-    dlg.exec()
+def _time_part(ts: str) -> str:
+    """从 'YYYY-MM-DD HH:MM:SS' 取时间或原样返回。"""
+    s = (ts or "").strip()
+    if not s:
+        return "—"
+    parts = s.split()
+    return parts[1] if len(parts) > 1 else s
+
+
+def _date_time(ts: str) -> str:
+    return (ts or "").strip() or "—"
+
+
+class _LogDetailDialog(QDialog):
+    """运行详情弹窗。"""
+
+    def __init__(self, theme: Theme, log: JobLog, task_name: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("运行详情")
+        self.setMinimumSize(520, 420)
+        self.resize(560, 480)
+        c = theme.colors
+        self.setStyleSheet(f"background: {c['content_bg']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 18)
+        lay.setSpacing(10)
+
+        title = QLabel(task_name or "定时任务")
+        title.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
+        lay.addWidget(title)
+
+        color_key = _STATUS_COLOR.get(log.status, "text_secondary")
+        status_color = c.get(color_key, c["text_secondary"])
+        lines = [
+            f"状态：{log.status.label}",
+            f"开始：{_date_time(log.started_at)}",
+            f"结束：{_date_time(log.finished_at)}",
+        ]
+        if log.duration_s:
+            lines.append(f"耗时：{log.duration_s:.1f}s")
+        meta = QLabel("    ".join(lines))
+        meta.setWordWrap(True)
+        meta.setStyleSheet(
+            f"font-size: 12px; color: {status_color};"
+            "background: transparent; border: none;"
+        )
+        lay.addWidget(meta)
+
+        body = QTextEdit()
+        body.setReadOnly(True)
+        parts = []
+        if log.summary:
+            parts.append(log.summary)
+        if log.error:
+            parts.append(f"错误：\n{log.error}")
+        if log.meta:
+            try:
+                import json
+                parts.append("元数据：\n" + json.dumps(log.meta, ensure_ascii=False, indent=2))
+            except Exception:
+                parts.append(f"元数据：{log.meta}")
+        body.setPlainText("\n\n".join(parts) if parts else "（无详细内容）")
+        body.setStyleSheet(f"""
+            QTextEdit {{
+                background: {c["input_bg"]}; color: {c["text"]};
+                border: 1px solid {c["input_border"]}; border-radius: 8px;
+                padding: 10px; font-size: 13px;
+            }}
+        """)
+        lay.addWidget(body, stretch=1)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedSize(80, 34)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(secondary_btn_qss(c))
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+
+
+class _LogRow(QFrame):
+    """列表行：运行时间 / 任务名 / 完成情况。"""
+
+    def __init__(self, theme: Theme, log: JobLog, task_name: str, parent=None):
+        super().__init__(parent)
+        c = theme.colors
+        self.setObjectName("logRow")
+        self.setStyleSheet(f"""
+            QFrame#logRow {{
+                background: transparent; border: none;
+            }}
+            QFrame#logRow QLabel {{
+                background: transparent; border: none;
+            }}
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(10)
+
+        time_lbl = QLabel(_time_part(log.finished_at or log.started_at))
+        time_lbl.setFixedWidth(64)
+        time_lbl.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']};")
+        lay.addWidget(time_lbl)
+
+        name_lbl = QLabel(task_name or "—")
+        name_lbl.setStyleSheet(f"font-size: 13px; color: {c['text']}; font-weight: 600;")
+        name_lbl.setMinimumWidth(80)
+        lay.addWidget(name_lbl, stretch=2)
+
+        color_key = _STATUS_COLOR.get(log.status, "text_secondary")
+        status_color = c.get(color_key, c["text_secondary"])
+        status_lbl = QLabel(log.status.label)
+        status_lbl.setFixedWidth(48)
+        status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_lbl.setStyleSheet(
+            f"font-size: 12px; color: {status_color}; font-weight: bold;"
+        )
+        lay.addWidget(status_lbl)
+
+        dur = f"{log.duration_s:.1f}s" if log.duration_s else "—"
+        dur_lbl = QLabel(dur)
+        dur_lbl.setFixedWidth(52)
+        dur_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        dur_lbl.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        lay.addWidget(dur_lbl)
+
+        brief = (log.error or log.summary or "").replace("\n", " ").strip()
+        if len(brief) > 36:
+            brief = brief[:36] + "…"
+        brief_lbl = QLabel(brief or "—")
+        brief_lbl.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        lay.addWidget(brief_lbl, stretch=3)
+
+    def sizeHint(self) -> QSize:
+        return QSize(200, 44)
 
 
 class _NLWorker(QThread):
@@ -82,6 +193,7 @@ class _NLWorker(QThread):
 
 class _TaskItem(QFrame):
     clicked = Signal(str)
+    toggle_enabled = Signal(str)
 
     def __init__(self, task: ScheduledTask, theme: Theme, selected: bool = False, parent=None):
         super().__init__(parent)
@@ -123,6 +235,30 @@ class _TaskItem(QFrame):
             "background: transparent; border: none;"
         )
         top.addWidget(name, 1)
+
+        # 列表内启用/停用开关
+        toggle = QPushButton("停用" if t.enabled else "启用")
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.setFixedSize(44, 22)
+        toggle.setToolTip("停用后不再按计划触发；可随时重新启用" if t.enabled else "启用后按 cron 计划触发")
+        if t.enabled:
+            toggle.setStyleSheet(f"""
+                QPushButton {{
+                    background: {c["btn_bg"]}; color: {c["text_secondary"]};
+                    border: none; border-radius: 4px; font-size: 11px;
+                }}
+                QPushButton:hover {{ background: {c["btn_hover"]}; color: {c["danger"]}; }}
+            """)
+        else:
+            toggle.setStyleSheet(f"""
+                QPushButton {{
+                    background: {c.get("accent_light", c["btn_bg"])}; color: {c["accent"]};
+                    border: none; border-radius: 4px; font-size: 11px;
+                }}
+                QPushButton:hover {{ background: {c["btn_hover"]}; }}
+            """)
+        toggle.clicked.connect(lambda: self.toggle_enabled.emit(self.task.id))
+        top.addWidget(toggle)
         layout.addLayout(top)
 
         mid = QHBoxLayout()
@@ -140,7 +276,7 @@ class _TaskItem(QFrame):
         mid.addStretch()
         layout.addLayout(mid)
 
-        enabled = "已启用" if t.enabled else "已暂停"
+        enabled = "已启用" if t.enabled else "已停用"
         state = c["success"] if t.enabled else c["text_hint"]
         last_label = t.last_status or "未运行"
         info = QLabel(f"{enabled} · {last_label}")
@@ -158,6 +294,7 @@ class _TaskItem(QFrame):
 class _TaskList(QFrame):
     task_selected = Signal(str)
     new_task = Signal()
+    toggle_enabled = Signal(str)
 
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
@@ -266,6 +403,7 @@ class _TaskList(QFrame):
                 found_selected = True
             item = _TaskItem(t, self.theme, selected=(t.id == self._selected_id))
             item.clicked.connect(self._on_select)
+            item.toggle_enabled.connect(self.toggle_enabled.emit)
             self._list_layout.addWidget(item)
 
         # 若当前选中的任务不在过滤队列内，清空选中（详情保持上次编辑不丢）
@@ -290,22 +428,11 @@ class _TaskList(QFrame):
         return self._selected_id
 
 
-def _form_row(label: str, widget: QWidget) -> QHBoxLayout:
-    row = QHBoxLayout()
-    row.setSpacing(8)
-    lab = QLabel(label)
-    lab.setMinimumWidth(72)
-    row.addWidget(lab)
-    row.addWidget(widget, 1)
-    return row
-
-
 class _TaskDetail(QWidget):
     """右栏：任务编辑器 + 运行历史。"""
 
     task_saved = Signal(str)
     task_deleted = Signal(str)
-    task_state_changed = Signal(str)
 
     def __init__(self, theme: Theme, store: AutoBeeStore, scheduler: SchedulerService,
                  provider_store: ProviderStore, project_store: ProjectStore, parent=None):
@@ -316,7 +443,8 @@ class _TaskDetail(QWidget):
         self.provider_store = provider_store
         self.project_store = project_store
         self._task_id: str | None = None
-        self._current_type = TaskType.TEXT
+        self._current_type = TaskType.WOKBEE
+        self._log_cache: dict[str, JobLog] = {}
         self._build()
 
     # ── 构建 ───────────────────────────────────────────────
@@ -350,172 +478,215 @@ class _TaskDetail(QWidget):
     def _build_form(self) -> QWidget:
         form = QWidget()
         c = self.theme.colors
-        outer = QVBoxLayout(form)
-        outer.setContentsMargins(16, 12, 16, 12)
-        outer.setSpacing(8)
+        form.setStyleSheet(f"background: {c['content_bg']};")
+        form_lay = QVBoxLayout(form)
+        form_lay.setContentsMargins(0, 0, 0, 0)
+        form_lay.setSpacing(0)
 
-        # 标题行
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        self._name = QLineEdit()
-        self._name.setPlaceholderText("任务名称")
-        self._name.setFixedHeight(32)
-        head.addWidget(self._name, 1)
-        self._enable_btn = QPushButton("暂停")
-        self._enable_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._enable_btn.setFixedSize(60, 32)
-        self._enable_btn.clicked.connect(self._on_toggle_enable)
-        head.addWidget(self._enable_btn)
-        outer.addLayout(head)
+        # 上半：可滚动表单区（避免矮窗口下推送地址被挡住）
+        body = QWidget()
+        body.setStyleSheet(f"background: {c['content_bg']};")
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(20, 16, 20, 8)
+        outer.setSpacing(10)
 
-        # 自然语言生成
-        gen_row = QHBoxLayout()
-        gen_row.setSpacing(8)
-        self._nl_input = QLineEdit()
-        self._nl_input.setPlaceholderText("用自然语言描述，如：每天上午9点给企业微信群推问候")
-        self._nl_input.setFixedHeight(30)
-        gen_row.addWidget(self._nl_input, 1)
-        gen_btn = QPushButton("用 AI 生成")
-        gen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        gen_btn.setFixedSize(86, 30)
-        gen_btn.setStyleSheet(f"""
-            QPushButton {{ background: {c["btn_bg"]}; color: {c["text"]};
-                border: none; border-radius: 6px; font-size: 12px; }}
+        # 统一输入样式
+        self._line_qss = f"""
+            QLineEdit {{
+                background: {c["input_bg"]}; color: {c["text"]};
+                border: 1px solid {c["input_border"]}; border-radius: 6px;
+                padding: 0 10px; font-size: 13px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {c["input_focus_border"]}; }}
+        """
+        self._text_qss = f"""
+            QTextEdit {{
+                background: {c["input_bg"]}; color: {c["text"]};
+                border: 1px solid {c["input_border"]}; border-radius: 8px;
+                padding: 8px; font-size: 13px;
+            }}
+            QTextEdit:focus {{ border: 1px solid {c["input_focus_border"]}; }}
+        """
+        self._btn_qss = f"""
+            QPushButton {{
+                background: {c["btn_bg"]}; color: {c["text"]};
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
             QPushButton:hover {{ background: {c["btn_hover"]}; }}
+            QPushButton:disabled {{ color: {c["text_hint"]}; }}
+        """
+
+        # ① 自然语言描述（单独一行）
+        self._nl_input = QTextEdit()
+        self._nl_input.setPlaceholderText(
+            "用自然语言描述定时任务，如：每天上午9点给企业微信群推送问候"
+        )
+        self._nl_input.setFixedHeight(52)
+        self._nl_input.setStyleSheet(self._text_qss)
+        self._nl_input.textChanged.connect(self._update_action_btns)
+        outer.addWidget(self._nl_input)
+
+        # ② 操作栏：生成模型 + AI 生成 + 保存 + 删除 + 立即运行
+        ai_row = QHBoxLayout()
+        ai_row.setSpacing(8)
+        self._gen_combo = QComboBox()
+        self._gen_combo.setFixedHeight(34)
+        self._gen_combo.setMinimumWidth(160)
+        self._gen_combo.setToolTip("AI 生成所用模型（初始为默认模型）")
+        apply_combo_popup_style(self._gen_combo, c, rounded=True)
+        ai_row.addWidget(self._gen_combo, 1)
+
+        grey_btn = f"""
+            QPushButton {{
+                background: {c["btn_bg"]}; color: {c["text"]};
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["btn_hover"]}; }}
+            QPushButton:disabled {{ color: {c["text_hint"]}; }}
+        """
+        self._gen_btn = QPushButton("AI 生成")
+        self._gen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gen_btn.setFixedSize(80, 34)
+        self._gen_btn.setStyleSheet(grey_btn)
+        self._gen_btn.clicked.connect(self._on_nl_generate)
+        ai_row.addWidget(self._gen_btn)
+
+        self._save_btn = QPushButton("保存")
+        self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._save_btn.setFixedSize(64, 34)
+        self._save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_primary"]}; color: #ffffff;
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
+            QPushButton:disabled {{ background: {c["btn_bg"]}; color: {c["text_hint"]}; }}
         """)
-        gen_btn.clicked.connect(self._on_nl_generate)
-        gen_row.addWidget(gen_btn)
-        outer.addLayout(gen_row)
+        self._save_btn.clicked.connect(self._on_save)
+        ai_row.addWidget(self._save_btn)
 
-        # description
-        self._description = QTextEdit()
-        self._description.setPlaceholderText("任务描述（自然语言来源，供再次生成修饰）")
-        self._description.setFixedHeight(48)
-        outer.addWidget(self._description)
+        self._del_btn = QPushButton("删除")
+        self._del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._del_btn.setFixedSize(64, 34)
+        self._del_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_bg"]}; color: {c["danger"]};
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["btn_hover"]}; }}
+            QPushButton:disabled {{ color: {c["text_hint"]}; }}
+        """)
+        self._del_btn.clicked.connect(self._on_delete)
+        ai_row.addWidget(self._del_btn)
 
-        # 类型 + 配置
+        self._run_btn = QPushButton("立即运行")
+        self._run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._run_btn.setFixedSize(80, 34)
+        self._run_btn.setStyleSheet(grey_btn)
+        self._run_btn.clicked.connect(self._on_run_now)
+        ai_row.addWidget(self._run_btn)
+        outer.addLayout(ai_row)
+        self._update_action_btns()
+
+        # ③ 任务名称 | 定时 cron
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("定时任务名称")
+        self._name.setFixedHeight(34)
+        self._name.setStyleSheet(self._line_qss)
+        row2.addWidget(self._fld("任务名称", self._name), 1)
+
+        self._schedule = QLineEdit()
+        self._schedule.setPlaceholderText("cron，如 0 9 * * *")
+        self._schedule.setFixedHeight(34)
+        self._schedule.setStyleSheet(self._line_qss)
+        self._schedule.textChanged.connect(self._update_cron_preview)
+        cron_fld, self._cron_title = self._fld_with_label("定时 (cron)", self._schedule)
+        self._cron_text_value = ""
+        row2.addWidget(cron_fld, 1)
+        outer.addLayout(row2)
+
+        # ④ 执行模型 + 任务类型
+        row3 = QHBoxLayout()
+        row3.setSpacing(12)
+        self._exec_combo = QComboBox()
+        self._exec_combo.setFixedHeight(34)
+        apply_combo_popup_style(self._exec_combo, c, rounded=True)
+        row3.addWidget(self._fld("执行模型", self._exec_combo), 1)
         self._type_combo = self._build_type_combo()
-        type_row = _form_row("执行类型", self._type_combo)
-        outer.addLayout(type_row)
+        row3.addWidget(self._fld("任务类型", self._type_combo), 1)
+        outer.addLayout(row3)
+        self._refill_model_combos()
+
+        # 类型专属配置
         self._config_stack = QStackedWidget()
         self._config_stack.addWidget(self._build_text_page())
         self._config_stack.addWidget(self._build_script_page())
         self._config_stack.addWidget(self._build_wokbee_page())
         outer.addWidget(self._config_stack)
 
-        # 推送渠道（企业微信，作用到任意类型的结果）
-        push_layout = QVBoxLayout()
-        push_layout.setContentsMargins(0, 4, 0, 0)
-        push_layout.setSpacing(4)
-        self._push_wecom = QCheckBox("结果推送到企业微信")
-        self._push_wecom.setStyleSheet(f"color: {c['text_secondary']}; background: transparent;")
-        self._push_wecom.toggled.connect(self._on_push_toggled)
-        push_layout.addWidget(self._push_wecom)
-        self._push_box = QWidget()
-        box_lay = QVBoxLayout(self._push_box)
-        box_lay.setContentsMargins(0, 0, 0, 0)
-        box_lay.setSpacing(4)
+        # ⑤ 微信推送地址（有值即开启推送）
         self._webhook = QLineEdit()
-        self._webhook.setPlaceholderText("企业微信群机器人 Webhook 地址")
-        self._webhook.setFixedHeight(28)
-        box_lay.addLayout(_form_row("Webhook", self._webhook))
-        self._msgtype = QComboBox()
-        self._msgtype.setFixedHeight(28)
-        apply_combo_popup_style(self._msgtype, c)
-        self._msgtype.addItem("文本", "text")
-        self._msgtype.addItem("Markdown", "markdown")
-        box_lay.addLayout(_form_row("消息类型", self._msgtype))
-        self._mention = QLineEdit()
-        self._mention.setPlaceholderText("提及 @all 或账号/手机号（可选）")
-        self._mention.setFixedHeight(28)
-        box_lay.addLayout(_form_row("提及", self._mention))
-        push_layout.addWidget(self._push_box)
-        outer.addLayout(push_layout)
+        self._webhook.setPlaceholderText("企业微信群机器人 Webhook 地址（填写即开启推送）")
+        self._webhook.setFixedHeight(34)
+        self._webhook.setStyleSheet(self._line_qss)
+        outer.addWidget(self._fld("微信推送地址", self._webhook))
 
-        # schedule
-        sched_row = QHBoxLayout()
-        sched_row.setSpacing(8)
-        sched_lab = QLabel("定时 (cron)")
-        sched_lab.setMinimumWidth(72)
-        sched_row.addWidget(sched_lab)
-        self._schedule = QLineEdit()
-        self._schedule.setPlaceholderText('如 0 9 * * * 或 */30 * * * *')
-        self._schedule.setFixedHeight(30)
-        self._schedule.textChanged.connect(self._update_cron_preview)
-        sched_row.addWidget(self._schedule, 1)
-        self._cron_text = QLineEdit()
-        self._cron_text.setPlaceholderText("如：每天 09:00")
-        self._cron_text.setFixedHeight(30)
-        sched_row.addWidget(self._cron_text, 1)
-        outer.addLayout(sched_row)
-        self._cron_hint = QLabel("")
-        self._cron_hint.setStyleSheet(
-            f"font-size: 11px; color: {c['text_hint']}; background: transparent; border: none;"
+        # ⑥ 运行历史（接在推送地址后，随表单滚动；默认最近 10 条）
+        hist_lab = QLabel(f"运行历史（最近 {MAX_LOGS_PER_TASK} 条）")
+        hist_lab.setStyleSheet(
+            f"font-size: 12px; color: {c['text_secondary']};"
+            "background: transparent; border: none; font-weight: bold;"
         )
-        outer.addWidget(self._cron_hint)
-
-        # AI 模型
-        model_row = QHBoxLayout()
-        model_row.setSpacing(8)
-        self._gen_combo = QComboBox()
-        self._gen_combo.setFixedHeight(30)
-        apply_combo_popup_style(self._gen_combo, c)
-        self._exec_combo = QComboBox()
-        self._exec_combo.setFixedHeight(30)
-        apply_combo_popup_style(self._exec_combo, c)
-        model_row.addWidget(self._fld("生成模型", self._gen_combo))
-        model_row.addWidget(self._fld("执行模型", self._exec_combo))
-        outer.addLayout(model_row)
-        self._refill_model_combos()
-
-        # 操作行
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        self._run_btn = QPushButton("立即运行")
-        self._run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._run_btn.setFixedSize(88, 34)
-        self._run_btn.clicked.connect(self._on_run_now)
-        btn_row.addWidget(self._run_btn)
-        self._save_btn = QPushButton("保存")
-        self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._save_btn.setFixedSize(72, 34)
-        self._save_btn.setStyleSheet(f"""
-            QPushButton {{ background: {c["btn_primary"]}; color: #ffffff;
-                border: none; border-radius: 6px; font-size: 13px; }}
-            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
-        """)
-        self._save_btn.clicked.connect(self._on_save)
-        btn_row.addWidget(self._save_btn)
-        self._del_btn = QPushButton("删除")
-        self._del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._del_btn.setFixedSize(72, 34)
-        self._del_btn.setStyleSheet(f"""
-            QPushButton {{ background: {c["btn_bg"]}; color: {c["danger"]};
-                border: none; border-radius: 6px; font-size: 13px; }}
-            QPushButton:hover {{ background: {c["btn_hover"]}; }}
-        """)
-        self._del_btn.clicked.connect(self._on_delete)
-        btn_row.addWidget(self._del_btn)
-        btn_row.addStretch()
-        outer.addLayout(btn_row)
-
-        # 运行历史
-        outer.addWidget(QLabel("运行历史"))
+        outer.addWidget(hist_lab)
         self._logs = QListWidget()
+        self._logs.setMinimumHeight(120)
+        self._logs.setMaximumHeight(220)
+        self._logs.setCursor(Qt.CursorShape.PointingHandCursor)
         self._logs.setStyleSheet(f"""
-            QListWidget {{ background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
-                border-radius: 6px; padding: 6px; font-size: 12px; }}
-            QListWidget::item {{ padding: 4px; border-bottom: 1px solid {c["border_light"]}; }}
+            QListWidget {{
+                background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
+                border-radius: 8px; padding: 4px; outline: none;
+            }}
+            QListWidget::item {{
+                border: none; border-bottom: 1px solid {c["border_light"]};
+                border-radius: 4px; margin: 1px 0;
+                min-height: 40px;
+            }}
+            QListWidget::item:selected {{
+                background: {c["subnav_active"]};
+            }}
+            QListWidget::item:hover {{
+                background: {c["subnav_hover"]};
+            }}
         """)
-        outer.addWidget(self._logs, stretch=1)
+        self._logs.itemClicked.connect(self._on_log_clicked)
+        outer.addWidget(self._logs)
+        outer.addStretch(1)
+
+        # 默认任务类型：WokBee
+        self._set_task_type(TaskType.WOKBEE)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.setWidget(body)
+        form_lay.addWidget(scroll, stretch=1)
 
         return form
 
     def _fld(self, label: str, widget: QWidget) -> QWidget:
+        w, _ = self._fld_with_label(label, widget)
+        return w
+
+    def _fld_with_label(self, label: str, widget: QWidget) -> tuple[QWidget, QLabel]:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        lay.setSpacing(4)
         lab = QLabel(label)
         lab.setStyleSheet(
             f"font-size: 11px; color: {self.theme.colors['text_hint']};"
@@ -523,13 +694,13 @@ class _TaskDetail(QWidget):
         )
         lay.addWidget(lab)
         lay.addWidget(widget)
-        return w
+        return w, lab
 
     def _build_type_combo(self) -> QComboBox:
         c = self.theme.colors
         combo = QComboBox()
-        combo.setFixedHeight(30)
-        apply_combo_popup_style(combo, c)
+        combo.setFixedHeight(34)
+        apply_combo_popup_style(combo, c, rounded=True)
         combo.addItem(TaskType.TEXT.label, TaskType.TEXT.value)
         combo.addItem(TaskType.SCRIPT.label, TaskType.SCRIPT.value)
         combo.addItem(TaskType.WOKBEE.label, TaskType.WOKBEE.value)
@@ -539,72 +710,94 @@ class _TaskDetail(QWidget):
     def _build_text_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
         self._content = QTextEdit()
-        self._content.setPlaceholderText("文本正文；若勾选下方用AI，则按描述生成正文")
-        self._content.setFixedHeight(80)
+        self._content.setPlaceholderText("文本正文")
+        self._content.setFixedHeight(72)
+        self._content.setStyleSheet(getattr(self, "_text_qss", ""))
         lay.addWidget(self._content)
-        self._use_ai = QCheckBox("用 AI 按描述生成正文（用执行模型）")
-        self._use_ai.setStyleSheet(
-            f"color: {self.theme.colors['text_secondary']}; background: transparent;"
-        )
-        lay.addWidget(self._use_ai)
         return page
 
     def _build_script_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
+        self._script_lang = QComboBox()
+        self._script_lang.setFixedHeight(34)
+        apply_combo_popup_style(self._script_lang, self.theme.colors, rounded=True)
+        self._script_lang.addItem("Python", "python")
+        self._script_lang.addItem("JavaScript (Node.js)", "javascript")
+        self._script_lang.currentIndexChanged.connect(self._on_script_lang_changed)
+        lay.addWidget(self._fld("脚本语言", self._script_lang))
         self._code = QTextEdit()
-        self._code.setPlaceholderText("Python 脚本代码（在任务运行时用系统 Python 执行）")
-        self._code.setFixedHeight(110)
+        self._code.setPlaceholderText("Python 脚本代码（用系统 Python 执行）")
+        self._code.setFixedHeight(72)
+        self._code.setStyleSheet(getattr(self, "_text_qss", ""))
         lay.addWidget(self._code)
-        self._timeout = QLineEdit()
-        self._timeout.setFixedHeight(30)
-        lay.addLayout(_form_row("超时(秒)", self._timeout))
         return page
+
+    def _on_script_lang_changed(self):
+        lang = self._script_lang.currentData() or "python"
+        if lang == "javascript":
+            self._code.setPlaceholderText("JavaScript 脚本代码（用系统 Node.js 执行）")
+        else:
+            self._code.setPlaceholderText("Python 脚本代码（用系统 Python 执行）")
 
     def _build_wokbee_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 6, 0, 0)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
-        self._project_combo = QComboBox()
-        self._project_combo.setFixedHeight(30)
-        apply_combo_popup_style(self._project_combo, self.theme.colors)
-        self._refill_projects()
-        lay.addLayout(_form_row("项目", self._project_combo))
-        self._user_message = QTextEdit()
-        self._user_message.setPlaceholderText("给 Agent 的指令（留空则用项目目标）")
-        self._user_message.setFixedHeight(64)
-        lay.addWidget(self._user_message)
-        self._max_steps = QLineEdit()
-        self._max_steps.setFixedHeight(30)
-        lay.addLayout(_form_row("最大步数", self._max_steps))
+        self._project_id = QLineEdit()
+        self._project_id.setPlaceholderText("粘贴 WokBee 项目 ID（在项目列表右键「复制项目 ID」）")
+        self._project_id.setFixedHeight(34)
+        self._project_id.setStyleSheet(getattr(self, "_line_qss", ""))
+        lay.addWidget(self._fld("项目 ID", self._project_id))
+        hint = QLabel("定时触发时将按该项目目标自动运行，无需额外填写指令。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(
+            f"font-size: 11px; color: {self.theme.colors['text_hint']};"
+            "background: transparent; border: none;"
+        )
+        lay.addWidget(hint)
         return page
 
     # ── 数据刷新 ───────────────────────────────────────────
-    def _refill_projects(self):
-        self._project_combo.blockSignals(True)
-        self._project_combo.clear()
-        self._project_combo.addItem("— 未关联项目 —", "")
-        for p in self.project_store.list_projects():
-            self._project_combo.addItem(f"{p.title} ({p.id})", p.id)
-        self._project_combo.blockSignals(False)
-
     def _refill_model_combos(self):
         models = self.provider_store.list_selectable_models()
-        for combo, sel_pid, sel_mid in [
-            (self._gen_combo, "", ""), (self._exec_combo, "", ""),
-        ]:
+        default = self.provider_store.resolve_default() or self.provider_store.first_resolved()
+
+        for combo in (self._gen_combo, self._exec_combo):
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem("（未设置：回落到默认模型）", "")
-            for m in models:
-                combo.addItem(f"{m.provider_name} / {m.model_id}", (m.provider_id, m.model_id))
+            if not models:
+                combo.addItem("（暂无可用模型）", "")
+            else:
+                for m in models:
+                    combo.addItem(
+                        f"{m.provider_name} / {m.model_id}", (m.provider_id, m.model_id)
+                    )
+                self._pick_model(combo, default)
             combo.blockSignals(False)
+
+    @staticmethod
+    def _pick_model(combo: QComboBox, model) -> None:
+        """按 ResolvedModel 或 (provider_id, model_id) 选中项；找不到则保持现状。"""
+        if model is None:
+            return
+        if hasattr(model, "provider_id"):
+            pid, mid = model.provider_id, model.model_id
+        elif isinstance(model, tuple) and len(model) == 2:
+            pid, mid = model
+        else:
+            return
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            if isinstance(data, tuple) and data[0] == pid and data[1] == mid:
+                combo.setCurrentIndex(i)
+                return
 
     # ── 详情回填 ───────────────────────────────────────────
     def set_empty(self):
@@ -615,47 +808,40 @@ class _TaskDetail(QWidget):
         """进入新建态：清空表单并切到编辑页。"""
         self._task_id = None
         self._clear_form()
-        self._set_edit_enabled(True)
-        self._enable_btn.setEnabled(False)
-        self._enable_btn.setText("")
-        self._run_btn.setEnabled(False)
-        self._del_btn.setEnabled(False)
         self._stack.setCurrentWidget(self._form)
+        self._set_edit_enabled(True)
         self._name.setText("")
         self._name.setPlaceholderText("新任务名称")
         self._name.setFocus()
+        self._update_action_btns()
 
     def _clear_form(self):
         self._name.setText("")
-        self._description.setPlainText("")
+        self._nl_input.setPlainText("")
+        self._cron_text_value = ""
         self._content.setPlainText("")
-        self._use_ai.setChecked(False)
         self._code.clear()
-        self._timeout.setText("120")
-        self._user_message.clear()
-        self._max_steps.setText("40")
+        self._script_lang.setCurrentIndex(0)
+        self._on_script_lang_changed()
         self._schedule.setText("*/30 * * * *")
-        self._cron_text.clear()
-        self._refill_projects()
-        self._project_combo.setCurrentIndex(0)
-        self._type_combo.setCurrentIndex(0)
+        self._project_id.clear()
+        self._set_task_type(TaskType.WOKBEE)
+        self._refill_model_combos()
         self._update_cron_preview()
-        # 推送渠道
-        self._push_wecom.setChecked(False)
         self._webhook.clear()
-        self._msgtype.setCurrentIndex(0)
-        self._mention.clear()
-        self._push_box.setVisible(False)
+        self._log_cache.clear()
         self._logs.clear()
-        QListWidgetItem("暂无运行历史", self._logs)
+        empty = QListWidgetItem("暂无运行历史")
+        empty.setFlags(Qt.ItemFlag.NoItemFlags)
+        self._logs.addItem(empty)
 
     def load(self, task: ScheduledTask):
         self._task_id = task.id
         self._stack.setCurrentWidget(self._form)
         self._name.setText(task.name)
-        self._description.setPlainText(task.description)
+        self._nl_input.setPlainText(task.description)
         self._schedule.setText(task.schedule)
-        self._cron_text.setText(task.cron_text)
+        self._cron_text_value = task.cron_text or ""
         self._update_cron_preview()
 
         idx = [TaskType.TEXT, TaskType.SCRIPT, TaskType.WOKBEE].index(task.task_type)
@@ -663,147 +849,132 @@ class _TaskDetail(QWidget):
         self._config_stack.setCurrentIndex(idx)
 
         self._content.setPlainText(task.content)
-        self._use_ai.setChecked(task.use_ai)
         self._code.setPlainText(task.code)
-        self._timeout.setText(str(task.timeout_s))
-        self._refill_projects()
-        self._select_project(task.project_id)
-        self._user_message.setPlainText(task.user_message)
-        self._max_steps.setText(str(task.max_steps))
-        # 推送渠道
-        self._push_wecom.setChecked(task.push_wecom)
+        lang = getattr(task, "script_lang", "python") or "python"
+        lang_idx = 1 if lang == "javascript" else 0
+        self._script_lang.setCurrentIndex(lang_idx)
+        self._on_script_lang_changed()
+        self._project_id.setText(task.project_id or "")
         self._webhook.setText(task.webhook_url)
-        self._msgtype.setCurrentIndex(0 if task.msgtype != "markdown" else 1)
-        self._mention.setText(task.mention)
-        self._push_box.setVisible(bool(task.push_wecom))
 
-        def pick(combo, pid, mid):
-            combo.blockSignals(True)
-            for i in range(combo.count()):
-                data = combo.itemData(i)
-                if isinstance(data, tuple) and data[0] == pid and data[1] == mid:
-                    combo.setCurrentIndex(i)
-                    break
-            combo.blockSignals(False)
-        pick(self._gen_combo, task.gen_provider, task.gen_model_id)
-        pick(self._exec_combo, task.exec_provider, task.exec_model_id)
+        self._refill_model_combos()
+        if task.gen_provider and task.gen_model_id:
+            self._pick_model(self._gen_combo, (task.gen_provider, task.gen_model_id))
+        if task.exec_provider and task.exec_model_id:
+            self._pick_model(self._exec_combo, (task.exec_provider, task.exec_model_id))
 
-        # 启用态按钮
-        self._enable_btn.setText("暂停" if task.enabled else "启用")
-        self._enable_btn.setEnabled(True)
-        self._run_btn.setEnabled(True)
-        self._del_btn.setEnabled(True)
         self._set_edit_enabled(True)
         self._load_logs(task.id)
 
-    def _select_project(self, project_id: str):
-        for i in range(self._project_combo.count()):
-            if self._project_combo.itemData(i) == project_id:
-                self._project_combo.setCurrentIndex(i)
-                return
+    def _update_action_btns(self, *, generating: bool = False):
+        """按输入/是否已保存更新操作按钮可用状态。"""
+        has_nl = bool((self._nl_input.toPlainText() or "").strip())
+        saved = bool(self._task_id)
+        self._gen_btn.setEnabled(not generating and has_nl)
+        self._save_btn.setEnabled(not generating)
+        self._del_btn.setEnabled(not generating and saved)
+        self._run_btn.setEnabled(not generating and saved)
 
     def _set_edit_enabled(self, enabled: bool):
-        for w in [self._name, self._description, self._content, self._use_ai,
-                  self._code, self._timeout, self._user_message, self._max_steps,
-                  self._schedule, self._cron_text, self._gen_combo, self._exec_combo,
-                  self._type_combo, self._project_combo,
-                  self._push_wecom, self._push_box]:
+        for w in [self._name, self._nl_input, self._content,
+                  self._code, self._script_lang,
+                  self._schedule, self._gen_combo, self._exec_combo,
+                  self._type_combo, self._project_id, self._webhook]:
             w.setEnabled(enabled)
-        self._save_btn.setEnabled(enabled)
         if enabled:
-            self._enable_btn.setText("暂停")
-            self._enable_btn.setEnabled(True)
-            self._run_btn.setEnabled(True)
-            self._del_btn.setEnabled(True)
+            self._update_action_btns()
         else:
-            self._enable_btn.setText("")
-            self._enable_btn.setEnabled(False)
-            self._run_btn.setEnabled(False)
-            self._del_btn.setEnabled(False)
+            self._gen_btn.setEnabled(False)
             self._save_btn.setEnabled(False)
+            self._del_btn.setEnabled(False)
+            self._run_btn.setEnabled(False)
 
     def _load_logs(self, task_id: str):
         self._logs.clear()
-        logs = self.store.list_logs(task_id)
+        self._log_cache.clear()
+        logs = self.store.list_logs(task_id, limit=MAX_LOGS_PER_TASK)
+        # 新的在前
+        logs = list(reversed(logs))
         if not logs:
-            QListWidgetItem("暂无运行历史", self._logs)
+            empty = QListWidgetItem("暂无运行历史")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._logs.addItem(empty)
             return
+        task = self.store.get(task_id)
+        task_name = (task.name if task else "") or "—"
         for log in logs:
-            line = self._format_log(log)
-            QListWidgetItem(line, self._logs)
+            self._log_cache[log.id] = log
+            row = _LogRow(self.theme, log, task_name)
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, log.id)
+            item.setSizeHint(row.sizeHint())
+            self._logs.addItem(item)
+            self._logs.setItemWidget(item, row)
 
-    @staticmethod
-    def _format_log(log: JobLog) -> str:
-        status = log.status.label
-        if log.finished_at and log.duration_s:
-            tail = f"{log.finished_at.split()[1]} · {log.duration_s:.1f}s"
-        elif log.started_at:
-            tail = log.started_at.split()[1]
-        else:
-            tail = ""
-        err = log.error or log.summary
-        return f"[{status}] {tail}  {err}"[:180]
+    def _on_log_clicked(self, item: QListWidgetItem):
+        log_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not log_id:
+            return
+        log = self._log_cache.get(str(log_id))
+        if not log:
+            return
+        task = self.store.get(self._task_id or "") if self._task_id else None
+        name = (task.name if task else "") or ""
+        _LogDetailDialog(self.theme, log, name, self).exec()
 
     def refresh_logs(self):
         if self._task_id:
             self._load_logs(self._task_id)
 
     # ── 信号处理 ───────────────────────────────────────────
+    def _set_task_type(self, ttype: TaskType):
+        """切换任务类型下拉与配置页（含默认 WokBee）。"""
+        order = [TaskType.TEXT, TaskType.SCRIPT, TaskType.WOKBEE]
+        idx = order.index(ttype) if ttype in order else 0
+        self._type_combo.blockSignals(True)
+        self._type_combo.setCurrentIndex(idx)
+        self._type_combo.blockSignals(False)
+        self._config_stack.setCurrentIndex(idx)
+        self._current_type = ttype
+
     def _on_type_changed(self):
         idx = self._type_combo.currentIndex()
         self._config_stack.setCurrentIndex(idx)
-
-    def _on_push_toggled(self, checked: bool):
-        self._push_box.setVisible(checked)
+        data = self._type_combo.currentData()
+        try:
+            self._current_type = TaskType(data) if data else TaskType.WOKBEE
+        except ValueError:
+            self._current_type = TaskType.WOKBEE
 
     def _update_cron_preview(self):
         expr = (self._schedule.text() or "").strip()
         hint = describe_cron(expr)
         if expr and hint:
-            self._cron_hint.setText(hint)
-            self._cron_hint.setStyleSheet(
-                f"font-size: 11px; color: {self.theme.colors['text_secondary']};"
-                "background: transparent; border: none;"
-            )
+            self._cron_title.setText(f"定时 (cron) · {hint}")
         else:
-            self._cron_hint.setText("")
-            self._cron_hint.setStyleSheet(
-                f"font-size: 11px; color: {self.theme.colors['text_hint']};"
-                "background: transparent; border: none;"
-            )
-
-    def _on_toggle_enable(self):
-        if not self._task_id:
-            return
-        task = self.store.get(self._task_id)
-        if not task:
-            return
-        if task.enabled:
-            self.scheduler.pause(self._task_id)
-        else:
-            self.scheduler.resume(self._task_id)
-        self.task_state_changed.emit(self._task_id)
+            self._cron_title.setText("定时 (cron)")
 
     def _on_run_now(self):
         if not self._task_id:
             return
         try:
             self.scheduler.run_now(self._task_id)
-            _tip(self, self.theme, "已提交立即运行，稍后可在运行历史查看。", "立即运行")
-        except Exception as e:
-            _tip(self, self.theme, f"立即运行失败：{e}", "错误")
+        except Exception:
+            return
 
     def _on_nl_generate(self):
-        text = (self._nl_input.text() or "").strip()
+        text = (self._nl_input.toPlainText() or "").strip()
         if not text:
-            _tip(self, self.theme, "请先输入自然语言描述。", "提示")
             return
-        model = self.provider_store.resolve_default() or self.provider_store.first_resolved()
+        model = None
+        gd = self._gen_combo.currentData()
+        if isinstance(gd, tuple):
+            model = self.provider_store.resolve(gd[0], gd[1])
         if not model:
-            _tip(self, self.theme, "没有可用模型，请先在「AI配置」启用模型。", "提示")
+            model = self.provider_store.resolve_default() or self.provider_store.first_resolved()
+        if not model:
             return
-        self._run_btn.setEnabled(False)
-        # 清理已结束的 worker，避免引用累积
+        self._update_action_btns(generating=True)
         self._workers = [x for x in getattr(self, "_workers", []) if x.isRunning()]
         w = _NLWorker(NLBuilder(self.provider_store), text, model, self)
         w.done.connect(self._on_nl_done)
@@ -812,16 +983,14 @@ class _TaskDetail(QWidget):
         w.start()
 
     def _on_nl_done(self, result):
-        self._run_btn.setEnabled(True)
-        self._nl_input.clear()
+        self._update_action_btns()
         if isinstance(result, Exception):
-            _tip(self, self.theme, f"AI 生成失败：{result}", "生成失败")
             return
         data = result or {}
         config = data.get("config") or {}
         self._name.setText(data.get("name") or "")
         self._schedule.setText(data.get("schedule") or "")
-        self._cron_text.setText(data.get("cron_text") or "")
+        self._cron_text_value = data.get("cron_text") or ""
         self._update_cron_preview()
         ttype = (data.get("type") or "text").lower()
         if ttype not in (TaskType.TEXT.value, TaskType.SCRIPT.value, TaskType.WOKBEE.value):
@@ -830,45 +999,41 @@ class _TaskDetail(QWidget):
         self._type_combo.setCurrentIndex(idx)
         self._config_stack.setCurrentIndex(idx)
         self._content.setPlainText(str(config.get("content") or ""))
-        self._use_ai.setChecked(bool(config.get("use_ai", False)))
         self._code.setPlainText(str(config.get("code") or ""))
-        if config.get("timeout_s"):
-            self._timeout.setText(str(config["timeout_s"]))
+        lang = str(config.get("script_lang") or "python").lower()
+        self._script_lang.setCurrentIndex(1 if lang in ("js", "javascript", "node") else 0)
+        self._on_script_lang_changed()
         if config.get("project_id"):
-            self._select_project(str(config["project_id"]))
-        if config.get("user_message"):
-            self._user_message.setPlainText(str(config["user_message"]))
-        if config.get("max_steps"):
-            self._max_steps.setText(str(config["max_steps"]))
-        # 推送渠道
-        self._push_wecom.setChecked(bool(config.get("push_wecom", False)))
-        self._webhook.setText(str(config.get("webhook_url") or ""))
-        mt = str(config.get("msgtype") or "text")
-        self._msgtype.setCurrentIndex(0 if mt != "markdown" else 1)
-        self._mention.setText(str(config.get("mention") or ""))
-        self._push_box.setVisible(self._push_wecom.isChecked())
-        self._code.setPlainText(str(config.get("code") or ""))
-        if config.get("timeout_s"):
-            self._timeout.setText(str(config["timeout_s"]))
-        if config.get("project_id"):
-            self._select_project(str(config["project_id"]))
-        if config.get("user_message"):
-            self._user_message.setPlainText(str(config["user_message"]))
-        if config.get("max_steps"):
-            self._max_steps.setText(str(config["max_steps"]))
+            self._project_id.setText(str(config["project_id"]))
+        # 推送：有 webhook 即填入
+        webhook = str(config.get("webhook_url") or "")
+        if webhook:
+            self._webhook.setText(webhook)
         self._set_edit_enabled(True)
-        _tip(self, self.theme, "已生成配置，请确认后保存。", "生成完成")
 
     def _collect(self, task_type: TaskType) -> dict:
         """从控件收集当前表单值。"""
+        webhook = (self._webhook.text() or "").strip()
         data = {
             "name": (self._name.text() or "").strip(),
-            "description": (self._description.toPlainText() or "").strip(),
+            "description": (self._nl_input.toPlainText() or "").strip(),
             "task_type": task_type,
             "schedule": (self._schedule.text() or "").strip(),
-            "cron_text": (self._cron_text.text() or "").strip(),
+            "cron_text": (self._cron_text_value or "").strip(),
             "gen_provider": "", "gen_model_id": "",
             "exec_provider": "", "exec_model_id": "",
+            "content": (self._content.toPlainText() or "").strip(),
+            "use_ai": False,
+            "code": (self._code.toPlainText() or "").strip(),
+            "script_lang": self._script_lang.currentData() or "python",
+            "timeout_s": 120,
+            "project_id": (self._project_id.text() or "").strip(),
+            "user_message": "",
+            "max_steps": 40,
+            "push_wecom": bool(webhook),
+            "webhook_url": webhook,
+            "msgtype": "text",
+            "mention": "",
         }
         gd = self._gen_combo.currentData()
         if isinstance(gd, tuple):
@@ -876,20 +1041,6 @@ class _TaskDetail(QWidget):
         ed = self._exec_combo.currentData()
         if isinstance(ed, tuple):
             data["exec_provider"], data["exec_model_id"] = ed
-
-        # 类型负载
-        data["content"] = (self._content.toPlainText() or "").strip()
-        data["use_ai"] = self._use_ai.isChecked()
-        data["code"] = (self._code.toPlainText() or "").strip()
-        data["timeout_s"] = self._to_int(self._timeout.text(), 120)
-        data["project_id"] = self._project_combo.currentData() or ""
-        data["user_message"] = (self._user_message.toPlainText() or "").strip()
-        data["max_steps"] = self._to_int(self._max_steps.text(), 40)
-        # 推送渠道
-        data["push_wecom"] = self._push_wecom.isChecked()
-        data["webhook_url"] = (self._webhook.text() or "").strip()
-        data["msgtype"] = self._msgtype.currentData() or "text"
-        data["mention"] = (self._mention.text() or "").strip()
         return data
 
     @staticmethod
@@ -905,21 +1056,21 @@ class _TaskDetail(QWidget):
         name = data["name"]
         schedule = data["schedule"]
         if not name:
-            _tip(self, self.theme, "请填写任务名称。", "提示")
             return
         # 校验 cron
         try:
             CronTrigger.from_crontab(schedule)
         except (ValueError, TypeError):
-            _tip(self, self.theme, f"cron 表达式无效：{schedule}。如示例：0 9 * * 1-5", "提示")
             return
         # 校验类型必填
         if task_type == TaskType.SCRIPT and not data["code"]:
-            _tip(self, self.theme, "脚本类型需填写代码。", "提示")
             return
-        if task_type == TaskType.WOKBEE and not data["project_id"]:
-            _tip(self, self.theme, "WokBee 任务需选择关联项目。", "提示")
-            return
+        if task_type == TaskType.WOKBEE:
+            pid = data["project_id"]
+            if not pid:
+                return
+            if self.project_store.get(pid) is None:
+                return
 
         if self._task_id and self.store.get(self._task_id):
             task = self.store.get(self._task_id)
@@ -933,20 +1084,50 @@ class _TaskDetail(QWidget):
             task_id = task.id
         self._task_id = task_id
         self.scheduler.add_or_update(task)
-        self._enable_btn.setText("暂停" if task.enabled else "启用")
         self.task_saved.emit(task_id)
-        _tip(self, self.theme, "已保存并更新调度。", "保存成功")
+        self._update_action_btns()
 
     def _on_delete(self):
         if not self._task_id:
             return
         if not self.store.get(self._task_id):
             return
-        ret = QMessageBox.question(
-            self, "删除任务", "确定删除该定时任务？此操作不可撤销。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        c = self.theme.colors
+        dlg = QDialog(self)
+        dlg.setWindowTitle("删除任务")
+        dlg.setFixedSize(360, 140)
+        dlg.setStyleSheet(f"background: {c['content_bg']};")
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(24, 20, 24, 18)
+        lay.setSpacing(12)
+        msg = QLabel("确定删除该定时任务？此操作不可撤销。")
+        msg.setWordWrap(True)
+        msg.setStyleSheet(f"font-size: 14px; color: {c['text']}; background: transparent; border: none;")
+        lay.addWidget(msg)
+        lay.addStretch()
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addStretch()
+        cancel = QPushButton("取消")
+        cancel.setFixedSize(72, 34)
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.setStyleSheet(secondary_btn_qss(c))
+        cancel.clicked.connect(dlg.reject)
+        ok = QPushButton("删除")
+        ok.setFixedSize(72, 34)
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_bg"]}; color: {c["danger"]};
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["btn_hover"]}; }}
+        """)
+        ok.clicked.connect(dlg.accept)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        lay.addLayout(row)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         tid = self._task_id
         self.store.delete_task(tid)
@@ -985,6 +1166,7 @@ class AutoBeeView(QWidget):
         self.task_list = _TaskList(self.theme)
         self.task_list.new_task.connect(self._on_new)
         self.task_list.task_selected.connect(self._on_task_selected)
+        self.task_list.toggle_enabled.connect(self._on_list_toggle)
         layout.addWidget(self.task_list)
 
         # 右栏：任务详情
@@ -993,7 +1175,6 @@ class AutoBeeView(QWidget):
         )
         self.detail.task_saved.connect(self._on_saved)
         self.detail.task_deleted.connect(self._on_deleted)
-        self.detail.task_state_changed.connect(self._on_state_changed)
         layout.addWidget(self.detail, stretch=1)
 
     # ── 数据流 ─────────────────────────────────────────────
@@ -1027,6 +1208,17 @@ class AutoBeeView(QWidget):
         task = self.store.get(task_id)
         if task:
             self.task_list.select(task_id)
+
+    def _on_list_toggle(self, task_id: str):
+        """左侧列表启用/停用。"""
+        task = self.store.get(task_id)
+        if not task:
+            return
+        if task.enabled:
+            self.scheduler.pause(task_id)
+        else:
+            self.scheduler.resume(task_id)
+        self._on_state_changed(task_id)
 
     def _on_tick(self):
         # 刷新所选任务的下一步运行时间与日志

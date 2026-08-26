@@ -433,10 +433,12 @@ class ProviderSettingsWorkspace(QWidget):
         root.setSpacing(0)
 
         left = QFrame()
+        left.setObjectName("providerSideList")
         left.setFixedWidth(220)
         left.setStyleSheet(f"""
-            QFrame {{
+            QFrame#providerSideList {{
                 background: {c["subnav_bg"]};
+                border: none;
                 border-right: 1px solid {c["border"]};
             }}
         """)
@@ -447,7 +449,10 @@ class ProviderSettingsWorkspace(QWidget):
         head_row = QHBoxLayout()
         head_row.setContentsMargins(4, 0, 4, 0)
         head = QLabel("我的厂商")
-        head.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {c['text']};")
+        head.setStyleSheet(
+            f"font-size: 13px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
         head_row.addWidget(head)
         head_row.addStretch()
 

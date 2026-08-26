@@ -69,15 +69,21 @@ class SessionDefaultsWorkspace(QWidget):
         root.setSpacing(0)
 
         header = QFrame()
-        header.setStyleSheet(f"background: {c['content_bg']}; border-bottom: 1px solid {c['border']};")
+        header.setStyleSheet(f"background: {c['content_bg']}; border: none;")
         hl = QVBoxLayout(header)
         hl.setContentsMargins(28, 20, 28, 12)
         title = QLabel("TokBee 设置")
-        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {c['text']};")
+        title.setStyleSheet(
+            f"font-size: 20px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(title)
         tip = QLabel("新建对话会复制这里的参数；已有对话的设置互不影响，可在对话页单独修改。")
         tip.setWordWrap(True)
-        tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        tip.setStyleSheet(
+            f"font-size: 12px; color: {c['text_hint']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(tip)
         root.addWidget(header)
 

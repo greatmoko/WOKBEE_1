@@ -9,7 +9,13 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
-from tokbee.ui.combo_style import apply_combo_popup_style
+from tokbee.ui.combo_style import (
+    apply_combo_popup_style,
+    rounded_spin_qss,
+    checkbox_qss,
+    DEFAULT_COMBO_WIDTH,
+    DEFAULT_COMBO_HEIGHT,
+)
 from tokbee.core.session_settings import SessionSettings, ProviderOptions
 from tokbee.core.ai_role import AIRoleManager
 
@@ -41,6 +47,16 @@ class SessionParamsEditor(QWidget):
         self._compat_reason: QComboBox | None = None
         self._build()
 
+    def _style_combo(self, combo: QComboBox) -> None:
+        """表单下拉：走全局圆角样式，固定 300×40，右侧实心三角。"""
+        apply_combo_popup_style(
+            combo,
+            self.theme.colors,
+            rounded=True,
+            fixed_width=DEFAULT_COMBO_WIDTH,
+            fixed_height=DEFAULT_COMBO_HEIGHT,
+        )
+
     def _build(self):
         c = self.theme.colors
         layout = QVBoxLayout(self)
@@ -49,27 +65,8 @@ class SessionParamsEditor(QWidget):
 
         self._lbl = f"font-size: 13px; font-weight: bold; color: {c['text']};"
         self._hint = f"font-size: 11px; color: {c['text_hint']}; margin-bottom: 2px;"
-        self._combo_style = f"""
-            QComboBox {{
-                background: {c["input_bg"]};
-                border: 1px solid {c["input_border"]};
-                border-radius: 6px;
-                padding: 5px 30px 5px 10px;
-                color: {c["text"]};
-                font-size: 12px;
-            }}
-            QComboBox:hover {{ border-color: {c["input_focus_border"]}; }}
-            QComboBox::drop-down {{
-                subcontrol-origin: padding; subcontrol-position: center right;
-                width: 28px; border: none;
-            }}
-            QComboBox::down-arrow {{
-                image: none; width: 0; height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {c["text_secondary"]};
-            }}
-        """
+        self._spin_style = rounded_spin_qss(c)
+        self._chk_style = checkbox_qss(c)
 
         role_lbl = QLabel("系统角色设定")
         role_lbl.setStyleSheet(self._lbl)
@@ -80,10 +77,9 @@ class SessionParamsEditor(QWidget):
 
         role_row = QHBoxLayout()
         self.role_combo = QComboBox()
-        self.role_combo.setStyleSheet(self._combo_style)
-        apply_combo_popup_style(self.role_combo, c)
+        self._style_combo(self.role_combo)
         self._reload_roles()
-        role_row.addWidget(self.role_combo, stretch=1)
+        role_row.addWidget(self.role_combo, alignment=Qt.AlignmentFlag.AlignLeft)
         if self._role_manager is not None:
             quick_btn = QPushButton("+ 快速创建")
             quick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -121,6 +117,7 @@ class SessionParamsEditor(QWidget):
         self.hist_box.setRange(0, 100000)
         self.hist_box.setSingleStep(2)
         self.hist_box.setFixedWidth(180)
+        self.hist_box.setStyleSheet(self._spin_style)
         layout.addWidget(self.hist_box, alignment=Qt.AlignmentFlag.AlignLeft)
 
         thr_lbl = QLabel("上下文压缩触发比例")
@@ -139,6 +136,7 @@ class SessionParamsEditor(QWidget):
         self.thr_box.setDecimals(2)
         self.thr_box.setSuffix("  （比例）")
         self.thr_box.setFixedWidth(180)
+        self.thr_box.setStyleSheet(self._spin_style)
         thr_row.addWidget(self.thr_box)
         self.thr_pct = QLabel("")
         self.thr_pct.setStyleSheet(self._hint)
@@ -148,7 +146,7 @@ class SessionParamsEditor(QWidget):
         self.thr_box.valueChanged.connect(self._on_thr_changed)
 
         self.auto_compact_chk = QCheckBox("启用自动上下文压缩（先摘要再发）")
-        self.auto_compact_chk.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+        self.auto_compact_chk.setStyleSheet(self._chk_style)
         layout.addWidget(self.auto_compact_chk)
 
         enable_tip = "勾选后可编辑并随请求发送；不勾选则不传该参数，使用接口默认"
@@ -157,11 +155,13 @@ class SessionParamsEditor(QWidget):
 
         self.temp_enable = QCheckBox("启用")
         self.temp_enable.setToolTip(enable_tip)
+        self.temp_enable.setStyleSheet(self._chk_style)
         self.temp_box = QDoubleSpinBox()
         self.temp_box.setRange(0.0, 2.0)
         self.temp_box.setSingleStep(0.1)
         self.temp_box.setDecimals(2)
         self.temp_box.setFixedWidth(180)
+        self.temp_box.setStyleSheet(self._spin_style)
         self.temp_enable.toggled.connect(self.temp_box.setEnabled)
         temp_col = QVBoxLayout()
         tl = QLabel("Temperature")
@@ -173,11 +173,13 @@ class SessionParamsEditor(QWidget):
 
         self.topp_enable = QCheckBox("启用")
         self.topp_enable.setToolTip(enable_tip)
+        self.topp_enable.setStyleSheet(self._chk_style)
         self.topp_box = QDoubleSpinBox()
         self.topp_box.setRange(0.0, 1.0)
         self.topp_box.setSingleStep(0.05)
         self.topp_box.setDecimals(2)
         self.topp_box.setFixedWidth(180)
+        self.topp_box.setStyleSheet(self._spin_style)
         self.topp_enable.toggled.connect(self.topp_box.setEnabled)
         topp_col = QVBoxLayout()
         pl = QLabel("Top P")
@@ -191,10 +193,12 @@ class SessionParamsEditor(QWidget):
 
         self.mt_enable = QCheckBox("启用")
         self.mt_enable.setToolTip(enable_tip)
+        self.mt_enable.setStyleSheet(self._chk_style)
         self.max_tok_box = QSpinBox()
         self.max_tok_box.setRange(1, 256000)
         self.max_tok_box.setSingleStep(256)
         self.max_tok_box.setFixedWidth(180)
+        self.max_tok_box.setStyleSheet(self._spin_style)
         self.mt_enable.toggled.connect(self.max_tok_box.setEnabled)
         mt_lbl = QLabel("Max Output Tokens")
         mt_lbl.setStyleSheet(self._lbl)
@@ -203,7 +207,7 @@ class SessionParamsEditor(QWidget):
         layout.addWidget(self.max_tok_box, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self.stream_chk = QCheckBox("启用流式输出")
-        self.stream_chk.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+        self.stream_chk.setStyleSheet(self._chk_style)
         layout.addWidget(self.stream_chk)
 
         self._build_provider_options(layout)
@@ -234,8 +238,7 @@ class SessionParamsEditor(QWidget):
             oh.setStyleSheet(self._hint)
             layout.addWidget(oh)
             self._reason_combo = QComboBox()
-            self._reason_combo.setStyleSheet(self._combo_style)
-            apply_combo_popup_style(self._reason_combo, c)
+            self._style_combo(self._reason_combo)
             for label, val in [
                 ("默认（不发送）", ""),
                 ("低 low", "low"),
@@ -243,7 +246,7 @@ class SessionParamsEditor(QWidget):
                 ("高 high", "high"),
             ]:
                 self._reason_combo.addItem(label, val)
-            layout.addWidget(self._reason_combo)
+            layout.addWidget(self._reason_combo, alignment=Qt.AlignmentFlag.AlignLeft)
 
         if show_gemini:
             self._add_section(layout, "思考配置（Gemini）")
@@ -251,8 +254,7 @@ class SessionParamsEditor(QWidget):
             gl.setStyleSheet(self._lbl)
             layout.addWidget(gl)
             self._g_level = QComboBox()
-            self._g_level.setStyleSheet(self._combo_style)
-            apply_combo_popup_style(self._g_level, c)
+            self._style_combo(self._g_level)
             for label, val in [
                 ("默认", ""),
                 ("minimal", "minimal"),
@@ -261,7 +263,7 @@ class SessionParamsEditor(QWidget):
                 ("high", "high"),
             ]:
                 self._g_level.addItem(label, val)
-            layout.addWidget(self._g_level)
+            layout.addWidget(self._g_level, alignment=Qt.AlignmentFlag.AlignLeft)
             gb = QLabel("Thinking Budget（可选，0=关闭）")
             gb.setStyleSheet(self._lbl)
             layout.addWidget(gb)
@@ -269,6 +271,7 @@ class SessionParamsEditor(QWidget):
             self._g_budget.setRange(-1, 24576)
             self._g_budget.setSpecialValueText("不指定")
             self._g_budget.setFixedWidth(180)
+            self._g_budget.setStyleSheet(self._spin_style)
             layout.addWidget(self._g_budget, alignment=Qt.AlignmentFlag.AlignLeft)
 
         if show_think:
@@ -281,22 +284,20 @@ class SessionParamsEditor(QWidget):
             layout.addWidget(th)
 
             self._think_combo = QComboBox()
-            self._think_combo.setStyleSheet(self._combo_style)
-            apply_combo_popup_style(self._think_combo, c)
+            self._style_combo(self._think_combo)
             for label, val in [
                 ("默认（开启）", ""),
                 ("开启思考", "on"),
                 ("关闭思考", "off"),
             ]:
                 self._think_combo.addItem(label, val)
-            layout.addWidget(self._think_combo)
+            layout.addWidget(self._think_combo, alignment=Qt.AlignmentFlag.AlignLeft)
 
             el = QLabel("思考强度（reasoning_effort）")
             el.setStyleSheet(self._lbl)
             layout.addWidget(el)
             self._compat_reason = QComboBox()
-            self._compat_reason.setStyleSheet(self._combo_style)
-            apply_combo_popup_style(self._compat_reason, c)
+            self._style_combo(self._compat_reason)
             for label, val in [
                 ("默认（high）", ""),
                 ("低 low", "low"),
@@ -304,7 +305,7 @@ class SessionParamsEditor(QWidget):
                 ("最大 max", "max"),
             ]:
                 self._compat_reason.addItem(label, val)
-            layout.addWidget(self._compat_reason)
+            layout.addWidget(self._compat_reason, alignment=Qt.AlignmentFlag.AlignLeft)
 
             tip = QLabel("提示：DeepSeek 开启思考时 Temperature / Top P 不会生效")
             tip.setWordWrap(True)

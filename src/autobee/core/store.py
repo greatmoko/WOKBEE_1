@@ -131,7 +131,7 @@ class AutoBeeStore:
                 self._logs[log.task_id] = self._logs[log.task_id][-MAX_LOGS_PER_TASK:]
             self.save()
 
-    def list_logs(self, task_id: str, limit: int = 100) -> list[JobLog]:
+    def list_logs(self, task_id: str, limit: int = MAX_LOGS_PER_TASK) -> list[JobLog]:
         with self._lock:
             logs = self._logs.get(task_id, [])
             if limit > 0 and len(logs) > limit:

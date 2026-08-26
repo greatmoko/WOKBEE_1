@@ -36,7 +36,6 @@ from wokbee.core.models import (
 from wokbee.core.paths import (
     deliverables_dir,
     list_deliverable_names,
-    references_dir,
     uploads_dir,
 )
 from wokbee.core.project_store import ProjectStore, TRASH_RETENTION_DAYS, MAX_ARCHIVES
@@ -836,7 +835,6 @@ class _ProjectSidebar(QFrame):
             _open_in_explorer(path)
         elif action == copy_a:
             QApplication.clipboard().setText(project_id)
-            _tip(self, self.theme, f"已复制项目 ID：{project_id}", "复制成功")
         elif action == pin_a:
             self.store.toggle_pin(project_id)
             self.refresh()
@@ -1039,7 +1037,7 @@ class _ProjectEssentials(QFrame):
                 items = count_reference_files(project_root, limit=5)
                 if items:
                     ref_text = ", ".join(items)
-                    self._references.setToolTip("references/ 参考材料（不归档；点击「🗂」打开目录）")
+                    self._references.setToolTip("references/ 参考材料（不归档）")
             except Exception:
                 ref_text = "暂无（目录 references/）"
         self._references.setText(f"参考：{ref_text}")
@@ -2092,8 +2090,6 @@ class _ActionBar(QFrame):
     clear_experience_clicked = Signal()
     upload_clicked = Signal()
     open_deliverables_clicked = Signal()
-    open_references_clicked = Signal()
-    import_references_clicked = Signal()
     send_clicked = Signal(str)
     approve_clicked = Signal()
     reject_clicked = Signal()
@@ -2188,8 +2184,6 @@ class _ActionBar(QFrame):
             ("📁", "打开目录", self.open_folder_clicked.emit),
             ("📦", "交付物：打开 deliverables/ 目录", self.open_deliverables_clicked.emit),
             ("⬆️", "上传文件到 uploads/，Agent 可读取；运行前会自动归档", self.upload_clicked.emit),
-            ("🗂", "参考材料：打开 references/ 目录（不归档）", self.open_references_clicked.emit),
-            ("📎", "导入材料到 references/（第三方代码/配置/环境参数）", self.import_references_clicked.emit),
             ("📝", "总结经验：上一份经验 + 运行日志 + scripts → AI 新建经验", self.summarize_clicked.emit),
             (
                 "🧹",
@@ -2456,8 +2450,6 @@ class _ProjectWorkspace(QWidget):
         self._actions.open_folder_clicked.connect(self._on_open_folder)
         self._actions.open_deliverables_clicked.connect(self._on_open_deliverables)
         self._actions.upload_clicked.connect(self._on_upload)
-        self._actions.open_references_clicked.connect(self._on_open_references)
-        self._actions.import_references_clicked.connect(self._on_import_references)
         self._actions.summarize_clicked.connect(self._on_summarize)
         self._actions.clear_experience_clicked.connect(self._on_clear_experience)
         self._actions.send_clicked.connect(self._on_send)
@@ -3232,64 +3224,6 @@ class _ProjectWorkspace(QWidget):
             self.theme,
             f"已保存到 uploads/：\n" + "\n".join(saved),
             title="上传完成",
-        )
-
-    def _on_open_references(self):
-        if not self._project_id:
-            _tip(self, self.theme, "请先选择项目。")
-            return
-        path = references_dir(self.store.path_for(self._project_id))
-        path.mkdir(parents=True, exist_ok=True)
-        _open_in_explorer(path)
-
-    def _on_import_references(self):
-        if not self._project_id:
-            _tip(self, self.theme, "请先选择项目。")
-            return
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "选择要导入参考材料（第三方代码/配置/环境参数）的文件",
-            "",
-            "所有文件 (*.*)",
-        )
-        if not files:
-            return
-        dest_dir = references_dir(self.store.path_for(self._project_id))
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        import shutil
-        from datetime import datetime as _dt
-
-        saved: list[str] = []
-        for src in files:
-            src_path = Path(src)
-            name = src_path.name
-            target = dest_dir / name
-            if target.exists():
-                stem, suf = src_path.stem, src_path.suffix
-                stamp = _dt.now().strftime("%H%M%S")
-                target = dest_dir / f"{stem}_{stamp}{suf}"
-            try:
-                shutil.copy2(src_path, target)
-                saved.append(target.name)
-            except OSError as e:
-                _tip(self, self.theme, f"导入失败：{name}\n{e}")
-                return
-        ev = ProjectEvent(
-            kind="info",
-            content=(
-                f"已导 {len(saved)} 个文件到 references/：\n"
-                + "\n".join(f"- `{n}`" for n in saved)
-                + "\n参考材料不会被归档，供下次稳定复跑；敏感信息仅供本机使用，勿外发。"
-            ),
-        )
-        self.store.append_event(self._project_id, ev)
-        self._timeline.append_event(ev)
-        self._schedule_essentials_refresh()
-        _tip(
-            self,
-            self.theme,
-            f"已保存到 references/：\n" + "\n".join(saved),
-            title="导入完成",
         )
 
     def _on_summarize(self):

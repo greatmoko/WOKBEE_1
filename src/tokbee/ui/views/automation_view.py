@@ -45,8 +45,10 @@ class _SubNavButton(QPushButton):
                 background: {bg}; color: {tc}; font-weight: {fw};
                 border: none; border-radius: 6px;
                 padding: 0 12px; text-align: left; font-size: 13px;
+                text-decoration: none; outline: none;
             }}
             QPushButton:hover {{ background: {c["subnav_hover"]}; }}
+            QPushButton:focus {{ outline: none; border: none; }}
         """)
 
     def set_active(self, active: bool):
@@ -77,9 +79,11 @@ class _SubNav(QFrame):
         c = self.theme.colors
         self.setMinimumWidth(180)
         self.setMaximumWidth(220)
+        self.setObjectName("aiConfigSubNav")
         self.setStyleSheet(f"""
-            _SubNav {{
+            QFrame#aiConfigSubNav {{
                 background: {c["subnav_bg"]};
+                border: none;
                 border-right: 1px solid {c["border"]};
             }}
         """)
@@ -547,12 +551,15 @@ class _AIRoleWorkspace(QWidget):
 
         header = QFrame()
         header.setFixedHeight(56)
-        header.setStyleSheet(f"background: {c['content_bg']}; border-bottom: 1px solid {c['border']};")
+        header.setStyleSheet(f"background: {c['content_bg']}; border: none;")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 0, 24, 0)
 
         title = QLabel("AI 角色")
-        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {c['text']};")
+        title.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
         header_layout.addWidget(title)
         header_layout.addStretch()
 

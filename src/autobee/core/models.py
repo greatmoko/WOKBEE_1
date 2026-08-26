@@ -22,6 +22,13 @@ def _clean(value: str | None) -> str:
     return (value or "").replace("\x00", "").strip()
 
 
+def _normalize_script_lang(value: Any) -> str:
+    s = _clean(str(value or "")).lower()
+    if s in ("js", "javascript", "node", "nodejs"):
+        return "javascript"
+    return "python"
+
+
 class TaskType(str, Enum):
     """定时任务执行动作类型（单一类型）。企业微信推送是推送渠道，不是动作类型。"""
 
@@ -71,10 +78,11 @@ class ScheduledTask:
     # 类型负载（单一类型，各取所需）
     content: str = ""  # text 正文
     use_ai: bool = False  # text：用模型按 description 生成正文
-    code: str = ""  # script Python 代码
-    timeout_s: int = 120  # script
+    code: str = ""  # script 代码
+    script_lang: str = "python"  # script：python | javascript
+    timeout_s: int = 120  # script（后台固定默认，界面不展示）
     project_id: str = ""  # wokbee
-    user_message: str = ""  # wokbee 驱动 Agent 的话
+    user_message: str = ""  # wokbee（界面不填，执行时用项目目标）
     max_steps: int = 40  # wokbee
 
     # 推送渠道（企业微信，作用于任意类型的结果）
@@ -128,6 +136,7 @@ class ScheduledTask:
             content=_clean(data.get("content")),
             use_ai=bool(data.get("use_ai", False)),
             code=_clean(data.get("code")),
+            script_lang=_normalize_script_lang(data.get("script_lang")),
             timeout_s=max(1, int(data.get("timeout_s") or 120)),
             project_id=_clean(data.get("project_id")),
             user_message=_clean(data.get("user_message")),

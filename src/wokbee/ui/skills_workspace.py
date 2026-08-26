@@ -69,11 +69,15 @@ class _SkillCard(QFrame):
         self.skill = skill
         self.theme = theme
         c = theme.colors
+        self.setObjectName("skillCard")
         self.setStyleSheet(f"""
-            _SkillCard {{
+            QFrame#skillCard {{
                 background: {c["card_bg"]};
                 border: 1px solid {c["border_light"]};
                 border-radius: 8px;
+            }}
+            QFrame#skillCard QLabel, QFrame#skillCard QCheckBox {{
+                background: transparent; border: none;
             }}
         """)
         lay = QHBoxLayout(self)
@@ -82,50 +86,49 @@ class _SkillCard(QFrame):
 
         info = QVBoxLayout()
         title = QLabel(skill.name)
-        title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {c['text']}; background: transparent;")
+        title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {c['text']}; background: transparent; border: none;")
         info.addWidget(title)
         desc = QLabel(skill.description or skill.path.name)
         desc.setWordWrap(True)
-        desc.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent;")
+        desc.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent; border: none;")
         info.addWidget(desc)
         path = QLabel(str(skill.path))
-        path.setStyleSheet(f"font-size: 11px; color: {c['text_hint']}; background: transparent;")
+        path.setStyleSheet(f"font-size: 11px; color: {c['text_hint']}; background: transparent; border: none;")
         info.addWidget(path)
         lay.addLayout(info, stretch=1)
 
+        from tokbee.ui.combo_style import checkbox_qss, secondary_btn_qss
         self._chk = QCheckBox("启用")
         self._chk.setChecked(skill.enabled)
+        self._chk.setStyleSheet(checkbox_qss(c))
         self._chk.toggled.connect(lambda v: self.toggled.emit(skill.path.name, v))
         lay.addWidget(self._chk)
 
         open_btn = QPushButton("打开")
         open_btn.setFixedHeight(30)
-        open_btn.setStyleSheet(self._btn_qss())
+        open_btn.setMinimumWidth(56)
+        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn.setAutoDefault(False)
+        open_btn.setStyleSheet(secondary_btn_qss(c))
         open_btn.clicked.connect(lambda: self.open_clicked.emit(skill.path.name))
         lay.addWidget(open_btn)
 
         del_btn = QPushButton("删除")
         del_btn.setFixedHeight(30)
+        del_btn.setMinimumWidth(56)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setAutoDefault(False)
         del_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; color: {c["danger"]};
-                border: 1px solid {c["border"]}; border-radius: 6px; padding: 0 10px;
+                border: 1px solid {c["border"]}; border-radius: 6px;
+                padding: 0 10px; text-decoration: none;
             }}
             QPushButton:hover {{ background: #fff1f0; }}
+            QPushButton:focus {{ outline: none; }}
         """)
         del_btn.clicked.connect(lambda: self.delete_clicked.emit(skill.path.name))
         lay.addWidget(del_btn)
-
-    def _btn_qss(self) -> str:
-        c = self.theme.colors
-        return f"""
-            QPushButton {{
-                background: {c["btn_bg"]}; color: {c["text"]};
-                border: none; border-radius: 6px; padding: 0 10px;
-            }}
-            QPushButton:hover {{ background: {c["btn_hover"]}; }}
-        """
-
 
 class SkillsWorkspace(QWidget):
     def __init__(self, theme: Theme, store: SkillsStore | None = None, parent=None):
@@ -142,11 +145,14 @@ class SkillsWorkspace(QWidget):
         root.setSpacing(0)
 
         header = QFrame()
-        header.setStyleSheet(f"background: {c['content_bg']}; border-bottom: 1px solid {c['border']};")
+        header.setStyleSheet(f"background: {c['content_bg']}; border: none;")
         hl = QVBoxLayout(header)
         hl.setContentsMargins(28, 20, 28, 12)
         title = QLabel("Skills")
-        title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {c['text']};")
+        title.setStyleSheet(
+            f"font-size: 20px; font-weight: bold; color: {c['text']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(title)
         tip = QLabel(
             "技能以文件夹 + SKILL.md 形式存放在全局目录（默认 ~/.wokbee/skills）。"
@@ -154,7 +160,10 @@ class SkillsWorkspace(QWidget):
             "供 Deep Agents 按需调用。"
         )
         tip.setWordWrap(True)
-        tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
+        tip.setStyleSheet(
+            f"font-size: 12px; color: {c['text_hint']};"
+            "background: transparent; border: none;"
+        )
         hl.addWidget(tip)
         root.addWidget(header)
 
@@ -162,19 +171,26 @@ class SkillsWorkspace(QWidget):
         bar.setContentsMargins(28, 12, 28, 8)
         bar.setSpacing(8)
         self._root_edit = QLineEdit(str(self.store.root))
-        self._root_edit.setFixedHeight(32)
+        self._root_edit.setFixedHeight(34)
         self._root_edit.setReadOnly(True)
+        from tokbee.ui.combo_style import rounded_lineedit_qss, secondary_btn_qss
+        self._root_edit.setStyleSheet(rounded_lineedit_qss(c))
         bar.addWidget(self._root_edit, stretch=1)
         browse = QPushButton("目录…")
-        browse.setFixedHeight(32)
+        browse.setFixedHeight(34)
+        browse.setMinimumWidth(72)
+        browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse.setAutoDefault(False)
+        browse.setStyleSheet(secondary_btn_qss(c))
         browse.clicked.connect(self._browse_root)
         bar.addWidget(browse)
         add_btn = QPushButton("新建 Skill")
-        add_btn.setFixedHeight(32)
+        add_btn.setFixedHeight(34)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {c["btn_primary"]}; color: white;
-                border: none; border-radius: 6px; padding: 0 14px;
+                border: none; border-radius: 6px; padding: 0 14px; font-size: 13px;
             }}
             QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
         """)

@@ -1,12 +1,15 @@
-"""主题与配色方案。"""
+"""主题与配色方案。
+
+控件默认样式见 ``tokbee.ui.styles.system``（权威入口）。
+"""
 
 from __future__ import annotations
 
 COLORS = {
     "bg": "#ffffff",
     "sidebar_bg": "#f7f7f7",
-    "sidebar_hover": "#eaeaea",
-    "sidebar_active": "#e0e0e0",
+    "sidebar_hover": "#f0f0f0",
+    "sidebar_active": "#e8f5e9",
     "sidebar_text": "#999999",
     "sidebar_text_active": "#07c160",
     "subnav_bg": "#fafafa",
@@ -39,6 +42,9 @@ COLORS = {
     "scrollbar": "#d0d0d0",
     "scrollbar_hover": "#b0b0b0",
     "tag_bg": "#f0f0f0",
+    "tooltip_bg": "#ffffff",
+    "tooltip_text": "#1a1a1a",
+    "tooltip_border": "#e0e0e0",
 }
 
 
@@ -101,13 +107,13 @@ class Theme:
                 color: {c["text_hint"]};
             }}
 
-            /* --- 工具提示 --- */
+            /* --- 工具提示：黑字白底；带边框以便圆角尽量生效 --- */
             QToolTip {{
-                background: #333333;
-                color: #ffffff;
-                border: none;
-                padding: 4px 8px;
-                border-radius: 4px;
+                background-color: {c["tooltip_bg"]};
+                color: {c["tooltip_text"]};
+                border: 1px solid {c["tooltip_border"]};
+                border-radius: 6px;
+                padding: 6px 10px;
                 font-size: 12px;
             }}
         """

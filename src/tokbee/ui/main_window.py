@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from tokbee import __app_name__, __version__
 from tokbee.core.config import Config
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.styles.system import apply_app_tooltip_style
 
 _RESOURCES = Path(__file__).parent.parent / "resources"
 
@@ -31,9 +32,9 @@ class _PrimaryNav(QFrame):
     NAV_ITEMS = [
         ("chat",       "chat",  "TokBee",  18, "top"),
         ("wokbee",     "logo",  "WokBee",  18, "top"),
-        ("autobee",    "⏰",    "autobee", 18, "top"),
-        ("automation", "⚡",    "AI配置",  20, "top"),
-        ("settings",   "⚙",    "设置",    22, "bottom"),
+        ("autobee",    "⏰",    "AutoBee", 18, "top"),
+        ("automation", "⚡",    "AIConfig",  20, "top"),
+        ("settings",   "⚙",    "Settings",    22, "bottom"),
     ]
 
     def __init__(self, theme: Theme, parent=None):
@@ -48,9 +49,11 @@ class _PrimaryNav(QFrame):
     def _build(self):
         c = self.theme.colors
         self.setFixedWidth(56)
+        self.setObjectName("primaryNav")
         self.setStyleSheet(f"""
-            _PrimaryNav {{
+            QFrame#primaryNav {{
                 background: {c["sidebar_bg"]};
+                border: none;
                 border-right: 1px solid {c["border"]};
             }}
         """)
@@ -83,6 +86,8 @@ class _PrimaryNav(QFrame):
         btn.setFixedSize(40, 40)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setToolTip(label_text)
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
 
         if icon_key == "logo":
             logo_path = _RESOURCES / "logo.png"
@@ -117,6 +122,7 @@ class _PrimaryNav(QFrame):
 
         lbl = QLabel(label_text)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("background: transparent; border: none;")
 
         self._buttons[nav_id] = btn
         self._labels[nav_id] = lbl
@@ -134,8 +140,7 @@ class _PrimaryNav(QFrame):
 
     def _apply_styles(self):
         c = self.theme.colors
-        label_style = "font-size: 9px; background: transparent; border: none;"
-
+        # 与二级导航一致：浅绿底 + 绿色文字
         for nav_id, btn in self._buttons.items():
             active = self._current == nav_id
             bg = c["sidebar_active"] if active else "transparent"
@@ -149,13 +154,16 @@ class _PrimaryNav(QFrame):
                     border: none;
                     border-radius: 8px;
                     font-size: {fs}px;
+                    outline: none;
                 }}
                 QPushButton:hover {{
                     background: {c["sidebar_hover"]};
                 }}
+                QPushButton:focus {{ outline: none; border: none; }}
             """)
-            self._labels[nav_id].setStyleSheet(f"{label_style} color: {color};")
-
+            self._labels[nav_id].setStyleSheet(
+                f"font-size: 9px; background: transparent; border: none; color: {color};"
+            )
     def _on_click(self, nav_id: str):
         if nav_id == self._current:
             return
@@ -197,6 +205,7 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         self.setStyleSheet(self.theme.stylesheet())
+        apply_app_tooltip_style(None, self.theme.colors)
 
     def _build_layout(self):
         central = QWidget()
