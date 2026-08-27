@@ -20,17 +20,28 @@ from langgraph.types import Command
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
 
 from wokbee.core.models import ApprovalFlags, Project, MAX_PROJECT_TITLE_LEN
-from wokbee.core.paths import ensure_project_layout, memory_dir, workspace_sandbox
+from wokbee.core.paths import (
+    ensure_project_layout,
+    list_deliverable_names,
+    memory_dir,
+    workspace_sandbox,
+)
 from wokbee.core.settings import WokBeeSettings
 from wokbee.engine.approval_policy import (
     build_interrupt_on,
     risk_label_for_tool,
 )
 from wokbee.engine.archive_guard import ArchiveDeniedBackend
+# 提权申请（沙箱越过）已注释，恢复为纯沙箱内、无需越沙箱授权。
+# from wokbee.engine.sandbox_escape import (
+#     SandboxEscapeBackend,
+#     SandboxEscapeGuard,
+#     user_message_indicates_sandbox_preauth,
+# )
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
-    collect_events_log,
+    build_lesson_digest,
     collect_scripts_context,
     summarize_lesson_with_ai,
 )
@@ -40,6 +51,7 @@ from wokbee.engine.network_tools import NETWORK_TOOLS
 from wokbee.engine.cache_prefix import (
     CacheHitTracker,
     PrefixGuard,
+    ai_reply_suggests_pending_action,
     build_session_context_block,
     compose_user_with_context,
     prefix_fingerprint,
@@ -48,6 +60,8 @@ from wokbee.engine.cache_prefix import (
     tool_name_of,
     wrap_tools_truncate_results,
 )
+# 循环护栏已注释，恢复为不做同参重复次数限制。
+# from wokbee.engine.tool_loop_guard import ToolLoopGuard, wrap_tools_loop_guard
 from wokbee.engine.ask_user import (
     build_ask_user_tool,
     is_ask_user_interrupt,
@@ -105,6 +119,14 @@ def _get_checkpointer(project_id: str) -> InMemorySaver:
         return _CHECKPOINTERS[project_id]
 
 
+def _reset_run_state(project_id: str) -> InMemorySaver:
+    """新开「运行」时清空线程状态，避免继承上次卡死的空 AIMessage / 半截对话。"""
+    with _LOCK:
+        _CHECKPOINTERS[project_id] = InMemorySaver()
+        _AGENTS.pop(project_id, None)
+        return _CHECKPOINTERS[project_id]
+
+
 def _ensure_memory_files(project_root: Path, project: Project) -> None:
     mem = memory_dir(project_root)
     mem.mkdir(parents=True, exist_ok=True)
@@ -115,14 +137,14 @@ def _ensure_memory_files(project_root: Path, project: Project) -> None:
         f"- id: `{project.id}`\n"
         f"- goal: {project.goal or '(未设置)'}\n"
         f"- approval: {project.approval.summary()}\n\n"
-        "你是具备完整联网能力的本地工作助手（非离线沙箱）。\n"
-        "优先使用 `web_search` / `http_get` 获取实时信息；需要时可用 `execute` 跑本机命令。\n"
+        "你是一个能力强大的AI工作助手,具备完整联网能力,读写本地文件,并且可以执行本机命令。\n"
+        "使用 `web_search` / `http_get` 获取实时信息；需要时可用 `execute` 跑本机命令。\n"
+        "如果配置了deepseek的api key并且deepseek搜索工具可用,则使用DeepSeek服务端搜索工具进行联网搜索。\n"
         "工作文件放 `workspace/`；最终交付物放 `deliverables/`；"
         "用户上传文件在 `uploads/`（可直接读取调用；"
-        "若有同名或内容相近的多份文件，默认以修改时间最新的一份为准）；"
+        "若有名称或内容相近的多份文件，默认以修改时间最新的一份为准）；"
         "参考材料放 `references/`（第三方代码/登录/环境参数/用到的 Skills 快照，归档时不清理）。\n"
-        "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、配置、"
-        "环境参数与登录信息保存到 `references/`，并在 `references/MANIFEST.md` 登记，确保下次能稳定复跑；"
+        "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、配置、环境参数与登录信息保存到 `references/`，并在 `references/MANIFEST.md` 登记，确保下次能稳定复跑；"
         "这些敏感信息仅供本机使用，勿外发。\n"
         "**禁止**访问 `archives/`：归档文档与归档数据不得作为本轮数据来源。\n"
         "经验位于 `memory/experiences/exp_时间戳.md`；每次总结新建一份；"
@@ -147,8 +169,12 @@ def _message_text(content: Any) -> str:
     if isinstance(content, list):
         parts = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
+            if isinstance(block, dict):
+                # 兼容 text / output_text 等块
+                if block.get("type") in ("text", "output_text", "input_text") or "text" in block:
+                    parts.append(str(block.get("text") or ""))
+                elif block.get("type") == "reasoning":
+                    continue
             elif isinstance(block, str):
                 parts.append(block)
         return "\n".join(parts).strip()
@@ -171,14 +197,38 @@ def _reasoning_text(msg: Any) -> str:
     return str(rc).strip()
 
 
+def _is_ai_message(msg: Any) -> bool:
+    cls = msg.__class__.__name__ if not isinstance(msg, dict) else str(msg.get("type") or "")
+    role = getattr(msg, "type", None) or (
+        msg.get("role") if isinstance(msg, dict) else None
+    ) or cls
+    role_s = str(role or "")
+    return "AI" in cls or role_s in ("ai", "assistant", "AIMessage")
+
+
 def _extract_text(messages: list) -> str:
+    """取最近一条**非空** AI 正文（跳过空 content / Tool / Human）。
+
+    续跑后模型常回一条 content=\"\" 的 AIMessage；若只看 messages[-1] 会误判
+    「已无待办」从而中断自动续跑、立刻 incomplete。
+    """
     if not messages:
         return ""
-    return _message_text(
-        getattr(messages[-1], "content", None)
-        if not isinstance(messages[-1], dict)
-        else messages[-1].get("content")
-    )
+    for msg in reversed(list(messages)):
+        if not _is_ai_message(msg):
+            continue
+        content = (
+            getattr(msg, "content", None)
+            if not isinstance(msg, dict)
+            else msg.get("content")
+        )
+        text = _message_text(content)
+        if text:
+            return text
+        rc = _reasoning_text(msg)
+        if rc:
+            return rc
+    return ""
 
 
 def _msg_id(msg: Any) -> str:
@@ -584,11 +634,20 @@ class AgentRunner:
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
         self.on_ask_user_needed: Callable[[dict], None] | None = None
+        self.on_sandbox_escape_needed: Callable[[dict], None] | None = None
+        # 提权申请已注释：_sandbox_guard 恒为 None，相关方法一律空转。
+        self._sandbox_guard = None
+
+    def resolve_sandbox_escape(self, approved: bool, *, grant_run: bool = False) -> None:
+        if self._sandbox_guard is not None:
+            self._sandbox_guard.resolve(approved, grant_run=grant_run)
 
     def request_cancel(self) -> None:
         self._cancel.set()
-        # 若卡在审批/澄清，解开等待
+        # 若卡在审批/澄清/沙箱授权，解开等待
         self.resolve_approval([{"type": "reject", "message": "用户取消运行"}])
+        self.resolve_ask_user({"cancelled": True})
+        self.resolve_sandbox_escape(False)
         self.resolve_ask_user({"cancelled": True})
 
     def resolve_approval(self, decisions: list[dict]) -> None:
@@ -641,6 +700,12 @@ class AgentRunner:
                 return {"cancelled": True}
         return self._ask_user_answers or {"cancelled": True}
 
+    def _on_sandbox_escape_needed(self, payload: dict) -> None:
+        if self.on_sandbox_escape_needed:
+            self.on_sandbox_escape_needed(payload)
+        else:
+            self.resolve_sandbox_escape(False)
+
     def build_agent(self, req: RunRequest, *, mode: str = "run"):
         """构建完整能力 Agent。
 
@@ -653,12 +718,25 @@ class AgentRunner:
         _ensure_memory_files(req.project_root, req.project)
 
         model = build_chat_model(req.resolved)
-        project_backend = ArchiveDeniedBackend(
+        # 提权申请（沙箱越过）已注释：不再建 SandboxEscapeGuard，也不包 SandboxEscapeBackend，
+        # 恢复为纯项目沙箱内、无越沙箱授权流程。
+        # self._sandbox_guard = SandboxEscapeGuard(
+        #     req.project_root,
+        #     allow_escape=req.approval.allow_sandbox_escape,
+        #     on_escape_needed=self._on_sandbox_escape_needed,
+        # )
+        project_inner = ArchiveDeniedBackend(
             root_dir=str(req.project_root),
             virtual_mode=True,
             timeout=180,
             inherit_env=True,
         )
+        project_backend = project_inner
+        # project_backend = SandboxEscapeBackend(
+        #     project_inner,
+        #     self._sandbox_guard,
+        #     context_root=req.project_root,
+        # )
         interrupt_on = build_interrupt_on(req.approval)
         if req.approval.skip_routine:
             for n in PROJECT_META_TOOL_NAMES:
@@ -669,16 +747,30 @@ class AgentRunner:
 
         skills_paths: list[str] = []
         routes: dict = {}
+        skills_extra_lines: list[str] = []
         try:
             skills_store = SkillsStore()
             skills_store.cleanup_project_copies(req.project_root)
             skills_paths = skills_store.global_skills_paths()
             enabled_skills = [s.name for s in skills_store.list_enabled()]
             if skills_paths:
-                routes["/skills/"] = FilesystemBackend(
+                skills_inner = FilesystemBackend(
                     root_dir=str(skills_store.root),
                     virtual_mode=True,
                 )
+                # 提权申请（沙箱越过）已注释：Skills 路由直接用内层后端，无越沙箱授权。
+                routes["/skills/"] = skills_inner
+                # routes["/skills/"] = SandboxEscapeBackend(
+                #     skills_inner,
+                #     self._sandbox_guard,
+                #     context_root=skills_store.root,
+                #     skills_mount=True,
+                # )
+                skills_extra_lines = [
+                    f"- 全局 Skills 目录（真实路径，execute 可用）：{skills_store.root}",
+                    "- 全局 Skills 虚拟路径：/skills/<技能名>/SKILL.md（read/edit/write 可用）",
+                    f"- 已启用 Skills：{', '.join(enabled_skills) or '（无）'}",
+                ]
                 self._emit(
                     "info",
                     f"已挂载全局 Skills（不复制到项目）：{skills_store.root}\n"
@@ -734,6 +826,22 @@ class AgentRunner:
             policy=req.approval.summary(),
             settings=self.settings,
         )
+        context_extra: list[str] = list(skills_extra_lines)
+        # 提权申请（沙箱越过预授权识别）已注释：不做越沙箱授权检测。
+        # user_msg = (req.user_message or "").strip()
+        # if user_message_indicates_sandbox_preauth(user_msg):
+        #     if self._sandbox_guard is not None and not req.approval.allow_sandbox_escape:
+        #         self._sandbox_guard.session_granted = True
+        #     context_extra.append(
+        #         "- **用户已在消息中授权越过沙箱**访问项目外路径；"
+        #         "请直接调用 execute 或文件工具完成，勿仅口头确认。"
+        #     )
+        #     if not req.approval.allow_sandbox_escape:
+        #         self._emit(
+        #             "info",
+        #             "已识别用户消息中的越沙箱预授权，本会话可直接访问项目外路径。",
+        #         )
+
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
@@ -742,6 +850,7 @@ class AgentRunner:
             experience_digest=experience_digest,
             mode=mode,
             runtime_env_block=runtime_env_block,
+            extra_lines=context_extra or None,
         )
 
         project_tools = build_project_meta_tools(
@@ -787,6 +896,8 @@ class AgentRunner:
             + list(mcp_tools)
         )
         tools = wrap_tools_truncate_results(tools, project_root=req.project_root)
+        # 循环护栏已注释：不做同参重复次数限制，避免误判长结果截断为「循环」而卡住 Agent。
+        # tools = wrap_tools_loop_guard(tools, guard=ToolLoopGuard())
         tool_names = [tool_name_of(t) for t in tools]
         fp = prefix_fingerprint(system_prompt, tool_names)
 
@@ -936,6 +1047,246 @@ class AgentRunner:
                     {"script": item.path, "step_id": item.step_id},
                 )
 
+    def _agent_last_ai_text(self, agent, config: dict) -> str:
+        try:
+            state = agent.get_state(config)
+            values = getattr(state, "values", None) or {}
+            messages = values.get("messages") if isinstance(values, dict) else None
+            if messages:
+                return _extract_text(list(messages))
+        except Exception:
+            pass
+        return ""
+
+    def _tool_events_since(self, start: int) -> int:
+        return sum(
+            1
+            for e in self._run_events[start:]
+            if getattr(e, "kind", "") == "tool"
+        )
+
+    def _drain_pending_interrupts(
+        self,
+        agent,
+        config: dict,
+        seen_msg_ids: set[str],
+        req: RunRequest,
+        *,
+        allow_auto_lesson: bool,
+    ) -> RunResult | None:
+        """处理 ask_user / 工具审批中断，直到无 pending 或需外部等待。"""
+        guard = 0
+        while _has_pending(agent, config) and guard < 50:
+            guard += 1
+            if self._cancel.is_set():
+                lesson = None
+                if allow_auto_lesson:
+                    lesson = self._maybe_auto_write_lesson(
+                        req, "cancelled", "用户取消", ""
+                    )
+                return RunResult(
+                    ok=False,
+                    outcome="cancelled",
+                    error="已取消",
+                    lesson_id=lesson.id if lesson else "",
+                )
+
+            ask_payload = _first_ask_user_payload(agent, config)
+            if ask_payload:
+                n = len(ask_payload.get("questions") or [])
+                self._emit(
+                    "info",
+                    f"AI 需要你澄清意图（{n} 题），请在弹窗中作答…",
+                    {"ask_user": ask_payload},
+                )
+                answers = self._wait_ask_user(ask_payload)
+                if self._cancel.is_set():
+                    lesson = None
+                    if allow_auto_lesson:
+                        lesson = self._maybe_auto_write_lesson(
+                            req, "cancelled", "用户取消", ""
+                        )
+                    return RunResult(
+                        ok=False,
+                        outcome="cancelled",
+                        error="已取消",
+                        lesson_id=lesson.id if lesson else "",
+                    )
+                if answers.get("cancelled"):
+                    self._emit("info", "你取消了澄清提问。")
+                else:
+                    self._emit("info", "已收到你的澄清回答，继续执行…")
+                self._stream_until_pause(
+                    agent,
+                    Command(resume=answers),
+                    config,
+                    seen_msg_ids,
+                )
+                continue
+
+            pending = _pending_from_state(agent, config)
+            if not pending:
+                break
+
+            lines = []
+            for i, act in enumerate(pending, 1):
+                lines.append(
+                    f"{i}. [{act.get('risk')}] {act.get('name')}: {act.get('description')}"
+                )
+            self._emit(
+                "approval",
+                "需要审批以下操作：\n" + "\n".join(lines),
+                {"pending": pending},
+            )
+
+            decisions = self._wait_approval(pending)
+            if self._cancel.is_set():
+                lesson = None
+                if allow_auto_lesson:
+                    lesson = self._maybe_auto_write_lesson(
+                        req, "cancelled", "用户取消", ""
+                    )
+                return RunResult(
+                    ok=False,
+                    outcome="cancelled",
+                    error="已取消",
+                    lesson_id=lesson.id if lesson else "",
+                )
+
+            approved = sum(1 for d in decisions if d.get("type") == "approve")
+            rejected = len(decisions) - approved
+            self._emit(
+                "approval",
+                f"审批结果：通过 {approved}，拒绝 {rejected}",
+                {"decisions": decisions},
+            )
+
+            self._stream_until_pause(
+                agent,
+                Command(resume={"decisions": decisions}),
+                config,
+                seen_msg_ids,
+            )
+        return None
+
+    def _nudge_user_text(self, nudge_i: int, last_text: str) -> str:
+        """按续跑轮次升级指令；英文模型常忽略中文软提示。"""
+        low = (last_text or "").lower()
+        wants_html = any(
+            k in low
+            for k in (
+                "href",
+                "raw html",
+                "rawhtml",
+                "curl",
+                "link structure",
+                "html links",
+                "原始 html",
+                "链接结构",
+            )
+        )
+        html_hint = (
+            "若需要页面链接/href：立即调用 http_get 或 http_request，并设 preserve_html=True"
+            "（不要只说要用 curl）。\n"
+            "If you need href/links: call http_get/http_request with preserve_html=True NOW "
+            "(do not only talk about curl).\n"
+            if wants_html
+            else ""
+        )
+        levels = [
+            (
+                "【系统续跑 / SYSTEM CONTINUE】你描述了下一步但还没调用工具。\n"
+                "You described the next step but did NOT call any tool.\n"
+                f"{html_hint}"
+                "请立刻发出 tool call（http_get / http_request / execute / read_file 等），"
+                "禁止只回复文字计划。\n"
+                "Emit a real tool call now. Do NOT reply with plan-only text."
+            ),
+            (
+                "【系统续跑 强制 / HARD REQUIREMENT】上轮你又只输出了文字、零工具调用。\n"
+                "Last turn was text-only with ZERO tool calls — that is invalid.\n"
+                f"{html_hint}"
+                "下一回合必须包含至少一次 function/tool call；纯文本视为失败。\n"
+                "Your next response MUST include at least one function/tool call."
+            ),
+            (
+                "【最后通牒 / FINAL】连续空转。现在唯一允许的动作是调用工具。\n"
+                "Stop narrating. Call a tool immediately.\n"
+                f"{html_hint}"
+                "推荐：http_get(url=..., preserve_html=True, max_chars=30000) "
+                "或 execute(command=curl ...)。完成后写入 deliverables/。"
+            ),
+        ]
+        return levels[min(nudge_i, len(levels) - 1)]
+
+    def _maybe_nudge_agent_continue(
+        self,
+        agent,
+        config: dict,
+        seen_msg_ids: set[str],
+        req: RunRequest,
+        *,
+        allow_auto_lesson: bool,
+        max_nudges: int = 5,
+    ) -> RunResult | None:
+        """最后一条 AI 回复仍在承诺下一步、却未再调工具时，自动续跑。
+
+        注意：同轮里先前已有 grep/ls 等工具时也要续跑——常见失败是
+        「先搜了一下 → 文字说接下来用 curl → 直接结束」。
+        """
+        for nudge_i in range(max_nudges):
+            if _has_pending(agent, config):
+                return None
+            last_text = self._agent_last_ai_text(agent, config)
+            suggests = ai_reply_suggests_pending_action(last_text)
+            if not suggests:
+                # 空正文不能当成「已收工」：续跑后模型常回 content="" 的 AIMessage
+                if (last_text or "").strip():
+                    return None
+                if nudge_i == 0 and self._tool_events_since(0) == 0:
+                    return None
+                # 继续用升级文案强制下一轮
+                last_text = last_text or "(empty)"
+            tools_before = self._tool_events_since(0)
+            # 仅统计本函数调用后新增的工具；用绝对起点会在长会话里失真，
+            # 这里用「续跑前后差」判断是否真的动手了。
+            event_mark = len(self._run_events)
+            nudge_text = self._nudge_user_text(nudge_i, last_text)
+            self._emit(
+                "info",
+                f"检测到模型仍在描述下一步、未继续调工具，自动续跑（{nudge_i + 1}/{max_nudges}）…",
+            )
+            self._stream_until_pause(
+                agent,
+                {"messages": [{"role": "user", "content": nudge_text}]},
+                config,
+                seen_msg_ids,
+            )
+            early = self._drain_pending_interrupts(
+                agent,
+                config,
+                seen_msg_ids,
+                req,
+                allow_auto_lesson=allow_auto_lesson,
+            )
+            if early is not None:
+                return early
+            tools_after = self._tool_events_since(0)
+            new_tools = self._tool_events_since(event_mark)
+            if tools_after > tools_before:
+                # 已动手：若最新回复仍是「计划口吻」则再续；否则结束
+                continue
+            if new_tools == 0:
+                # 本轮续跑零工具，再试下一轮（文案已升级）
+                continue
+        if ai_reply_suggests_pending_action(self._agent_last_ai_text(agent, config)):
+            self._emit(
+                "info",
+                "模型仍未调用工具完成操作；请检查审核策略（execute 是否需审批）或换更强模型后重试。"
+                "若需页面链接，请用 http_get/http_request 并设 preserve_html=True。",
+            )
+        return None
+
     def _run_agent_turn(
         self,
         agent,
@@ -970,7 +1321,27 @@ class AgentRunner:
                 seen_msg_ids,
             )
 
-        def _cancel_result() -> RunResult:
+        early = self._drain_pending_interrupts(
+            agent,
+            config,
+            seen_msg_ids,
+            req,
+            allow_auto_lesson=allow_auto_lesson,
+        )
+        if early is not None:
+            return early
+
+        early = self._maybe_nudge_agent_continue(
+            agent,
+            config,
+            seen_msg_ids,
+            req,
+            allow_auto_lesson=allow_auto_lesson,
+        )
+        if early is not None:
+            return early
+
+        if self._cancel.is_set():
             lesson = None
             if allow_auto_lesson:
                 lesson = self._maybe_auto_write_lesson(
@@ -982,73 +1353,6 @@ class AgentRunner:
                 error="已取消",
                 lesson_id=lesson.id if lesson else "",
             )
-
-        guard = 0
-        while _has_pending(agent, config) and guard < 50:
-            guard += 1
-            if self._cancel.is_set():
-                return _cancel_result()
-
-            # 优先处理澄清提问（ask_user），与工具审批分流
-            ask_payload = _first_ask_user_payload(agent, config)
-            if ask_payload:
-                n = len(ask_payload.get("questions") or [])
-                self._emit(
-                    "info",
-                    f"AI 需要你澄清意图（{n} 题），请在弹窗中作答…",
-                    {"ask_user": ask_payload},
-                )
-                answers = self._wait_ask_user(ask_payload)
-                if self._cancel.is_set():
-                    return _cancel_result()
-                if answers.get("cancelled"):
-                    self._emit("info", "你取消了澄清提问。")
-                else:
-                    self._emit("info", "已收到你的澄清回答，继续执行…")
-                self._stream_until_pause(
-                    agent,
-                    Command(resume=answers),
-                    config,
-                    seen_msg_ids,
-                )
-                continue
-
-            pending = _pending_from_state(agent, config)
-            if not pending:
-                break
-
-            lines = []
-            for i, act in enumerate(pending, 1):
-                lines.append(
-                    f"{i}. [{act.get('risk')}] {act.get('name')}: {act.get('description')}"
-                )
-            self._emit(
-                "approval",
-                "需要审批以下操作：\n" + "\n".join(lines),
-                {"pending": pending},
-            )
-
-            decisions = self._wait_approval(pending)
-            if self._cancel.is_set():
-                return _cancel_result()
-
-            approved = sum(1 for d in decisions if d.get("type") == "approve")
-            rejected = len(decisions) - approved
-            self._emit(
-                "approval",
-                f"审批结果：通过 {approved}，拒绝 {rejected}",
-                {"decisions": decisions},
-            )
-
-            self._stream_until_pause(
-                agent,
-                Command(resume={"decisions": decisions}),
-                config,
-                seen_msg_ids,
-            )
-
-        if self._cancel.is_set():
-            return _cancel_result()
 
         if _has_pending(agent, config):
             pending = _pending_from_state(agent, config)
@@ -1122,7 +1426,15 @@ class AgentRunner:
             except Exception:
                 pass
 
-            self._emit("info", "交互结束")
+            self._emit("info", "本轮回复已完成")
+            had_tool = any(
+                getattr(e, "kind", "") == "tool" for e in self._run_events
+            )
+            if not had_tool and final_text and ai_reply_suggests_pending_action(final_text):
+                self._emit(
+                    "info",
+                    "模型未调用工具；可回复「继续」，或在项目审核策略中勾选「越过沙箱」。",
+                )
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
@@ -1194,6 +1506,9 @@ class AgentRunner:
         )
 
         try:
+            # 非 resume 必须清空 checkpoint，否则会继承上次空 AIMessage / 半截计划而秒退
+            if not resume:
+                _reset_run_state(req.project.id)
             agent = self.build_agent(req)
         except Exception as e:
             logger.exception("创建 Agent 失败")
@@ -1380,7 +1695,102 @@ class AgentRunner:
             except Exception:
                 pass
 
+            # 末轮若仍在「计划口吻」，再给一次续跑机会（覆盖管线阶段刚结束的情况）
+            if ai_reply_suggests_pending_action(final_text):
+                early = self._maybe_nudge_agent_continue(
+                    agent,
+                    config,
+                    seen_msg_ids,
+                    req,
+                    allow_auto_lesson=False,
+                    max_nudges=4,
+                )
+                if early:
+                    return early
+                try:
+                    state = agent.get_state(config)
+                    values = getattr(state, "values", None) or {}
+                    messages = (
+                        values.get("messages") if isinstance(values, dict) else None
+                    )
+                    if messages:
+                        trajectory_messages = list(messages)
+                        final_text = _extract_text(trajectory_messages) or final_text
+                except Exception:
+                    pass
+
             success_path = build_success_path_from_messages(trajectory_messages)
+            arts = list_deliverable_names(req.project_root)
+            still_planning = ai_reply_suggests_pending_action(final_text)
+
+            # 末次定向续跑：仅当「看起来仍在计划」且「尚无交付物」时给一次强制落盘机会，
+            # 避免因模型只是忘了落盘/只描述未动手就被判未完成。
+            if still_planning and not arts:
+                finalize = (
+                    "【收尾要求 / FINALIZE】请把本任务最终成果写入 deliverables/ 下的一个文件"
+                    "（用 write_file，path=deliverables/…，内容为最终报告/数据），"
+                    "写完后用一句话说明成果文件路径。\n"
+                    "若确实无需落盘成果，用 ask_user 询问用户后再结束。\n"
+                    "Write the final result to a file under deliverables/ now, then reply in one line. "
+                    "If no artifact is needed, ask the user via ask_user."
+                )
+                self._emit(
+                    "info",
+                    "模型仍停留在描述阶段且无交付物；已发出强制落盘要求（最后机会）。",
+                )
+                self._stream_until_pause(
+                    agent,
+                    {"messages": [{"role": "user", "content": finalize}]},
+                    config,
+                    seen_msg_ids,
+                )
+                final_early = self._drain_pending_interrupts(
+                    agent,
+                    config,
+                    seen_msg_ids,
+                    req,
+                    allow_auto_lesson=False,
+                )
+                if final_early is not None:
+                    return final_early
+                # 复评：重新取文本 / 交付物 / 是否仍在计划
+                try:
+                    state = agent.get_state(config)
+                    values = getattr(state, "values", None) or {}
+                    messages = (
+                        values.get("messages") if isinstance(values, dict) else None
+                    )
+                    if messages:
+                        trajectory_messages = list(messages)
+                        final_text = _extract_text(trajectory_messages) or final_text
+                except Exception:
+                    pass
+                success_path = build_success_path_from_messages(trajectory_messages)
+                arts = list_deliverable_names(req.project_root)
+                still_planning = ai_reply_suggests_pending_action(final_text)
+
+            incomplete = still_planning and not arts
+            if incomplete:
+                reasons = []
+                if still_planning:
+                    reasons.append("模型仍在描述下一步、未真正收尾")
+                if not arts:
+                    reasons.append("deliverables/ 无交付物")
+                reason = "；".join(reasons)
+                self._emit(
+                    "info",
+                    f"任务似乎未完成（{reason}）。"
+                    "已跳过自动经验总结，避免把未完成流程固化进 scripts/pipeline.json。"
+                    "可再次点「运行」继续，或确认完成后点「总结」。",
+                )
+                self._emit("info", "运行结束：未完成")
+                return RunResult(
+                    ok=False,
+                    outcome="incomplete",
+                    error="",
+                    final_text=final_text,
+                )
+
             lesson = self._maybe_auto_write_lesson(
                 req,
                 "success",
@@ -1534,7 +1944,7 @@ class AgentRunner:
                 ]
 
             previous_text = store.read_latest_text(max_chars=8000)
-            run_log = collect_events_log(events)
+            run_log = build_lesson_digest(events)
             scripts_ctx = collect_scripts_context(req.project_root)
             env = build_runtime_env_block(
                 project_root=str(req.project_root),

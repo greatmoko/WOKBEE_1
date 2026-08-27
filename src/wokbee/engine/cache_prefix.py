@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
@@ -44,11 +45,16 @@ def static_system_prompt(*, mode: str) -> str:
             "请先理解对话再调用项目工具，并用中文确认。\n"
             f"项目名称须尽量简短，最多 {MAX_PROJECT_TITLE_LEN} 字，禁止用整句目标当名称。\n"
             "文件工具路径（read_file/write_file/edit_file/ls/grep/glob）："
-            "必须用相对项目根的虚拟路径，如 workspace/a.json、deliverables/out.md、uploads/f.pdf；"
-            "可写 /workspace/a.json。**禁止** Windows 绝对路径（C:\\\\...、D:/...），否则报错。"
-            "execute 才可用本机真实路径；写入项目文件后读回仍用虚拟路径。\n"
+            "项目内须用虚拟路径，如 workspace/a.json、deliverables/out.md、uploads/f.pdf。"
+            "**禁止** 对 file 工具传 Windows 绝对路径（C:\\\\...、D:/...）。\n"
+            # 提权申请（沙箱授权）提示已注释：恢复为纯项目沙箱内、无越沙箱授权流程。
+            # "项目外路径（其他盘符、全局 Skills 真实目录等）：用 **execute** + pwsh 读写；"
+            # "或调用会触发沙箱授权的文件/execute 操作（见【会话上下文】审核与预授权）。"
+            # "全局 Skills 虚拟路径 /skills/<名>/SKILL.md 可读可 edit_file/write_file 编辑。\n"
+            # "收到明确修改/读取任务后 **必须在本轮内调用工具** 完成；"
+            # "禁止只说「我将要/先去确认」就结束；缺信息用 ask_user。\n"
             "工作区：workspace/；交付物：deliverables/；上传：uploads/（同名或相近以最新为准）；记忆：memory/；"
-            "参考材料：references/。\n"
+            "参考材料：references/；全局 Skills：/skills/（真实路径见【会话上下文】）。\n"
             "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、"
             "配置、环境参数与登录信息保存到 references/，并在 references/MANIFEST.md 登记，"
             "确保下次能稳定复跑；references/ 不会被归档。这些敏感信息仅供本机使用，勿外发。\n"
@@ -96,6 +102,12 @@ def static_system_prompt(*, mode: str) -> str:
         f"名称尽量简短，最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
         "经验总结：无经验时运行结束可自动总结；之后由用户「总结经验」新建带时间戳文档。\n"
         "若存在 scripts/pipeline.json：优先本地跑脚本；仅失败、数据异常或需创作时再调用模型。\n"
+        # 循环护栏提示已注释：恢复为不做「反复调用」限制，避免误卡 Agent。
+        # "禁止用相同参数反复调用同一工具；若连续两次结果相同或目标页无所需数据，"
+        # "应换 URL/来源、说明数据暂不可用，或使用 ask_user 询问用户，勿死循环重试。\n"
+        # "收到任务后 **必须在本轮内调用工具** 推进（execute/读写/联网等）；"
+        # "禁止只说「我将/将用 execute…」就结束；缺信息用 ask_user。\n"
+        # "项目外路径用 execute + 真实路径；/skills/ 虚拟路径可读可 edit。\n"
         "本轮具体项目态（名称、目标、审核、步数上限、经验摘要、运行环境）见用户消息【会话上下文】；"
         "system 在本会话内保持字节级稳定以利于 DeepSeek 前缀缓存。"
     )
@@ -110,6 +122,7 @@ def build_session_context_block(
     experience_digest: str = "",
     mode: str = "run",
     runtime_env_block: str = "",
+    extra_lines: list[str] | None = None,
 ) -> str:
     """易变内容：拼进首条/当轮 user，不进 system。"""
     lines = [
@@ -127,7 +140,140 @@ def build_session_context_block(
     if experience_digest.strip():
         lines.append("")
         lines.append(experience_digest.strip())
+    if extra_lines:
+        for line in extra_lines:
+            s = (line or "").strip()
+            if s:
+                lines.append(s)
     return "\n".join(lines)
+
+
+_AI_ACTION_INTENT_MARKERS = (
+    "我将",
+    "我会",
+    "我先",
+    "我去",
+    "让我",
+    "准备",
+    "将要",
+    "接下来",
+    "确认路径",
+    "确认真实",
+    "申请权限",
+    "将使用",
+    "将用",
+    "会用",
+    "我用",
+    "去运行",
+    "去执行",
+    "运行该",
+    "运行此",
+    "运行脚本",
+    "执行该",
+    "执行脚本",
+    "调用 execute",
+    "使用 execute",
+    "用 execute",
+    "用 pwsh",
+    "用 curl",
+    "通过 execute",
+    "先看一下",
+    "看一下链接",
+)
+# 英文模型常只输出计划口吻不带 tool_calls；必须识别，否则自动续跑被跳过
+_AI_ACTION_INTENT_MARKERS_EN = (
+    "let me",
+    "i'll ",
+    "i will ",
+    "i need to",
+    "i'm going to",
+    "i am going to",
+    "going to ",
+    "next i'll",
+    "next i will",
+    "i'll use",
+    "i will use",
+    "i'll try",
+    "i will try",
+    "try to find",
+    "use curl",
+    "use execute",
+    "run curl",
+    "fetch the",
+    "check the site",
+    "get the raw",
+)
+_AI_DONE_MARKERS = (
+    "已完成",
+    "已经完成",
+    "已成功",
+    "已生成",
+    "任务完成",
+    # 注意：不要用裸「已写入/已保存」——工具落盘常说「完整结果已写入文件」，
+    # 与「让我继续」同句会出现，会误判为收工并跳过自动续跑。
+    "已写入 deliverables",
+    "已写入交付",
+    "保存到 deliverables",
+)
+_AI_DONE_MARKERS_EN = (
+    "completed",
+    "already done",
+    "successfully written to deliverables",
+    "written to deliverables",
+    "saved to deliverables",
+    "task is done",
+    "finished the task",
+)
+_AI_FUTURE_MARKERS = (
+    "我将",
+    "我会",
+    "我先",
+    "我去",
+    "让我",
+    "将要",
+    "接下来",
+    "准备",
+    "将使用",
+    "将用",
+    "我用",
+    "用 execute",
+    "调用 execute",
+    "去运行",
+    "去执行",
+)
+_AI_FUTURE_MARKERS_EN = (
+    "i'll ",
+    "i will ",
+    "let me",
+    "next ",
+    "going to ",
+    "i need to",
+    "use execute",
+    "run python",
+)
+
+
+def ai_reply_suggests_pending_action(text: str) -> bool:
+    """AI 回复是否像在承诺行动但可能尚未调工具（中英均可）。"""
+    msg = (text or "").strip()
+    if not msg:
+        return False
+    low = msg.lower()
+    has_intent = any(m in msg for m in _AI_ACTION_INTENT_MARKERS) or any(
+        m in low for m in _AI_ACTION_INTENT_MARKERS_EN
+    )
+    if not has_intent:
+        return False
+    has_done = any(m in msg for m in _AI_DONE_MARKERS) or any(
+        m in low for m in _AI_DONE_MARKERS_EN
+    )
+    if has_done:
+        has_future = any(f in msg for f in _AI_FUTURE_MARKERS) or any(
+            f in low for f in _AI_FUTURE_MARKERS_EN
+        )
+        if not has_future:
+            return False
+    return True
 
 
 def compose_user_with_context(user_message: str, context_block: str) -> str:
@@ -231,24 +377,73 @@ def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
             text, max_chars=max_chars, dump_dir=dump_dir, tool_name=name
         )
 
+    def _hook(fn: Callable) -> Callable:
+        """包装（可能异步的）原函数；异步函数保持异步，否则 ainvoke 会取回裸协程。"""
+        if inspect.iscoroutinefunction(fn):
+            async def _ahooked(*args, **kwargs):
+                return _truncate(await fn(*args, **kwargs))
+            return _ahooked
+
+        def _hooked(*args, **kwargs):
+            return _truncate(fn(*args, **kwargs))
+        return _hooked
+
+    # 异步入口（async @tool / MCP 等）必须一并包装，否则 ainvoke 走 coroutine 时绕过截断
+    coro = getattr(tool, "coroutine", None)
+    if inspect.iscoroutinefunction(coro):
+        aw = _hook(coro)
+        try:
+            return tool.model_copy(update={"coroutine": aw})
+        except Exception:
+            try:
+                object.__setattr__(tool, "coroutine", aw)
+                return tool
+            except Exception:
+                return tool
+
     # StructuredTool / BaseTool：优先包 _run / func
     if hasattr(tool, "func") and callable(getattr(tool, "func")):
         orig = tool.func
-
-        def hooked(*args, **kwargs):
-            return _truncate(orig(*args, **kwargs))
-
+        newfunc = _hook(orig)
+        update = {"func": newfunc}
+        if inspect.iscoroutinefunction(orig):
+            # func 为协程时同步替换 coroutine，避免 ainvoke 返回裸协程
+            update["coroutine"] = newfunc
         try:
-            return tool.model_copy(update={"func": hooked})
+            return tool.model_copy(update=update)
         except Exception:
             try:
-                tool.func = hooked  # type: ignore[attr-defined]
+                tool.func = newfunc  # type: ignore[attr-defined]
+                if inspect.iscoroutinefunction(orig):
+                    object.__setattr__(tool, "coroutine", newfunc)
                 return tool
             except Exception:
                 return tool
 
     if hasattr(tool, "_run") and callable(getattr(tool, "_run")):
         orig_run = tool._run
+        if inspect.iscoroutinefunction(orig_run):
+            # 异步 _run：优先包配套的异步 _arun（ainvoke 实际走它）
+            arun = getattr(tool, "_arun", None)
+            if inspect.iscoroutinefunction(arun):
+                aw = _hook(arun)
+                try:
+                    object.__setattr__(tool, "_arun", aw)
+                    return tool
+                except Exception:
+                    pass
+            elif callable(arun):
+                orig_arun = arun
+
+                def _ahooked_run(*args, **kwargs):
+                    return _truncate(orig_arun(*args, **kwargs))
+
+                try:
+                    object.__setattr__(tool, "_arun", _ahooked_run)
+                    return tool
+                except Exception:
+                    pass
+            return tool
 
         def hooked_run(*args, **kwargs):
             return _truncate(orig_run(*args, **kwargs))

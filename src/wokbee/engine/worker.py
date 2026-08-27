@@ -13,6 +13,7 @@ class AgentWorker(QThread):
     event_emitted = Signal(str, str, object)  # kind, content, meta
     approval_needed = Signal(object)  # list[dict]
     ask_user_needed = Signal(object)  # dict payload
+    sandbox_escape_needed = Signal(object)  # dict payload
     finished_result = Signal(object)  # RunResult
 
     def __init__(
@@ -32,6 +33,7 @@ class AgentWorker(QThread):
         self.runner.on_event = self._on_event
         self.runner.on_approval_needed = self._on_approval
         self.runner.on_ask_user_needed = self._on_ask_user
+        self.runner.on_sandbox_escape_needed = self._on_sandbox_escape
 
         if self.mode == "chat":
             result = self.runner.run_chat(self.request)
@@ -48,6 +50,9 @@ class AgentWorker(QThread):
     def _on_ask_user(self, payload: dict):
         self.ask_user_needed.emit(payload)
 
+    def _on_sandbox_escape(self, payload: dict):
+        self.sandbox_escape_needed.emit(payload)
+
     def cancel(self):
         self.runner.request_cancel()
 
@@ -62,6 +67,9 @@ class AgentWorker(QThread):
 
     def resolve_ask_user(self, answers: dict):
         self.runner.resolve_ask_user(answers)
+
+    def resolve_sandbox_escape(self, approved: bool, *, grant_run: bool = False):
+        self.runner.resolve_sandbox_escape(approved, grant_run=grant_run)
 
 
 class LessonWorker(QThread):

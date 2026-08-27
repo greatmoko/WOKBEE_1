@@ -148,10 +148,12 @@ def web_search(query: str, max_results: int = 5) -> str:
 
 
 @tool
-def http_get(url: str, max_chars: int = 12000) -> str:
-    """用 GET 请求访问任意公网 URL，返回响应正文（自动去掉部分 HTML 标签）。
+def http_get(url: str, max_chars: int = 12000, preserve_html: bool = False) -> str:
+    """用 GET 请求访问任意公网 URL，返回响应正文。
 
-    适用于天气 API、新闻页、官方公告、JSON 接口等。需要完整网络权限的场景请优先用此工具或 web_search。
+    默认去掉 HTML 标签便于阅读。若需要解析 href/链接结构，必须设 preserve_html=True
+    保留原始 HTML（不要改用 curl/execute 绕路）。
+    适用于天气 API、新闻页、官方公告、JSON 接口等。
     """
     u = (url or "").strip()
     if not u:
@@ -178,11 +180,13 @@ def http_get(url: str, max_chars: int = 12000) -> str:
                     text = json.dumps(resp.json(), ensure_ascii=False, indent=2)
                 except Exception:
                     pass
-            elif "html" in ctype:
+            elif "html" in ctype and not preserve_html:
                 text = _strip_html(text)
             truncated = len(text) > max_chars
             body = text[:max_chars]
             header = f"HTTP {resp.status_code} | {ctype or 'unknown'} | len={len(text)}"
+            if preserve_html and "html" in ctype:
+                header += " | preserve_html=true"
             if truncated:
                 header += f" | truncated_to={max_chars}"
             return f"{header}\nURL: {str(resp.url)}\n\n{body}"
@@ -197,9 +201,11 @@ def http_request(
     headers_json: str = "",
     body: str = "",
     max_chars: int = 12000,
+    preserve_html: bool = False,
 ) -> str:
     """发送自定义 HTTP 请求（GET/POST/PUT/DELETE 等），可带 JSON headers 与 body。
 
+    默认对 HTML 去标签。需要原始 HTML（含 href）时设 preserve_html=True。
     headers_json 示例：'{"Authorization":"Bearer xxx","Content-Type":"application/json"}'
     """
     u = (url or "").strip()
@@ -227,11 +233,12 @@ def http_request(
                     text = json.dumps(resp.json(), ensure_ascii=False, indent=2)
                 except Exception:
                     pass
-            elif "html" in ctype:
+            elif "html" in ctype and not preserve_html:
                 text = _strip_html(text)
             body_out = text[:max_chars]
+            flag = " | preserve_html=true" if (preserve_html and "html" in ctype) else ""
             return (
-                f"HTTP {resp.status_code} {method} | {ctype or 'unknown'}\n"
+                f"HTTP {resp.status_code} {method} | {ctype or 'unknown'}{flag}\n"
                 f"URL: {str(resp.url)}\n\n{body_out}"
             )
     except Exception as e:

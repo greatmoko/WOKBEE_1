@@ -156,8 +156,8 @@ class SkillsWorkspace(QWidget):
         hl.addWidget(title)
         tip = QLabel(
             "技能以文件夹 + SKILL.md 形式存放在全局目录（默认 ~/.wokbee/skills）。"
-            "启用后，WokBee 运行时通过 /skills/ 只读挂载该目录，不会复制到每个项目。"
-            "供 Deep Agents 按需调用。"
+            "启用后，WokBee 运行时通过 /skills/ 挂载该目录（不复制到每个项目）；"
+            "Agent 可用 read_file/edit_file 直接编辑（走写操作审批）。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet(

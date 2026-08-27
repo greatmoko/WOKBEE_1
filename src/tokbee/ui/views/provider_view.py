@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.styles.system import apply_lineedit, style_hint_label
 from tokbee.core.provider_store import ProviderStore, ProviderSettings, ProviderModel
 from tokbee.core.provider import get_builtin
 from tokbee.core.errors import AIError
@@ -415,7 +416,8 @@ class ProviderSettingsWorkspace(QWidget):
         self.theme = theme
         self.store = store or ProviderStore()
         self._current_id = ""
-        self._model_checks: list = []  # (QCheckBox, ProviderModel)
+        self._model_checks: list = []  # (QCheckBox, ProviderModel, row_widget)
+        self._model_filter_empty: QLabel | None = None
         self._model_popup: _ModelSettingsPopup | None = None
         self._fetch_worker: _FetchModelsWorker | None = None
         self._loading = False
@@ -602,6 +604,21 @@ class ProviderSettingsWorkspace(QWidget):
         model_row.addWidget(add_model_btn)
         right_l.addLayout(model_row)
 
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        self._model_filter_edit = QLineEdit()
+        self._model_filter_edit.setPlaceholderText("筛选模型（按名称或 ID）")
+        self._model_filter_edit.setFixedHeight(34)
+        apply_lineedit(self._model_filter_edit, c)
+        self._model_filter_edit.setClearButtonEnabled(True)
+        self._model_filter_edit.textChanged.connect(self._apply_model_filter)
+        filter_row.addWidget(self._model_filter_edit, stretch=1)
+        self._model_filter_hint = QLabel("")
+        style_hint_label(self._model_filter_hint, c)
+        self._model_filter_hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        filter_row.addWidget(self._model_filter_hint)
+        right_l.addLayout(filter_row)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea { border: none; }")
@@ -704,6 +721,9 @@ class ProviderSettingsWorkspace(QWidget):
         self._autosave_timer.stop()
         self._loading = True
         self._current_id = provider_id
+        self._model_filter_edit.blockSignals(True)
+        self._model_filter_edit.clear()
+        self._model_filter_edit.blockSignals(False)
         self._right_stack.setCurrentIndex(1)
         name = self.store.get_display_name(provider_id)
         self._title.setText(name)
@@ -722,6 +742,33 @@ class ProviderSettingsWorkspace(QWidget):
         self._refresh_default_labels()
         self._loading = False
 
+    def _model_filter_query(self) -> str:
+        if not hasattr(self, "_model_filter_edit"):
+            return ""
+        return self._model_filter_edit.text().strip().lower()
+
+    def _model_matches_filter(self, model: ProviderModel, query: str) -> bool:
+        if not query:
+            return True
+        haystack = f"{model.nickname or ''} {model.model_id}".lower()
+        return query in haystack
+
+    def _apply_model_filter(self, *_args):
+        query = self._model_filter_query()
+        total = len(self._model_checks)
+        visible = 0
+        for _cb, m, row in self._model_checks:
+            show = self._model_matches_filter(m, query)
+            row.setVisible(show)
+            if show:
+                visible += 1
+        if self._model_filter_empty is not None:
+            self._model_filter_empty.setVisible(total > 0 and query != "" and visible == 0)
+        if query and total:
+            self._model_filter_hint.setText(f"显示 {visible} / {total}")
+        else:
+            self._model_filter_hint.setText(f"共 {total} 个" if total else "")
+
     def _render_models(self, models: list[ProviderModel]):
         self._close_model_popup()
         while self._model_layout.count():
@@ -730,11 +777,13 @@ class ProviderSettingsWorkspace(QWidget):
             if w:
                 w.deleteLater()
         self._model_checks.clear()
+        self._model_filter_empty = None
         c = self.theme.colors
         if not models:
             empty = QLabel("暂无模型 — 请「拉取远程模型」或「+ 添加」")
             empty.setStyleSheet(f"color: {c['text_hint']}; font-size: 12px;")
             self._model_layout.addWidget(empty)
+            self._apply_model_filter()
             return
         for m in models:
             row = QWidget()
@@ -744,6 +793,7 @@ class ProviderSettingsWorkspace(QWidget):
 
             cb = QCheckBox(m.nickname or m.model_id)
             cb.setChecked(m.enabled)
+            cb.setToolTip(m.model_id if m.nickname else "")
             cb.setStyleSheet(f"font-size: 13px; color: {c['text']};")
             cb.toggled.connect(self._on_model_toggled)
             row_l.addWidget(cb, stretch=1)
@@ -778,7 +828,13 @@ class ProviderSettingsWorkspace(QWidget):
             row_l.addWidget(gear)
 
             self._model_layout.addWidget(row)
-            self._model_checks.append((cb, m))
+            self._model_checks.append((cb, m, row))
+
+        self._model_filter_empty = QLabel("无匹配模型，请调整筛选关键词")
+        style_hint_label(self._model_filter_empty, c)
+        self._model_filter_empty.setVisible(False)
+        self._model_layout.addWidget(self._model_filter_empty)
+        self._apply_model_filter()
 
     def _close_model_popup(self):
         if self._model_popup is not None:
@@ -801,7 +857,7 @@ class ProviderSettingsWorkspace(QWidget):
         popup.popup_at(pos)
 
     def _on_model_context_changed(self, model_id: str, context_window: int):
-        for _cb, m in self._model_checks:
+        for _cb, m, _row in self._model_checks:
             if m.model_id == model_id:
                 m.context_window = int(context_window)
                 break
@@ -840,7 +896,7 @@ class ProviderSettingsWorkspace(QWidget):
         if not self._current_id or not model_id:
             return
         self._close_model_popup()
-        for cb, m in self._model_checks:
+        for cb, m, _row in self._model_checks:
             if m.model_id == model_id:
                 cb.setChecked(True)
                 break
@@ -859,7 +915,7 @@ class ProviderSettingsWorkspace(QWidget):
 
     def _collect_settings(self) -> ProviderSettings:
         models: list[ProviderModel] = []
-        for cb, m in self._model_checks:
+        for cb, m, _row in self._model_checks:
             models.append(ProviderModel(
                 model_id=m.model_id,
                 nickname=m.nickname,

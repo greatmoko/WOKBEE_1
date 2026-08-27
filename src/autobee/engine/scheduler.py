@@ -7,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from PySide6.QtCore import QObject, Signal
 from apscheduler.events import (
     EVENT_JOB_ERROR,
     EVENT_JOB_EXECUTED,
@@ -23,6 +24,14 @@ logger = logging.getLogger("autobee")
 
 # 失联宽限（秒）：电脑睡眠到点后仍能在宽限内补跑，避免默认 1s 静默丢弃
 _MISFIRE_GRACE = 3600
+
+
+class SchedulerNotifier(QObject):
+    """调度器 → UI 的 Qt 信号桥（跨线程自动 QueuedConnection）。"""
+
+    task_started = Signal(str)          # task_id
+    task_progress = Signal(str, str)    # task_id, message
+    task_finished = Signal(str, str, str)  # task_id, status, message
 
 
 def describe_cron(expr: str) -> str:
@@ -77,8 +86,10 @@ class SchedulerService:
     def __init__(self, store: AutoBeeStore | None = None, executor: TaskExecutor | None = None):
         self.store = store or AutoBeeStore()
         self.executor = executor or TaskExecutor(self.store)
+        self.notifier = SchedulerNotifier()
         self._started = False
         self._lock = threading.RLock()
+        self._running_tasks: set[str] = set()
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._scheduler = BackgroundScheduler(
             job_defaults={
@@ -162,12 +173,25 @@ class SchedulerService:
                 else:
                     logger.exception("启用任务 %s 失败", task_id)
 
-    def run_now(self, task_id: str) -> None:
+    def run_now(self, task_id: str) -> bool:
         """立即执行（用自管线程池投递，避开 APScheduler 无公开 submit）。"""
         task = self.store.get(task_id)
         if task is None:
-            return
+            return False
+        with self._lock:
+            if task_id in self._running_tasks:
+                logger.info("任务 %s 已在运行，忽略重复触发", task_id)
+                return False
         self._pool.submit(self._run_job, task_id)
+        return True
+
+    def is_task_running(self, task_id: str) -> bool:
+        with self._lock:
+            return task_id in self._running_tasks
+
+    def any_task_running(self) -> bool:
+        with self._lock:
+            return bool(self._running_tasks)
 
     # ── 查询 ───────────────────────────────────────────────
     def next_run_time(self, task_id: str) -> str:
@@ -188,16 +212,40 @@ class SchedulerService:
         task = self.store.get(task_id)
         if task is None:
             return
+        with self._lock:
+            if task_id in self._running_tasks:
+                logger.info("任务 %s 已在运行，跳过", task_id)
+                return
+            self._running_tasks.add(task_id)
+
         log = JobLog(task_id=task_id, status=TaskRunStatus.RUNNING)
         started_dt = datetime.now()
+        task.last_status = TaskRunStatus.RUNNING.value
+        task.last_message = "运行中…"
+        task.last_run = log.started_at
+        self.store.save_task(task)
+        self.store.append_log(log)
+        self.notifier.task_started.emit(task_id)
+
+        def _on_progress(message: str) -> None:
+            brief = (message or "").strip()
+            if not brief:
+                return
+            if len(brief) > 200:
+                brief = brief[:200] + "…"
+            task.last_message = brief
+            self.store.save_task(task)
+            self.notifier.task_progress.emit(task_id, brief)
+
         try:
+            self.executor.set_progress_handler(_on_progress)
             result = self.executor.run(task)
             ok = bool(result.get("ok"))
             log.status = TaskRunStatus.SUCCESS if ok else TaskRunStatus.FAILED
             log.summary = str(result.get("message") or "")
             log.error = str(result.get("error") or "")
             task.last_status = log.status.value
-            task.last_message = log.summary or log.error
+            task.last_message = log.summary or log.error or log.status.label
         except Exception as e:
             logger.exception("任务 %s 执行异常", task_id)
             log.status = TaskRunStatus.FAILED
@@ -205,11 +253,17 @@ class SchedulerService:
             task.last_status = TaskRunStatus.FAILED.value
             task.last_message = str(e)
         finally:
+            self.executor.set_progress_handler(None)
             log.finished_at = _now()
             log.duration_s = max(0.0, (datetime.now() - started_dt).total_seconds())
-            self.store.append_log(log)
+            self.store.update_log(log)
             task.last_run = log.started_at
             self.store.save_task(task)
+            with self._lock:
+                self._running_tasks.discard(task_id)
+            self.notifier.task_finished.emit(
+                task_id, task.last_status, task.last_message or "",
+            )
 
     def _on_scheduler_event(self, event) -> None:
         try:

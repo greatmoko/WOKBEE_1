@@ -9,15 +9,16 @@ from pathlib import Path
 import logging
 
 from PySide6.QtCore import Qt, Signal, QThread, QEvent, QTimer, QSize, QMimeData
-from PySide6.QtGui import QPixmap, QKeyEvent, QImage, QMouseEvent, QPainter, QColor, QPen, QTextDocument
+from PySide6.QtGui import QPixmap, QKeyEvent, QImage, QMouseEvent, QPainter, QColor, QPen, QTextDocument, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QScrollArea, QTextEdit, QTextBrowser,
     QLineEdit, QMenu, QDialog,
-    QComboBox, QFileDialog, QSizePolicy,
+    QComboBox, QFileDialog, QSizePolicy, QApplication,
 )
 
-from tokbee.ui.styles.theme import Theme
+from tokbee.ui.styles.theme import Theme, COLORS
+from tokbee.ui.styles.system import make_context_menu, exec_text_edit_context_menu
 from tokbee.ui.viewmodels.chat_viewmodel import ChatViewModel
 from tokbee.ui.widgets.context_ring import ContextUsageRing
 from tokbee.core.chat_manager import ChatManager, ChatSession
@@ -113,6 +114,13 @@ class _ChatInputEdit(QTextEdit):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._session_id_provider = lambda: "tmp"
+        self._menu_colors: dict = dict(COLORS)
+
+    def set_menu_colors(self, colors: dict):
+        self._menu_colors = colors
+
+    def contextMenuEvent(self, event):
+        exec_text_edit_context_menu(self, event, self._menu_colors)
 
     def set_session_id_provider(self, fn):
         self._session_id_provider = fn
@@ -186,9 +194,42 @@ class _AutoHeightBrowser(QTextBrowser):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setOpenExternalLinks(True)
         self.setReadOnly(True)
+        self._menu_colors: dict = dict(COLORS)
         # 流式高度上限：避免半截 Markdown / 宽度为 0 时算出天文数字高度
         self._height_cap = 0
         self.document().contentsChanged.connect(self._update_height)
+
+    def set_menu_colors(self, colors: dict):
+        self._menu_colors = colors
+
+    def contextMenuEvent(self, event):
+        menu = make_context_menu(self, self._menu_colors)
+        cursor = self.textCursor()
+        has_sel = cursor.hasSelection()
+        has_text = bool(self.toPlainText())
+        copy_act = menu.addAction("复制")
+        copy_act.setShortcut("Ctrl+C")
+        copy_act.setEnabled(has_sel or has_text)
+        link = self.anchorAt(event.pos())
+        copy_link_act = None
+        if link:
+            copy_link_act = menu.addAction("复制链接")
+        menu.addSeparator()
+        select_all_act = menu.addAction("全选")
+        select_all_act.setEnabled(has_text)
+        action = menu.exec(event.globalPos())
+        if action == copy_act:
+            if has_sel:
+                text = cursor.selectedText().replace("\u2029", "\n")
+            else:
+                text = self.toPlainText()
+            QApplication.clipboard().setText(text)
+        elif copy_link_act and action == copy_link_act:
+            QApplication.clipboard().setText(link)
+        elif action == select_all_act:
+            cursor.select(QTextCursor.SelectionType.Document)
+            self.setTextCursor(cursor)
+        event.accept()
 
     def set_height_cap(self, cap: int):
         """cap<=0 表示不限制（结束后收紧到真实内容高度）。"""
@@ -254,6 +295,16 @@ class _UserBubbleLabel(QLabel):
         """)
         self.setMaximumWidth(self._max_w)
         self._apply_size()
+
+    def contextMenuEvent(self, event):
+        menu = make_context_menu(self, self.theme.colors)
+        copy_act = menu.addAction("复制")
+        copy_act.setShortcut("Ctrl+C")
+        copy_act.setEnabled(bool(self.text()))
+        action = menu.exec(event.globalPos())
+        if action == copy_act:
+            QApplication.clipboard().setText(self.text())
+        event.accept()
 
     def set_max_bubble_width(self, max_width: int):
         self._max_w = max(160, int(max_width))
@@ -647,24 +698,7 @@ class _ChatSidebar(QFrame):
         if not session:
             return
 
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background: {c["content_bg"]};
-                border: 1px solid {c["border"]};
-                border-radius: 6px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 20px;
-                border-radius: 4px;
-                color: {c["text"]};
-                font-size: 12px;
-            }}
-            QMenu::item:selected {{
-                background: {c["subnav_hover"]};
-            }}
-        """)
+        menu = make_context_menu(self, c)
 
         pin_text = "取消置顶" if session.pinned else "置顶"
         pin_action = menu.addAction(pin_text)
@@ -930,6 +964,7 @@ class _ChatWorkspace(QWidget):
         input_layout.addWidget(self._attach_bar)
 
         self._input_box = _ChatInputEdit()
+        self._input_box.set_menu_colors(c)
         self._input_box.setPlaceholderText("输入消息...（Enter 发送，Shift+Enter 换行，可粘贴图片）")
         self._input_min_h = _INPUT_MIN_HEIGHT
         self._input_box.setMinimumHeight(self._input_min_h)
@@ -1236,24 +1271,7 @@ class _ChatWorkspace(QWidget):
             self._show_tip("请先在「AI配置 → 厂商设置」中配置并启用模型")
             return
 
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background: {c["content_bg"]};
-                border: 1px solid {c["border"]};
-                border-radius: 6px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 16px;
-                border-radius: 4px;
-                color: {c["text"]};
-                font-size: 12px;
-            }}
-            QMenu::item:selected {{
-                background: {c["subnav_hover"]};
-            }}
-        """)
+        menu = make_context_menu(self, c)
 
         for m in models:
             check = ""
@@ -1367,6 +1385,7 @@ class _ChatWorkspace(QWidget):
         """创建一个自适应高度的 Markdown 渲染控件。"""
         c = self.theme.colors
         tb = _AutoHeightBrowser()
+        tb.set_menu_colors(c)
         tb.setStyleSheet(f"""
             QTextBrowser {{
                 background: {bg};
@@ -1551,6 +1570,7 @@ class _ChatWorkspace(QWidget):
         frame_layout.addWidget(header)
 
         reasoning_browser = _AutoHeightBrowser()
+        reasoning_browser.set_menu_colors(c)
         reasoning_browser.setStyleSheet(f"""
             QTextBrowser {{
                 font-size: 12px; color: {c["text_secondary"]};
@@ -2025,6 +2045,7 @@ class _ChatWorkspace(QWidget):
         thinking_layout.addWidget(thinking_header)
 
         self._stream_reasoning_label = _AutoHeightBrowser()
+        self._stream_reasoning_label.set_menu_colors(c)
         # 仅作异常高度兜底（宽度未就绪时文档会算出天文数字）；正常长回复不应触顶
         vp_h = self._msg_scroll.viewport().height() if hasattr(self, "_msg_scroll") else 600
         stream_cap = max(4000, int(vp_h) * 4)

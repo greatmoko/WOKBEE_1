@@ -131,6 +131,20 @@ class AutoBeeStore:
                 self._logs[log.task_id] = self._logs[log.task_id][-MAX_LOGS_PER_TASK:]
             self.save()
 
+    def update_log(self, log: JobLog) -> None:
+        """按 log.id 更新已有日志（用于运行中 → 终态）。"""
+        with self._lock:
+            logs = self._logs.get(log.task_id)
+            if not logs:
+                self.append_log(log)
+                return
+            for i, existing in enumerate(logs):
+                if existing.id == log.id:
+                    logs[i] = log
+                    self.save()
+                    return
+            self.append_log(log)
+
     def list_logs(self, task_id: str, limit: int = MAX_LOGS_PER_TASK) -> list[JobLog]:
         with self._lock:
             logs = self._logs.get(task_id, [])

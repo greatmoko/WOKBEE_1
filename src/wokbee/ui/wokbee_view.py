@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QEvent, QSize
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame, QLabel, QPushButton,
     QLineEdit, QScrollArea, QTextEdit, QSizePolicy, QDialog,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.styles.system import make_context_menu, bind_text_edit_context_menu
 from tokbee.core.provider_store import ProviderStore
 from tokbee.ui.combo_style import apply_combo_popup_style
 from tokbee.ui.widgets.context_ring import ContextUsageRing
@@ -349,6 +350,7 @@ def _ask_multiline(
     layout.addWidget(tip)
     inp = QTextEdit()
     inp.setPlainText(default or "")
+    bind_text_edit_context_menu(inp, c)
     # ~22px/行 + padding
     inp.setMinimumHeight(max(5, min_lines) * 22 + 16)
     inp.setStyleSheet(_textedit_qss(theme))
@@ -417,6 +419,7 @@ def _ask_new_project(parent: QWidget, theme: Theme) -> tuple[str, str] | None:
 
     goal_inp = QTextEdit()
     goal_inp.setPlaceholderText("例如：查询深圳今日天气，写成小红书风格文案并保存到产物目录…")
+    bind_text_edit_context_menu(goal_inp, c)
     goal_inp.setMinimumHeight(5 * 22 + 16)
     goal_inp.setStyleSheet(_textedit_qss(theme))
     layout.addWidget(goal_inp, stretch=1)
@@ -495,13 +498,17 @@ def _prompt_approval_flags(
     c = theme.colors
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
-    dlg.setFixedSize(420, 280)
+    dlg.setFixedSize(420, 320)
     dlg.setStyleSheet(f"background: {c['content_bg']};")
     layout = QVBoxLayout(dlg)
     layout.setContentsMargins(24, 20, 24, 18)
     layout.setSpacing(10)
 
-    tip = QLabel("勾选表示该级别免审；未勾选则执行时需要人工审批。仅影响当前项目。")
+    tip = QLabel(
+        "勾选表示该级别免审；未勾选则执行时需要人工审批。"
+        "「越过沙箱」单独控制是否可访问本项目外的文件（含其他项目）；"
+        "未勾选时每次访问会弹窗申请。仅影响当前项目。"
+    )
     tip.setWordWrap(True)
     tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
     layout.addWidget(tip)
@@ -776,29 +783,7 @@ class _ProjectSidebar(QFrame):
 
     def _on_context(self, project_id: str, pos):
         c = self.theme.colors
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background: {c["content_bg"]};
-                border: 1px solid {c["border"]};
-                border-radius: 6px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 20px;
-                border-radius: 4px;
-                color: {c["text"]};
-                font-size: 12px;
-            }}
-            QMenu::item:selected {{
-                background: {c["subnav_hover"]};
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background: {c["border"]};
-                margin: 4px 8px;
-            }}
-        """)
+        menu = make_context_menu(self, c)
         rename_a = menu.addAction("重命名")
         open_a = menu.addAction("打开工作文件夹")
         copy_a = menu.addAction("复制项目 ID")
@@ -1056,6 +1041,10 @@ class _ProjectEssentials(QFrame):
 BUBBLE_PREVIEW_CHARS = 400
 BUBBLE_PREVIEW_LINES = 10
 BUBBLE_COLLAPSED_HEIGHT = 200
+# 全局收拢模式：正文约 1 行（配合气泡头「角色 · 时间」共约两行可见信息）
+BUBBLE_COMPACT_HEIGHT = 22
+BUBBLE_COMPACT_CHARS = 80
+SCROLL_STICK_THRESHOLD = 48
 
 
 def _preview_text(full: str, *, max_chars: int = BUBBLE_PREVIEW_CHARS, max_lines: int = BUBBLE_PREVIEW_LINES) -> tuple[str, bool]:
@@ -1170,6 +1159,35 @@ class _AutoHeightMd(QTextBrowser):
             QTextBrowser a {{ color: {c.get("accent", "#2f6fed")}; }}
         """)
 
+    def contextMenuEvent(self, event):
+        menu = make_context_menu(self, self.theme.colors)
+        cursor = self.textCursor()
+        has_sel = cursor.hasSelection()
+        has_text = bool(self.toPlainText())
+        copy_act = menu.addAction("复制")
+        copy_act.setShortcut("Ctrl+C")
+        copy_act.setEnabled(has_sel or has_text)
+        link = self.anchorAt(event.pos())
+        copy_link_act = None
+        if link:
+            copy_link_act = menu.addAction("复制链接")
+        menu.addSeparator()
+        select_all_act = menu.addAction("全选")
+        select_all_act.setEnabled(has_text)
+        action = menu.exec(event.globalPos())
+        if action == copy_act:
+            if has_sel:
+                text = cursor.selectedText().replace("\u2029", "\n")
+            else:
+                text = self.toPlainText()
+            QApplication.clipboard().setText(text)
+        elif copy_link_act and action == copy_link_act:
+            QApplication.clipboard().setText(link)
+        elif action == select_all_act:
+            cursor.select(QTextCursor.SelectionType.Document)
+            self.setTextCursor(cursor)
+        event.accept()
+
 
 def _tool_event_display_text(ev: ProjectEvent) -> str:
     """工具气泡正文：优先用结构化 meta 格式化，避免 call 挤成一行。"""
@@ -1273,6 +1291,8 @@ class _ExpandableBody(QWidget):
         self._toggle_text = toggle_text
         self._hide_toggle = hide_toggle
         self._expanded = not default_collapsed
+        self._global_compact = False
+        self._manual_override = False
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         c = theme.colors
         lay = QVBoxLayout(self)
@@ -1298,10 +1318,28 @@ class _ExpandableBody(QWidget):
     def refresh_height(self):
         self._browser._update_height()
 
+    def set_global_compact(self, compact: bool, *, reset_manual: bool = True) -> None:
+        """全局收拢/展开：收拢时统一约一行正文，用户可单独展开某条。"""
+        self._global_compact = bool(compact)
+        if reset_manual:
+            self._manual_override = False
+        if self._global_compact:
+            self._expanded = bool(self._manual_override)
+        else:
+            self._expanded = not self._default_collapsed
+        self._apply()
+        QTimer.singleShot(0, self.refresh_height)
+        QTimer.singleShot(30, self.refresh_height)
+
     def _needs_expand(self) -> bool:
         full = self._full
         if not full:
             return False
+        if self._global_compact and not self._manual_override:
+            return (
+                len(full.splitlines()) > 1
+                or len(full) > BUBBLE_COMPACT_CHARS
+            )
         if self._default_collapsed:
             return True
         _, need = _preview_text(full)
@@ -1324,11 +1362,16 @@ class _ExpandableBody(QWidget):
         full = self._full
         need = self._needs_expand()
         toggle_visible = need and not self._hide_toggle
-        if not need or self._expanded:
+        if self._global_compact and not self._manual_override:
+            self._browser.set_height_cap(BUBBLE_COMPACT_HEIGHT)
+            self._browser.set_markdown(full)
+            self._toggle.setVisible(toggle_visible)
+            self._toggle.setText("展开" if need else "")
+        elif not need or self._expanded:
             self._browser.set_height_cap(0)
             self._browser.set_markdown(full)
             self._toggle.setVisible(toggle_visible)
-            self._toggle.setText("收起" if need else "")
+            self._toggle.setText("收起" if need and not self._global_compact else "")
         else:
             self._browser.set_height_cap(BUBBLE_COLLAPSED_HEIGHT)
             self._browser.set_markdown(full)
@@ -1340,7 +1383,11 @@ class _ExpandableBody(QWidget):
                 self._toggle.setText(f"展开全部（{n_lines} 行 / {len(full)} 字）")
 
     def _on_toggle(self):
-        self._expanded = not self._expanded
+        if self._global_compact:
+            self._manual_override = not self._manual_override
+            self._expanded = self._manual_override
+        else:
+            self._expanded = not self._expanded
         self._apply()
         # 展开后重新量高，避免残留空白
         QTimer.singleShot(0, self.refresh_height)
@@ -1478,6 +1525,7 @@ class _ToolStepRow(QFrame):
         self._status = "running"
         self._args = args if isinstance(args, dict) else None
         self._callback_display = ""
+        self._global_compact = False
         self._pulse_timer = QTimer(self)
         self._pulse_timer.timeout.connect(self._tick_pulse)
         self._pulse_i = 0
@@ -1625,11 +1673,33 @@ class _ToolStepRow(QFrame):
         return "\n\n".join(parts)
 
     def _toggle_body(self):
-        self._body._on_toggle()
-        expanded = getattr(self._body, "_expanded", False)
-        self._toggle.setText("▾" if expanded else "▸")
+        if getattr(self, "_global_compact", False):
+            self._body.setVisible(not self._body.isVisible())
+            if self._body.isVisible():
+                self._body.set_global_compact(True, reset_manual=False)
+                self._body._manual_override = True
+                self._body._expanded = True
+                self._body._apply()
+            self._toggle.setText("▾" if self._body.isVisible() else "▸")
+        else:
+            self._body._on_toggle()
+            expanded = getattr(self._body, "_expanded", False)
+            self._toggle.setText("▾" if expanded else "▸")
         QTimer.singleShot(0, self._body.refresh_height)
         QTimer.singleShot(30, self._body.refresh_height)
+
+    def set_global_compact(self, compact: bool) -> None:
+        """全局收拢：仅保留头行；用户可点 ▸ 展开详情。"""
+        self._global_compact = bool(compact)
+        if compact:
+            self._body.setVisible(False)
+            self._body.set_global_compact(True, reset_manual=True)
+            self._toggle.setText("▸")
+        else:
+            self._body.setVisible(True)
+            self._body.set_global_compact(False, reset_manual=True)
+            expanded = getattr(self._body, "_expanded", False)
+            self._toggle.setText("▾" if expanded else "▸")
 
 
 class _Timeline(QFrame):
@@ -1644,6 +1714,10 @@ class _Timeline(QFrame):
         self._unmatched_calls: list[_ToolStepRow] = []
         self._pending_rows: set[str] = set()
         self._status_bar: _LiveStatusBar | None = None  # Phase C 填充
+        self._stick_to_bottom = True
+        self._agent_running = False
+        self._scroll_programmatic = False
+        self._global_compact = False
         self._build()
 
     def _build(self):
@@ -1668,6 +1742,36 @@ class _Timeline(QFrame):
         scroll.setWidget(self._container)
         self._scroll = scroll
         layout.addWidget(scroll)
+        bar = self._scroll.verticalScrollBar()
+        bar.valueChanged.connect(self._on_user_scroll)
+
+    def _on_user_scroll(self, value: int) -> None:
+        if self._scroll_programmatic:
+            return
+        bar = self._scroll.verticalScrollBar()
+        self._stick_to_bottom = (bar.maximum() - value) <= SCROLL_STICK_THRESHOLD
+
+    def set_agent_running(self, running: bool) -> None:
+        self._agent_running = bool(running)
+
+    def reset_scroll_anchor(self) -> None:
+        """切换项目等场景：下次刷新后滚到最新。"""
+        self._stick_to_bottom = True
+
+    def set_global_compact_mode(self, compact: bool) -> None:
+        self._global_compact = bool(compact)
+        for body in list(self._bodies):
+            try:
+                body.set_global_compact(compact)
+            except RuntimeError:
+                continue
+        for bub in list(self._bubbles):
+            if isinstance(bub, _ToolStepRow):
+                try:
+                    bub.set_global_compact(compact)
+                except RuntimeError:
+                    continue
+        QTimer.singleShot(0, self._sync_bubble_widths)
 
     def show_empty(self, text: str = "选择或新建一个项目开始。"):
         self._clear()
@@ -1701,7 +1805,10 @@ class _Timeline(QFrame):
                 widget = self._wrap_tool_row(widget)
             self._layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
         self._sync_bubble_widths()
-        self._schedule_scroll_to_bottom()
+        self.reset_scroll_anchor()
+        self._schedule_scroll_to_bottom(force=True)
+        if self._global_compact:
+            self.set_global_compact_mode(True)
 
     def append_event(self, ev: ProjectEvent):
         """增量追加一条气泡（运行中用，避免整表重绘闪烁）。"""
@@ -1714,7 +1821,7 @@ class _Timeline(QFrame):
             self._route_tool_event(ev)
         else:
             self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
-        self._schedule_scroll_to_bottom()
+        self._maybe_scroll_to_bottom()
 
     def begin_run(self):
         """一次运行开始：清空配对注册表，显示状态条。"""
@@ -1722,12 +1829,15 @@ class _Timeline(QFrame):
         self._batch_order.clear()
         self._unmatched_calls.clear()
         self._pending_rows.clear()
+        self._agent_running = True
+        self._stick_to_bottom = True
         if self._status_bar is not None:
             self._status_bar.set_pulse(True)
             self._status_bar.set_status("正在启动…")
 
     def end_run(self):
         """一次运行结束：残留 running 步骤行标记为未完成，隐藏状态条。"""
+        self._agent_running = False
         for row in list(self._tool_steps.values()):
             if row._status == "running":
                 row.set_skipped()
@@ -1888,13 +1998,28 @@ class _Timeline(QFrame):
         return out
 
     def _scroll_to_bottom(self):
-        bar = self._scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._scroll_programmatic = True
+        try:
+            bar = self._scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        finally:
+            QTimer.singleShot(0, self._clear_scroll_programmatic)
 
-    def _schedule_scroll_to_bottom(self):
+    def _clear_scroll_programmatic(self):
+        self._scroll_programmatic = False
+
+    def _maybe_scroll_to_bottom(self):
+        """运行中若用户已上翻，不强制跳回底部。"""
+        if self._agent_running and not self._stick_to_bottom:
+            return
+        self._schedule_scroll_to_bottom()
+
+    def _schedule_scroll_to_bottom(self, *, force: bool = False):
         """布局尚未算完时 maximum 会偏小，延迟多刷几次避免停在旧消息区域。"""
+        if not force and self._agent_running and not self._stick_to_bottom:
+            return
         self._scroll_to_bottom()
-        for ms in (0, 30, 100):
+        for ms in (0, 30, 100, 250, 500):
             QTimer.singleShot(ms, self._scroll_to_bottom)
 
     def _viewport_width(self) -> int:
@@ -2068,6 +2193,8 @@ class _Timeline(QFrame):
             )
             self._bodies.append(body)
             bl.addWidget(body)
+            if self._global_compact:
+                body.set_global_compact(True)
 
         if align_right:
             h.addStretch(1)
@@ -2093,8 +2220,12 @@ class _ActionBar(QFrame):
     send_clicked = Signal(str)
     approve_clicked = Signal()
     reject_clicked = Signal()
+    sandbox_reject_clicked = Signal()
+    sandbox_allow_once_clicked = Signal()
+    sandbox_allow_run_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
     compress_clicked = Signal()
+    compact_mode_changed = Signal(bool)
     draft_changed = Signal()
 
     def __init__(self, theme: Theme, parent=None):
@@ -2160,7 +2291,67 @@ class _ActionBar(QFrame):
         ap_lay.addLayout(ap_btns)
         layout.addWidget(self._approval_bar)
 
+        self._sandbox_bar = QFrame()
+        self._sandbox_bar.setVisible(False)
+        self._sandbox_bar.setStyleSheet(f"""
+            QFrame {{
+                background: #eef6ff;
+                border: 1px solid {c["accent"]};
+                border-radius: 8px;
+            }}
+        """)
+        sb_lay = QVBoxLayout(self._sandbox_bar)
+        sb_lay.setContentsMargins(12, 8, 12, 8)
+        sb_lay.setSpacing(6)
+        self._sandbox_label = QLabel("Agent 请求访问项目沙箱外的路径…")
+        self._sandbox_label.setWordWrap(True)
+        self._sandbox_label.setStyleSheet(
+            f"font-size: 12px; color: {c['text']}; background: transparent; border: none;"
+        )
+        sb_lay.addWidget(self._sandbox_label)
+        sb_btns = QHBoxLayout()
+        sb_btns.addStretch()
+        sb_reject = QPushButton("拒绝")
+        sb_reject.setFixedHeight(30)
+        sb_reject.setCursor(Qt.CursorShape.PointingHandCursor)
+        sb_reject.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["danger"]}; color: white;
+                border: none; border-radius: 6px; padding: 0 14px;
+            }}
+            QPushButton:hover {{ background: {c["danger_hover"]}; }}
+        """)
+        sb_reject.clicked.connect(self.sandbox_reject_clicked.emit)
+        sb_once = QPushButton("仅本次允许")
+        sb_once.setFixedHeight(30)
+        sb_once.setCursor(Qt.CursorShape.PointingHandCursor)
+        sb_once.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_bg"]}; color: {c["text"]};
+                border: none; border-radius: 6px; padding: 0 12px;
+            }}
+            QPushButton:hover {{ background: {c["btn_hover"]}; }}
+        """)
+        sb_once.clicked.connect(self.sandbox_allow_once_clicked.emit)
+        sb_run = QPushButton("本次运行均允许")
+        sb_run.setFixedHeight(30)
+        sb_run.setCursor(Qt.CursorShape.PointingHandCursor)
+        sb_run.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_primary"]}; color: white;
+                border: none; border-radius: 6px; padding: 0 12px;
+            }}
+            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
+        """)
+        sb_run.clicked.connect(self.sandbox_allow_run_clicked.emit)
+        sb_btns.addWidget(sb_reject)
+        sb_btns.addWidget(sb_once)
+        sb_btns.addWidget(sb_run)
+        sb_lay.addLayout(sb_btns)
+        layout.addWidget(self._sandbox_bar)
+
         self._input = QTextEdit()
+        bind_text_edit_context_menu(self._input, c)
         self._input.setPlaceholderText(
             "输入提问或指令…（Enter 发送，Shift+Enter 换行；发送=完整能力，运行=经验管线）"
         )
@@ -2180,11 +2371,19 @@ class _ActionBar(QFrame):
         row = QHBoxLayout()
         row.setSpacing(6)
 
+        self._compact_btn = QPushButton("↕️")
+        self._compact_btn.setFixedSize(34, 34)
+        self._compact_btn.setToolTip("收拢/展开全部聊天气泡")
+        self._compact_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._compact_btn.setStyleSheet(self._icon_btn_qss())
+        self._compact_btn.clicked.connect(self._on_compact_toggle)
+        row.addWidget(self._compact_btn)
+        self._compact_mode = False
+
         for icon, tip, slot in (
             ("📁", "打开目录", self.open_folder_clicked.emit),
             ("📦", "打开交付物目录", self.open_deliverables_clicked.emit),
             ("⬆️", "上传文件", self.upload_clicked.emit),
-            ("📝", "AI 总结经验", self.summarize_clicked.emit),
             ("🧹", "清空经验", self.clear_experience_clicked.emit),
         ):
             btn = QPushButton(icon)
@@ -2257,6 +2456,14 @@ class _ActionBar(QFrame):
         pause_btn.clicked.connect(self.pause_clicked.emit)
         row.addWidget(pause_btn)
 
+        summarize_btn = QPushButton("总结")
+        summarize_btn.setFixedSize(48, 34)
+        summarize_btn.setToolTip("AI 总结经验")
+        summarize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        summarize_btn.setStyleSheet(self._sec_qss())
+        summarize_btn.clicked.connect(self.summarize_clicked.emit)
+        row.addWidget(summarize_btn)
+
         send_btn = QPushButton("发送")
         send_btn.setFixedSize(48, 34)
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2266,6 +2473,12 @@ class _ActionBar(QFrame):
         layout.addLayout(row)
 
         self.reload_models()
+
+    def _on_compact_toggle(self):
+        self._compact_mode = not self._compact_mode
+        tip = "展开全部聊天气泡" if self._compact_mode else "收拢全部聊天气泡"
+        self._compact_btn.setToolTip(tip)
+        self.compact_mode_changed.emit(self._compact_mode)
 
     def _sec_qss(self) -> str:
         c = self.theme.colors
@@ -2327,6 +2540,13 @@ class _ActionBar(QFrame):
 
     def hide_approval(self):
         self._approval_bar.setVisible(False)
+
+    def show_sandbox_escape(self, text: str):
+        self._sandbox_label.setText(text)
+        self._sandbox_bar.setVisible(True)
+
+    def hide_sandbox_escape(self):
+        self._sandbox_bar.setVisible(False)
 
     def reload_models(
         self,
@@ -2445,9 +2665,13 @@ class _ProjectWorkspace(QWidget):
         self._actions.upload_clicked.connect(self._on_upload)
         self._actions.summarize_clicked.connect(self._on_summarize)
         self._actions.clear_experience_clicked.connect(self._on_clear_experience)
+        self._actions.compact_mode_changed.connect(self._timeline.set_global_compact_mode)
         self._actions.send_clicked.connect(self._on_send)
         self._actions.approve_clicked.connect(self._on_approve)
         self._actions.reject_clicked.connect(self._on_reject)
+        self._actions.sandbox_reject_clicked.connect(self._on_sandbox_reject)
+        self._actions.sandbox_allow_once_clicked.connect(self._on_sandbox_allow_once)
+        self._actions.sandbox_allow_run_clicked.connect(self._on_sandbox_allow_run)
         self._actions.model_changed.connect(self._on_model_changed)
         self._actions.compress_clicked.connect(self._on_compress_clicked)
         self._actions.draft_changed.connect(self._schedule_usage_refresh)
@@ -2491,10 +2715,16 @@ class _ProjectWorkspace(QWidget):
         self._project_id = project_id
         root = self.store.path_for(project_id)
         self._essentials.bind(project, project_root=root)
-        # 同一项目勿整表重绘：总结经验/弹窗关闭时会误触发，导致视口跳回旧消息
-        if force_timeline or not same or not self._timeline._bubbles:
+        # 切换项目：始终刷新时间线并滚到最新；同项目仅 force 或空表时重绘
+        if not same:
             events = self.store.list_events(project_id)
             self._timeline.render_events(events)
+        elif force_timeline or not self._timeline._bubbles:
+            events = self.store.list_events(project_id)
+            self._timeline.render_events(events)
+        self._timeline.set_agent_running(
+            self._worker is not None and self._worker.isRunning()
+        )
         self._actions.reload_models(
             project.provider,
             project.model_id,
@@ -2838,10 +3068,12 @@ class _ProjectWorkspace(QWidget):
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
+        self._worker.sandbox_escape_needed.connect(self._on_sandbox_escape_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
+        self._actions.hide_sandbox_escape()
         self._worker.start()
 
     def _on_run(self):
@@ -2930,10 +3162,12 @@ class _ProjectWorkspace(QWidget):
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
+        self._worker.sandbox_escape_needed.connect(self._on_sandbox_escape_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
+        self._actions.hide_sandbox_escape()
         self._worker.start()
 
     def _on_engine_event(self, kind: str, content: str, meta: object):
@@ -3034,9 +3268,42 @@ class _ProjectWorkspace(QWidget):
             self._timeline.resume_after_approval(approved=False)
             self._worker.reject_all("用户拒绝该操作")
 
+    def _on_sandbox_escape_needed(self, payload: object):
+        data = payload if isinstance(payload, dict) else {}
+        op = str(data.get("operation") or "访问")
+        path = str(data.get("path") or data.get("virtual_path") or "（未知路径）")
+        text = (
+            f"Agent 请求越过项目沙箱进行「{op}」操作：\n{path}\n\n"
+            "允许后可访问其他 WokBee 项目或全局目录；拒绝则该文件操作失败。"
+        )
+        self._actions.show_sandbox_escape(text)
+        if self._project_id:
+            self.store.set_status(
+                self._project_id,
+                ProjectStatus.AWAITING_APPROVAL,
+                current_step="等待沙箱授权",
+            )
+            self._schedule_essentials_refresh()
+
+    def _on_sandbox_reject(self):
+        if self._worker and self._worker.isRunning():
+            self._actions.hide_sandbox_escape()
+            self._worker.resolve_sandbox_escape(False)
+
+    def _on_sandbox_allow_once(self):
+        if self._worker and self._worker.isRunning():
+            self._actions.hide_sandbox_escape()
+            self._worker.resolve_sandbox_escape(True, grant_run=False)
+
+    def _on_sandbox_allow_run(self):
+        if self._worker and self._worker.isRunning():
+            self._actions.hide_sandbox_escape()
+            self._worker.resolve_sandbox_escape(True, grant_run=True)
+
     def _on_engine_finished(self, result: object):
         self._actions.set_running(False)
         self._actions.hide_approval()
+        self._actions.hide_sandbox_escape()
         self._timeline.end_run()
         if not self._project_id:
             return
@@ -3109,6 +3376,12 @@ class _ProjectWorkspace(QWidget):
                 self._project_id,
                 ProjectStatus.AWAITING_APPROVAL,
                 current_step="仍待审批",
+            )
+        elif outcome == "incomplete":
+            self.store.set_status(
+                self._project_id,
+                ProjectStatus.IDLE,
+                current_step="未完成",
             )
         else:
             self.store.set_status(
@@ -3346,7 +3619,7 @@ class _ProjectWorkspace(QWidget):
             self.store.append_event(self._project_id, ev)
             self._timeline.append_event(ev)
         self._refresh_essentials()
-        self._timeline._schedule_scroll_to_bottom()
+        self._timeline._schedule_scroll_to_bottom(force=True)
         self.status_changed.emit()
 
     def _on_lesson_failed(self, err: str):
@@ -3355,7 +3628,7 @@ class _ProjectWorkspace(QWidget):
             ev = ProjectEvent(kind="error", content=f"总结经验失败：{err}")
             self.store.append_event(self._project_id, ev)
             self._timeline.append_event(ev)
-            self._timeline._schedule_scroll_to_bottom()
+            self._timeline._schedule_scroll_to_bottom(force=True)
 
     def _auto_archive_before_run(self) -> None:
         """运行前自动归档上一轮会话（无内容则跳过）。"""

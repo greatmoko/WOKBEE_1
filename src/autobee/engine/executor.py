@@ -6,7 +6,7 @@ import logging
 import subprocess
 import sys
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from tokbee.core.ai_client import AIClient
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
@@ -44,6 +44,17 @@ class TaskExecutor:
         # 按 project_id 加锁，防两个任务并发跑同一项目、共用 checkpointer 互相覆盖
         self._project_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._progress_handler: Callable[[str], None] | None = None
+
+    def set_progress_handler(self, handler) -> None:
+        self._progress_handler = handler
+
+    def _emit_progress(self, message: str) -> None:
+        if self._progress_handler:
+            try:
+                self._progress_handler(message)
+            except Exception:
+                logger.exception("进度回调失败")
 
     def _project_lock(self, project_id: str) -> threading.Lock:
         with self._locks_guard:
@@ -183,6 +194,7 @@ class TaskExecutor:
                 self.project_store.set_status(
                     project.id, ProjectStatus.RUNNING, current_step="AutoBee 定时触发",
                 )
+                self._emit_progress("WokBee Agent 运行中…")
                 result = runner.run(req)
             except Exception as e:
                 logger.exception("定时运行 WokBee 项目失败: %s", pid)
@@ -235,6 +247,9 @@ class TaskExecutor:
                 )
             except Exception:
                 logger.exception("写入项目事件失败")
+            brief = (content or "").replace("\n", " ").strip()
+            if brief:
+                self._emit_progress(f"[{kind}] {brief[:120]}")
 
         def _on_approval(pending: list):
             # 无人值守：自动放行

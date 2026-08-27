@@ -115,6 +115,15 @@ class _LogDetailDialog(QDialog):
         lay.addLayout(row)
 
 
+def _status_label(raw: str) -> str:
+    if not raw:
+        return "未运行"
+    try:
+        return TaskRunStatus(raw).label
+    except ValueError:
+        return raw
+
+
 class _LogRow(QFrame):
     """列表行：运行时间 / 任务名 / 完成情况。"""
 
@@ -278,7 +287,9 @@ class _TaskItem(QFrame):
 
         enabled = "已启用" if t.enabled else "已停用"
         state = c["success"] if t.enabled else c["text_hint"]
-        last_label = t.last_status or "未运行"
+        if t.last_status == TaskRunStatus.RUNNING.value:
+            state = c["accent"]
+        last_label = _status_label(t.last_status)
         info = QLabel(f"{enabled} · {last_label}")
         info.setStyleSheet(
             f"font-size: 11px; color: {state}; background: transparent; border: none;"
@@ -446,6 +457,9 @@ class _TaskDetail(QWidget):
         self._current_type = TaskType.WOKBEE
         self._log_cache: dict[str, JobLog] = {}
         self._build()
+        self.scheduler.notifier.task_started.connect(self._on_task_run_started)
+        self.scheduler.notifier.task_progress.connect(self._on_task_run_progress)
+        self.scheduler.notifier.task_finished.connect(self._on_task_run_finished)
 
     # ── 构建 ───────────────────────────────────────────────
     def _build(self):
@@ -867,13 +881,37 @@ class _TaskDetail(QWidget):
         self._load_logs(task.id)
 
     def _update_action_btns(self, *, generating: bool = False):
-        """按输入/是否已保存更新操作按钮可用状态。"""
+        """按输入/是否已保存/是否运行中更新操作按钮可用状态。"""
         has_nl = bool((self._nl_input.toPlainText() or "").strip())
         saved = bool(self._task_id)
-        self._gen_btn.setEnabled(not generating and has_nl)
-        self._save_btn.setEnabled(not generating)
-        self._del_btn.setEnabled(not generating and saved)
-        self._run_btn.setEnabled(not generating and saved)
+        running = bool(
+            self._task_id and self.scheduler.is_task_running(self._task_id)
+        )
+        self._gen_btn.setEnabled(not generating and not running and has_nl)
+        self._save_btn.setEnabled(not generating and not running)
+        self._del_btn.setEnabled(not generating and not running and saved)
+        if running:
+            self._run_btn.setEnabled(False)
+            self._run_btn.setText("运行中…")
+        else:
+            self._run_btn.setText("立即运行")
+            self._run_btn.setEnabled(not generating and saved)
+
+    def _on_task_run_started(self, task_id: str):
+        if self._task_id == task_id:
+            self._update_action_btns()
+            self.refresh_logs()
+
+    def _on_task_run_progress(self, task_id: str, message: str):
+        if self._task_id != task_id:
+            return
+        self._update_action_btns()
+        self.refresh_logs()
+
+    def _on_task_run_finished(self, task_id: str, _status: str, _message: str):
+        if self._task_id == task_id:
+            self._update_action_btns()
+            self.refresh_logs()
 
     def _set_edit_enabled(self, enabled: bool):
         for w in [self._name, self._nl_input, self._content,
@@ -957,10 +995,16 @@ class _TaskDetail(QWidget):
     def _on_run_now(self):
         if not self._task_id:
             return
-        try:
-            self.scheduler.run_now(self._task_id)
-        except Exception:
+        if self.scheduler.is_task_running(self._task_id):
             return
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("运行中…")
+        try:
+            started = self.scheduler.run_now(self._task_id)
+            if not started:
+                self._update_action_btns()
+        except Exception:
+            self._update_action_btns()
 
     def _on_nl_generate(self):
         text = (self._nl_input.toPlainText() or "").strip()
@@ -1151,6 +1195,9 @@ class AutoBeeView(QWidget):
 
         self._build()
         self._refresh_tasks()
+        self.scheduler.notifier.task_started.connect(self._on_scheduler_task_started)
+        self.scheduler.notifier.task_progress.connect(self._on_scheduler_task_progress)
+        self.scheduler.notifier.task_finished.connect(self._on_scheduler_task_finished)
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._on_tick)
@@ -1220,6 +1267,21 @@ class AutoBeeView(QWidget):
             self.scheduler.resume(task_id)
         self._on_state_changed(task_id)
 
+    def _on_scheduler_task_started(self, task_id: str):
+        self._refresh_tasks()
+        if self.task_list.current_selected() == task_id:
+            self.detail._update_action_btns()
+            self.detail.refresh_logs()
+
+    def _on_scheduler_task_progress(self, task_id: str, _message: str):
+        self._refresh_tasks()
+
+    def _on_scheduler_task_finished(self, task_id: str, _status: str, _message: str):
+        self._refresh_tasks()
+        if self.task_list.current_selected() == task_id:
+            self.detail._update_action_btns()
+            self.detail.refresh_logs()
+
     def _on_tick(self):
         # 刷新所选任务的下一步运行时间与日志
         curr = self.task_list.current_selected()
@@ -1228,8 +1290,10 @@ class AutoBeeView(QWidget):
             if task and self.scheduler.running:
                 task.next_run = self.scheduler.next_run_time(curr)
             self.detail.refresh_logs()
-        # 列表中下次运行时间近似展示已由 item 卡片决定；此处仅作状态漂移刷新
-        self.task_list.refresh()
+        if self.scheduler.any_task_running():
+            self._refresh_tasks()
+        else:
+            self.task_list.refresh()
 
     def shutdown(self):
         if getattr(self, "_timer", None):

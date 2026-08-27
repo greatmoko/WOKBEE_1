@@ -53,6 +53,7 @@ class Config:
                 "skip_write": False,
                 "skip_routine": False,
                 "skip_high_risk": False,
+                "allow_sandbox_escape": False,
             },
             "default_provider": "",
             "default_model_id": "",
