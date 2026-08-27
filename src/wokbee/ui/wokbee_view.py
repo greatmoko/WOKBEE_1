@@ -392,91 +392,6 @@ def _default_project_title(when: datetime | None = None) -> str:
     return raw[:MAX_PROJECT_TITLE_LEN]
 
 
-def _ask_new_project(parent: QWidget, theme: Theme) -> tuple[str, str] | None:
-    """新建项目：名称与目标均可留空；空名称默认「项目+创建时间」。"""
-    c = theme.colors
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("新建项目")
-    dlg.setMinimumSize(520, 420)
-    dlg.resize(560, 460)
-    dlg.setStyleSheet(f"background: {c['content_bg']};")
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(24, 20, 24, 18)
-    layout.setSpacing(10)
-
-    tip = QLabel("名称和目标都可以先留空，之后再补充。")
-    tip.setWordWrap(True)
-    tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
-    layout.addWidget(tip)
-
-    goal_lab = QLabel("项目目标（可选）")
-    goal_lab.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {c['text']};")
-    layout.addWidget(goal_lab)
-    goal_hint = QLabel("用自然语言描述要完成的事；可稍后编辑。超出可滚动。")
-    goal_hint.setWordWrap(True)
-    goal_hint.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
-    layout.addWidget(goal_hint)
-
-    goal_inp = QTextEdit()
-    goal_inp.setPlaceholderText("例如：查询深圳今日天气，写成小红书风格文案并保存到产物目录…")
-    bind_text_edit_context_menu(goal_inp, c)
-    goal_inp.setMinimumHeight(5 * 22 + 16)
-    goal_inp.setStyleSheet(_textedit_qss(theme))
-    layout.addWidget(goal_inp, stretch=1)
-
-    title_lab = QLabel(
-        f"项目名称（可选，最多 {MAX_PROJECT_TITLE_LEN} 字；"
-        f"默认「{_default_project_title()}」）"
-    )
-    title_lab.setStyleSheet(f"font-size: 13px; color: {c['text']};")
-    layout.addWidget(title_lab)
-    title_inp = QLineEdit()
-    title_inp.setFixedHeight(34)
-    title_inp.setMaxLength(MAX_PROJECT_TITLE_LEN)
-    title_inp.setPlaceholderText(_default_project_title())
-    title_inp.setStyleSheet(f"""
-        QLineEdit {{
-            background: {c["input_bg"]}; color: {c["text"]};
-            border: 1px solid {c["input_border"]}; border-radius: 6px; padding: 0 10px;
-        }}
-    """)
-    layout.addWidget(title_inp)
-
-    row = QHBoxLayout()
-    row.addStretch()
-    cancel = QPushButton("取消")
-    cancel.setFixedSize(72, 34)
-    cancel.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_bg"]}; color: {c["text"]};
-            border: none; border-radius: 6px;
-        }}
-        QPushButton:hover {{ background: {c["btn_hover"]}; }}
-    """)
-    cancel.clicked.connect(dlg.reject)
-    ok = QPushButton("创建")
-    ok.setFixedSize(88, 34)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_primary"]}; color: white;
-            border: none; border-radius: 6px;
-        }}
-        QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(cancel)
-    row.addWidget(ok)
-    layout.addLayout(row)
-
-    if dlg.exec() != QDialog.DialogCode.Accepted:
-        return None
-    goal = goal_inp.toPlainText().strip()
-    title = title_inp.text().strip() or _default_project_title()
-    if len(title) > MAX_PROJECT_TITLE_LEN:
-        title = title[:MAX_PROJECT_TITLE_LEN]
-    return title, goal
-
-
 def _open_md_in_browser(path: Path) -> bool:
     """用系统默认浏览器打开文件（优先 HTML；.md 亦尝试 file URI）。"""
     try:
@@ -771,11 +686,8 @@ class _ProjectSidebar(QFrame):
         self.select(project_id)
 
     def _on_new(self):
-        result = _ask_new_project(self, self.theme)
-        if result is None:
-            return
-        title, goal = result
-        project = self.store.create(title=title, goal=goal)
+        # 直接创建空项目，名称默认「项目+时间」，目标稍后在详情里补
+        project = self.store.create(title=_default_project_title(), goal="")
         self.project_changed.emit()
         self.select(project.id)
 
