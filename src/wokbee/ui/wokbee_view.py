@@ -505,9 +505,7 @@ def _prompt_approval_flags(
     layout.setSpacing(10)
 
     tip = QLabel(
-        "勾选表示该级别免审；未勾选则执行时需要人工审批。"
-        "「越过沙箱」单独控制是否可访问本项目外的文件（含其他项目）；"
-        "未勾选时每次访问会弹窗申请。仅影响当前项目。"
+        "勾选表示该级别免审；未勾选则执行时需要人工审批。仅影响当前项目。"
     )
     tip.setWordWrap(True)
     tip.setStyleSheet(f"font-size: 12px; color: {c['text_hint']};")
@@ -2220,9 +2218,6 @@ class _ActionBar(QFrame):
     send_clicked = Signal(str)
     approve_clicked = Signal()
     reject_clicked = Signal()
-    sandbox_reject_clicked = Signal()
-    sandbox_allow_once_clicked = Signal()
-    sandbox_allow_run_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
     compress_clicked = Signal()
     compact_mode_changed = Signal(bool)
@@ -2290,65 +2285,6 @@ class _ActionBar(QFrame):
         ap_btns.addWidget(approve_btn)
         ap_lay.addLayout(ap_btns)
         layout.addWidget(self._approval_bar)
-
-        self._sandbox_bar = QFrame()
-        self._sandbox_bar.setVisible(False)
-        self._sandbox_bar.setStyleSheet(f"""
-            QFrame {{
-                background: #eef6ff;
-                border: 1px solid {c["accent"]};
-                border-radius: 8px;
-            }}
-        """)
-        sb_lay = QVBoxLayout(self._sandbox_bar)
-        sb_lay.setContentsMargins(12, 8, 12, 8)
-        sb_lay.setSpacing(6)
-        self._sandbox_label = QLabel("Agent 请求访问项目沙箱外的路径…")
-        self._sandbox_label.setWordWrap(True)
-        self._sandbox_label.setStyleSheet(
-            f"font-size: 12px; color: {c['text']}; background: transparent; border: none;"
-        )
-        sb_lay.addWidget(self._sandbox_label)
-        sb_btns = QHBoxLayout()
-        sb_btns.addStretch()
-        sb_reject = QPushButton("拒绝")
-        sb_reject.setFixedHeight(30)
-        sb_reject.setCursor(Qt.CursorShape.PointingHandCursor)
-        sb_reject.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["danger"]}; color: white;
-                border: none; border-radius: 6px; padding: 0 14px;
-            }}
-            QPushButton:hover {{ background: {c["danger_hover"]}; }}
-        """)
-        sb_reject.clicked.connect(self.sandbox_reject_clicked.emit)
-        sb_once = QPushButton("仅本次允许")
-        sb_once.setFixedHeight(30)
-        sb_once.setCursor(Qt.CursorShape.PointingHandCursor)
-        sb_once.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["btn_bg"]}; color: {c["text"]};
-                border: none; border-radius: 6px; padding: 0 12px;
-            }}
-            QPushButton:hover {{ background: {c["btn_hover"]}; }}
-        """)
-        sb_once.clicked.connect(self.sandbox_allow_once_clicked.emit)
-        sb_run = QPushButton("本次运行均允许")
-        sb_run.setFixedHeight(30)
-        sb_run.setCursor(Qt.CursorShape.PointingHandCursor)
-        sb_run.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["btn_primary"]}; color: white;
-                border: none; border-radius: 6px; padding: 0 12px;
-            }}
-            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
-        """)
-        sb_run.clicked.connect(self.sandbox_allow_run_clicked.emit)
-        sb_btns.addWidget(sb_reject)
-        sb_btns.addWidget(sb_once)
-        sb_btns.addWidget(sb_run)
-        sb_lay.addLayout(sb_btns)
-        layout.addWidget(self._sandbox_bar)
 
         self._input = QTextEdit()
         bind_text_edit_context_menu(self._input, c)
@@ -2541,13 +2477,6 @@ class _ActionBar(QFrame):
     def hide_approval(self):
         self._approval_bar.setVisible(False)
 
-    def show_sandbox_escape(self, text: str):
-        self._sandbox_label.setText(text)
-        self._sandbox_bar.setVisible(True)
-
-    def hide_sandbox_escape(self):
-        self._sandbox_bar.setVisible(False)
-
     def reload_models(
         self,
         provider_id: str = "",
@@ -2669,9 +2598,6 @@ class _ProjectWorkspace(QWidget):
         self._actions.send_clicked.connect(self._on_send)
         self._actions.approve_clicked.connect(self._on_approve)
         self._actions.reject_clicked.connect(self._on_reject)
-        self._actions.sandbox_reject_clicked.connect(self._on_sandbox_reject)
-        self._actions.sandbox_allow_once_clicked.connect(self._on_sandbox_allow_once)
-        self._actions.sandbox_allow_run_clicked.connect(self._on_sandbox_allow_run)
         self._actions.model_changed.connect(self._on_model_changed)
         self._actions.compress_clicked.connect(self._on_compress_clicked)
         self._actions.draft_changed.connect(self._schedule_usage_refresh)
@@ -3068,12 +2994,10 @@ class _ProjectWorkspace(QWidget):
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
-        self._worker.sandbox_escape_needed.connect(self._on_sandbox_escape_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
-        self._actions.hide_sandbox_escape()
         self._worker.start()
 
     def _on_run(self):
@@ -3162,12 +3086,10 @@ class _ProjectWorkspace(QWidget):
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
-        self._worker.sandbox_escape_needed.connect(self._on_sandbox_escape_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
         self._actions.set_running(True)
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
-        self._actions.hide_sandbox_escape()
         self._worker.start()
 
     def _on_engine_event(self, kind: str, content: str, meta: object):
@@ -3268,42 +3190,9 @@ class _ProjectWorkspace(QWidget):
             self._timeline.resume_after_approval(approved=False)
             self._worker.reject_all("用户拒绝该操作")
 
-    def _on_sandbox_escape_needed(self, payload: object):
-        data = payload if isinstance(payload, dict) else {}
-        op = str(data.get("operation") or "访问")
-        path = str(data.get("path") or data.get("virtual_path") or "（未知路径）")
-        text = (
-            f"Agent 请求越过项目沙箱进行「{op}」操作：\n{path}\n\n"
-            "允许后可访问其他 WokBee 项目或全局目录；拒绝则该文件操作失败。"
-        )
-        self._actions.show_sandbox_escape(text)
-        if self._project_id:
-            self.store.set_status(
-                self._project_id,
-                ProjectStatus.AWAITING_APPROVAL,
-                current_step="等待沙箱授权",
-            )
-            self._schedule_essentials_refresh()
-
-    def _on_sandbox_reject(self):
-        if self._worker and self._worker.isRunning():
-            self._actions.hide_sandbox_escape()
-            self._worker.resolve_sandbox_escape(False)
-
-    def _on_sandbox_allow_once(self):
-        if self._worker and self._worker.isRunning():
-            self._actions.hide_sandbox_escape()
-            self._worker.resolve_sandbox_escape(True, grant_run=False)
-
-    def _on_sandbox_allow_run(self):
-        if self._worker and self._worker.isRunning():
-            self._actions.hide_sandbox_escape()
-            self._worker.resolve_sandbox_escape(True, grant_run=True)
-
     def _on_engine_finished(self, result: object):
         self._actions.set_running(False)
         self._actions.hide_approval()
-        self._actions.hide_sandbox_escape()
         self._timeline.end_run()
         if not self._project_id:
             return

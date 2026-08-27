@@ -83,18 +83,6 @@ def build_approval_checkboxes(
         lay.addWidget(cb)
         checks[key] = cb
 
-    sep = QLabel("—")
-    sep.setStyleSheet(f"color: {c['text_hint']}; font-size: 11px;")
-    lay.addWidget(sep)
-
-    escape_cb = QCheckBox("越过沙箱")
-    escape_cb.setToolTip(
-        "勾选后 Agent 可直接访问本项目目录外的文件（含其他 WokBee 项目、全局 Skills 写入等）；"
-        "未勾选时每次访问会弹窗申请权限。"
-    )
-    escape_cb.setStyleSheet(cb_qss)
-    lay.addWidget(escape_cb)
-    checks["allow_sandbox_escape"] = escape_cb
     return box, checks
 
 
@@ -103,7 +91,6 @@ def apply_flags_to_checks(checks: dict[str, QCheckBox], flags: ApprovalFlags) ->
     checks["skip_write"].setChecked(flags.skip_write)
     checks["skip_routine"].setChecked(flags.skip_routine)
     checks["skip_high_risk"].setChecked(flags.skip_high_risk)
-    checks["allow_sandbox_escape"].setChecked(flags.allow_sandbox_escape)
 
 
 def flags_from_checks(checks: dict[str, QCheckBox]) -> ApprovalFlags:
@@ -112,7 +99,6 @@ def flags_from_checks(checks: dict[str, QCheckBox]) -> ApprovalFlags:
         skip_write=checks["skip_write"].isChecked(),
         skip_routine=checks["skip_routine"].isChecked(),
         skip_high_risk=checks["skip_high_risk"].isChecked(),
-        allow_sandbox_escape=checks["allow_sandbox_escape"].isChecked(),
     )
 
 
@@ -151,7 +137,6 @@ class WokBeeSettingsWorkspace(QWidget):
         tip = QLabel(
             "配置工作区根目录、默认审核勾选与模型。"
             "新建项目会拷贝此处的审核策略，之后可在项目内单独修改。"
-            "「越过沙箱」未勾选时，访问其他项目目录会弹窗申请权限。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet(

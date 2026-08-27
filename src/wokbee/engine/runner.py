@@ -32,12 +32,6 @@ from wokbee.engine.approval_policy import (
     risk_label_for_tool,
 )
 from wokbee.engine.archive_guard import ArchiveDeniedBackend
-# 提权申请（沙箱越过）已注释，恢复为纯沙箱内、无需越沙箱授权。
-# from wokbee.engine.sandbox_escape import (
-#     SandboxEscapeBackend,
-#     SandboxEscapeGuard,
-#     user_message_indicates_sandbox_preauth,
-# )
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
@@ -60,8 +54,6 @@ from wokbee.engine.cache_prefix import (
     tool_name_of,
     wrap_tools_truncate_results,
 )
-# 循环护栏已注释，恢复为不做同参重复次数限制。
-# from wokbee.engine.tool_loop_guard import ToolLoopGuard, wrap_tools_loop_guard
 from wokbee.engine.ask_user import (
     build_ask_user_tool,
     is_ask_user_interrupt,
@@ -634,20 +626,11 @@ class AgentRunner:
         self.on_event: EventCallback | None = None
         self.on_approval_needed: ApprovalCallback | None = None
         self.on_ask_user_needed: Callable[[dict], None] | None = None
-        self.on_sandbox_escape_needed: Callable[[dict], None] | None = None
-        # 提权申请已注释：_sandbox_guard 恒为 None，相关方法一律空转。
-        self._sandbox_guard = None
-
-    def resolve_sandbox_escape(self, approved: bool, *, grant_run: bool = False) -> None:
-        if self._sandbox_guard is not None:
-            self._sandbox_guard.resolve(approved, grant_run=grant_run)
 
     def request_cancel(self) -> None:
         self._cancel.set()
-        # 若卡在审批/澄清/沙箱授权，解开等待
+        # 若卡在审批/澄清，解开等待
         self.resolve_approval([{"type": "reject", "message": "用户取消运行"}])
-        self.resolve_ask_user({"cancelled": True})
-        self.resolve_sandbox_escape(False)
         self.resolve_ask_user({"cancelled": True})
 
     def resolve_approval(self, decisions: list[dict]) -> None:
@@ -700,12 +683,6 @@ class AgentRunner:
                 return {"cancelled": True}
         return self._ask_user_answers or {"cancelled": True}
 
-    def _on_sandbox_escape_needed(self, payload: dict) -> None:
-        if self.on_sandbox_escape_needed:
-            self.on_sandbox_escape_needed(payload)
-        else:
-            self.resolve_sandbox_escape(False)
-
     def build_agent(self, req: RunRequest, *, mode: str = "run"):
         """构建完整能力 Agent。
 
@@ -718,13 +695,6 @@ class AgentRunner:
         _ensure_memory_files(req.project_root, req.project)
 
         model = build_chat_model(req.resolved)
-        # 提权申请（沙箱越过）已注释：不再建 SandboxEscapeGuard，也不包 SandboxEscapeBackend，
-        # 恢复为纯项目沙箱内、无越沙箱授权流程。
-        # self._sandbox_guard = SandboxEscapeGuard(
-        #     req.project_root,
-        #     allow_escape=req.approval.allow_sandbox_escape,
-        #     on_escape_needed=self._on_sandbox_escape_needed,
-        # )
         project_inner = ArchiveDeniedBackend(
             root_dir=str(req.project_root),
             virtual_mode=True,
@@ -732,11 +702,6 @@ class AgentRunner:
             inherit_env=True,
         )
         project_backend = project_inner
-        # project_backend = SandboxEscapeBackend(
-        #     project_inner,
-        #     self._sandbox_guard,
-        #     context_root=req.project_root,
-        # )
         interrupt_on = build_interrupt_on(req.approval)
         if req.approval.skip_routine:
             for n in PROJECT_META_TOOL_NAMES:
@@ -758,14 +723,7 @@ class AgentRunner:
                     root_dir=str(skills_store.root),
                     virtual_mode=True,
                 )
-                # 提权申请（沙箱越过）已注释：Skills 路由直接用内层后端，无越沙箱授权。
                 routes["/skills/"] = skills_inner
-                # routes["/skills/"] = SandboxEscapeBackend(
-                #     skills_inner,
-                #     self._sandbox_guard,
-                #     context_root=skills_store.root,
-                #     skills_mount=True,
-                # )
                 skills_extra_lines = [
                     f"- 全局 Skills 目录（真实路径，execute 可用）：{skills_store.root}",
                     "- 全局 Skills 虚拟路径：/skills/<技能名>/SKILL.md（read/edit/write 可用）",
@@ -827,20 +785,6 @@ class AgentRunner:
             settings=self.settings,
         )
         context_extra: list[str] = list(skills_extra_lines)
-        # 提权申请（沙箱越过预授权识别）已注释：不做越沙箱授权检测。
-        # user_msg = (req.user_message or "").strip()
-        # if user_message_indicates_sandbox_preauth(user_msg):
-        #     if self._sandbox_guard is not None and not req.approval.allow_sandbox_escape:
-        #         self._sandbox_guard.session_granted = True
-        #     context_extra.append(
-        #         "- **用户已在消息中授权越过沙箱**访问项目外路径；"
-        #         "请直接调用 execute 或文件工具完成，勿仅口头确认。"
-        #     )
-        #     if not req.approval.allow_sandbox_escape:
-        #         self._emit(
-        #             "info",
-        #             "已识别用户消息中的越沙箱预授权，本会话可直接访问项目外路径。",
-        #         )
 
         self._session_context_block = build_session_context_block(
             title=req.project.title,
@@ -896,8 +840,6 @@ class AgentRunner:
             + list(mcp_tools)
         )
         tools = wrap_tools_truncate_results(tools, project_root=req.project_root)
-        # 循环护栏已注释：不做同参重复次数限制，避免误判长结果截断为「循环」而卡住 Agent。
-        # tools = wrap_tools_loop_guard(tools, guard=ToolLoopGuard())
         tool_names = [tool_name_of(t) for t in tools]
         fp = prefix_fingerprint(system_prompt, tool_names)
 
@@ -1433,7 +1375,7 @@ class AgentRunner:
             if not had_tool and final_text and ai_reply_suggests_pending_action(final_text):
                 self._emit(
                     "info",
-                    "模型未调用工具；可回复「继续」，或在项目审核策略中勾选「越过沙箱」。",
+                    "模型未调用工具；可回复「继续」让它继续推进。",
                 )
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:

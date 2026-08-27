@@ -46,7 +46,6 @@ class ApprovalFlags:
     skip_write: bool = False  # 写免审
     skip_routine: bool = False  # 常规操作免审
     skip_high_risk: bool = False  # 高危操作免审
-    allow_sandbox_escape: bool = False  # 越过沙箱：可访问其他项目/目录外文件
 
     def to_dict(self) -> dict:
         return {
@@ -54,7 +53,6 @@ class ApprovalFlags:
             "skip_write": bool(self.skip_write),
             "skip_routine": bool(self.skip_routine),
             "skip_high_risk": bool(self.skip_high_risk),
-            "allow_sandbox_escape": bool(self.allow_sandbox_escape),
         }
 
     @classmethod
@@ -65,7 +63,6 @@ class ApprovalFlags:
             skip_write=bool(data.get("skip_write", False)),
             skip_routine=bool(data.get("skip_routine", False)),
             skip_high_risk=bool(data.get("skip_high_risk", False)),
-            allow_sandbox_escape=bool(data.get("allow_sandbox_escape", False)),
         )
 
     def copy(self) -> ApprovalFlags:
@@ -93,11 +90,9 @@ class ApprovalFlags:
             labels.append("常规")
         if self.skip_high_risk:
             labels.append("高危")
-        if self.allow_sandbox_escape:
-            labels.append("越沙箱")
         if not labels:
             return "全部需审"
-        if len(labels) == 5:
+        if len(labels) == 4:
             return "全部免审"
         return "免审：" + "/".join(labels)
 
@@ -112,7 +107,6 @@ class ApprovalFlags:
                 skip_write=True,
                 skip_routine=True,
                 skip_high_risk=True,
-                allow_sandbox_escape=True,
             )
         policy = str(data.get("policy") or "graded")
         if policy == "readonly":
@@ -128,7 +122,6 @@ class ApprovalFlags:
                 skip_write=True,
                 skip_routine=True,
                 skip_high_risk=True,
-                allow_sandbox_escape=True,
             )
         # graded 默认：仅读免审
         return cls(
