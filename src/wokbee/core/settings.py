@@ -30,6 +30,9 @@ DEFAULTS = {
     "ai_interval_ms": 0,
     # 是否把 DeepSeek 官方服务端搜索注册成 deepseek_web_search 工具
     "enable_deepseek_search": True,
+    # 已授权的附加目录（项目外）：Agent 可经 /ext/<slug>/ 虚拟路径用文件工具访问。
+    # 元素为 {"name": <slug>, "path": <绝对路径>}，全局共享、跨项目生效。
+    "additional_directories": [],
 }
 
 
@@ -176,6 +179,94 @@ class WokBeeSettings:
     @enable_deepseek_search.setter
     def enable_deepseek_search(self, value: bool) -> None:
         self.set("enable_deepseek_search", bool(value))
+
+    @property
+    def additional_directories(self) -> list[dict[str, str]]:
+        """已授权附加目录（项目外）。仅返回真实存在且为目录的项。"""
+        raw = self.get("additional_directories") or []
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                path = str(item.get("path") or "").strip()
+            elif isinstance(item, str):
+                path, name = item.strip(), ""
+            else:
+                continue
+            if not path:
+                continue
+            try:
+                rp = Path(path).expanduser().resolve()
+            except OSError:
+                continue
+            if not rp.is_dir():
+                continue
+            out.append({"name": name or rp.name, "path": str(rp)})
+        return out
+
+    @additional_directories.setter
+    def additional_directories(self, value: list[dict[str, str]]) -> None:
+        self.set("additional_directories", list(value or []))
+
+    def add_additional_directory(self, name: str, path: str | Path) -> dict[str, str] | None:
+        """把目录加入全局白名单（去重、保存）。目录不存在则返回 None。"""
+        try:
+            rp = Path(str(path)).expanduser().resolve()
+        except OSError:
+            return None
+        if not rp.is_dir():
+            return None
+        cur = self._canonicalize(self.get("additional_directories") or []) or []
+        key = str(rp)
+        for item in cur:
+            if item["path"] == key:
+                item["name"] = name or item.get("name") or rp.name
+                self._config.set("wokbee.additional_directories", cur)
+                self._config.save()
+                return {"name": item["name"], "path": item["path"]}
+        entry = {"name": name or rp.name, "path": key}
+        cur.append(entry)
+        self._config.set("wokbee.additional_directories", cur)
+        self._config.save()
+        return entry
+
+    def remove_additional_directory(self, path: str | Path) -> bool:
+        """按路径移除白名单项。"""
+        try:
+            key = str(Path(str(path)).expanduser().resolve())
+        except OSError:
+            return False
+        cur = self._canonicalize(self.get("additional_directories") or []) or []
+        new = [x for x in cur if x["path"] != key]
+        if len(new) != len(cur):
+            self._config.set("wokbee.additional_directories", new)
+            self._config.save()
+            return True
+        return False
+
+    @staticmethod
+    def _canonicalize(items: list) -> list[dict[str, str]]:
+        """把 [str] 或 [dict] 混合列表统一成 [{"name","path"}]。"""
+        out: list[dict[str, str]] = []
+        for item in items:
+            if isinstance(item, dict) and item.get("path"):
+                path = str(item["path"]).strip()
+                name = str(item.get("name") or "").strip()
+            elif isinstance(item, str) and item.strip():
+                path = item.strip()
+                name = ""
+            else:
+                continue
+            try:
+                rp = Path(path).expanduser().resolve()
+            except OSError:
+                continue
+            if not rp.is_dir():
+                continue
+            out.append({"name": name or rp.name, "path": str(rp)})
+        return out
 
     @property
     def ai_interval_ms(self) -> int:

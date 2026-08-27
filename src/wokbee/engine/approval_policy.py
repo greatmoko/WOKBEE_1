@@ -12,7 +12,7 @@ from wokbee.core.models import ApprovalFlags
 # 内置工具名（Deep Agents 默认）
 READ_TOOLS = ("ls", "read_file", "glob", "grep")
 WRITE_TOOLS = ("write_file", "edit_file")
-HIGH_RISK_TOOLS = ("execute",)
+HIGH_RISK_TOOLS = ("execute", "request_access")
 ROUTINE_TOOLS = ("task", "web_search", "http_get", "http_request")
 
 

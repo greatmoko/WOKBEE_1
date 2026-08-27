@@ -32,6 +32,12 @@ from wokbee.engine.approval_policy import (
     risk_label_for_tool,
 )
 from wokbee.engine.archive_guard import ArchiveDeniedBackend
+from wokbee.engine.access_request import (
+    ApprovedDirRegistry,
+    build_access_request_tool,
+    mount_dir,
+)
+from wokbee.engine.access_coerce import AccessCoerceBackend
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
@@ -139,6 +145,11 @@ def _ensure_memory_files(project_root: Path, project: Project) -> None:
         "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、配置、环境参数与登录信息保存到 `references/`，并在 `references/MANIFEST.md` 登记，确保下次能稳定复跑；"
         "这些敏感信息仅供本机使用，勿外发。\n"
         "**禁止**访问 `archives/`：归档文档与归档数据不得作为本轮数据来源。\n"
+        "文件工具（read_file/write_file/edit_file/ls/glob/grep/delete）**一律用虚拟路径**："
+        "项目内用 workspace/、deliverables/、uploads/ 等；"
+        "项目外先调用 `request_access(path, reason)` 申请**人工高危审批**，"
+        "获批后用返回的 `/ext/<slug>/…` 虚拟路径访问。"
+        "**禁止**把真实主机路径（C:\\\\...、D:/...）传给文件工具——只有 `execute` 接受真实路径。\n"
         "经验位于 `memory/experiences/exp_时间戳.md`；每次总结新建一份；"
         "运行时只加载**最新一份**（实现步骤/执行顺序/环境/注意事项），不要依赖旧经验或结果正文。\n"
         "可用工具更新项目名称（update_project_title）与目标（update_project_goal）；"
@@ -738,10 +749,30 @@ class AgentRunner:
             logger.exception("加载 Skills 失败")
             self._emit("error", f"Skills 加载失败：{e}")
 
-        backend = (
-            CompositeBackend(default=project_backend, routes=routes)
-            if routes
-            else project_backend
+        # ---- 附加目录：预挂载全局白名单 + 供 request_access 动态挂载 ----
+        access_registry = ApprovedDirRegistry()
+        access_extra_lines: list[str] = []
+        for entry in self.settings.additional_directories:
+            prefix = mount_dir(
+                routes,
+                access_registry,
+                entry["path"],
+                name=entry.get("name") or "",
+                persist=False,
+            )
+            if prefix:
+                access_extra_lines.append(
+                    f"- 附加目录虚拟路径：{prefix}（真实路径 {entry['path']}，仅 execute 可用）"
+                )
+        if access_extra_lines:
+            self._emit(
+                "info", "已挂载附加目录：\n" + "\n".join(access_extra_lines)
+            )
+
+        # 始终用 CompositeBackend：即使初始无路由，request_access 也能往 routes 动态加 /ext/ 路由
+        composite_backend = CompositeBackend(default=project_backend, routes=routes)
+        backend = AccessCoerceBackend(
+            composite_backend, project_root=req.project_root, registry=access_registry
         )
 
         mcp_tools: list = []
@@ -784,7 +815,7 @@ class AgentRunner:
             policy=req.approval.summary(),
             settings=self.settings,
         )
-        context_extra: list[str] = list(skills_extra_lines)
+        context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
 
         self._session_context_block = build_session_context_block(
             title=req.project.title,
@@ -836,6 +867,9 @@ class AgentRunner:
             list(NETWORK_TOOLS)
             + list(project_tools)
             + [build_ask_user_tool()]
+            + [build_access_request_tool(
+                composite_backend, access_registry, self.settings, emit=self._emit
+            )]
             + ([deepseek_search] if deepseek_search is not None else [])
             + list(mcp_tools)
         )

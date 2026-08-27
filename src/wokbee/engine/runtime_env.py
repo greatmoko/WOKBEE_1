@@ -412,13 +412,16 @@ def format_runtime_env_block(
         f"- OS：{rt.os_name} {rt.os_release} ({rt.machine})",
         f"- 项目目录（真实路径，**仅供 execute**）：{rt.project_root or project_root or '（未知）'}",
         f"- 当前工作目录：{rt.cwd}",
-        "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，禁止 C:\\\\...）：",
+        "- 文件工具虚拟路径（read_file/write_file/ls/grep/glob 必用，绝不用真实路径；"
+        "项目外路径须先 request_access 申请、获批后走 /ext/…）：",
         "  · workspace/…  workspace 沙箱",
         "  · deliverables/…  交付物",
         "  · uploads/…  用户上传",
         "  · memory/…  经验（experiences/）",
         "  · scripts/…  管线脚本",
         "  · references/…  参考材料",
+        "  · /skills/…  全局 Skills（只读）",
+        "  · /ext/<slug>/…  已授权附加目录（项目外；先 request_access 申请→人工高危审批→用返回的 /ext/<slug>/…）",
         "  · 示例：workspace/wttr_shenzhen.json（勿写完整 Windows 路径）",
         f"- Python（WokBee 解释器）：{rt.python_exe} ({rt.python_version})",
     ])
