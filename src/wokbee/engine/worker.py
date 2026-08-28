@@ -27,6 +27,7 @@ class AgentWorker(QThread):
         self.runner = runner
         self.request = request
         self.mode = mode  # run | chat
+        self._last_pending_count = 0  # 最近一次审批待决数量（由 _on_approval 填充）
 
     def run(self):
         self.runner.on_event = self._on_event
@@ -43,6 +44,7 @@ class AgentWorker(QThread):
         self.event_emitted.emit(kind, content, meta)
 
     def _on_approval(self, pending: list):
+        self._last_pending_count = len(pending) if pending else 0
         self.approval_needed.emit(pending)
 
     def _on_ask_user(self, payload: dict):
@@ -52,12 +54,14 @@ class AgentWorker(QThread):
         self.runner.request_cancel()
 
     def approve_all(self):
-        # 决策数量由 runner 侧 pending 决定；这里先发一批 approve，runner 会截断/补齐
-        self.runner.resolve_approval([{"type": "approve"}] * 16)
+        # 决策长度与最近一次审批待决数量对齐（避免写死 16，单轮 pending>16 时后面决策无人批）
+        n = self._last_pending_count or 16
+        self.runner.resolve_approval([{"type": "approve"}] * n)
 
     def reject_all(self, message: str = "用户拒绝"):
+        n = self._last_pending_count or 16
         self.runner.resolve_approval(
-            [{"type": "reject", "message": message}] * 16
+            [{"type": "reject", "message": message}] * n
         )
 
     def resolve_ask_user(self, answers: dict):
@@ -112,3 +116,6 @@ class LessonWorker(QThread):
 
     def _on_event(self, kind: str, content: str, meta: dict):
         self.event_emitted.emit(kind, content, meta or {})
+
+    def cancel(self):
+        self.runner.request_cancel()

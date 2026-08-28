@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 from pathlib import Path
@@ -37,9 +38,8 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 
-_DRIVE_RE = re.compile(r"^/?[a-zA-Z]:[/\\]")
-_DRIVE_NORM_RE = re.compile(r"^([a-zA-Z]:)[/\\](.*)$")
-_WILDCARD_CHARS = "*?["
+_DRIVE_RE = re.compile(r"^[a-zA-Z]:")  # C:foo / C:\foo（含 drive-relative C:foo）
+_UNC_RE = re.compile(r"^\\\\")          # \\server\share（UNC）
 
 _GUIDE_MSG = (
     "错误：你传给文件工具的路径「{path}」看起来是真实主机路径，但该目录未授权。"
@@ -49,20 +49,54 @@ _GUIDE_MSG = (
 )
 
 
-def _has_wildcard(s: str | None) -> bool:
-    return bool(s) and any(ch in s for ch in _WILDCARD_CHARS)
+def _is_host_path(p: str | None) -> bool:
+    """判断是否像真实主机路径（含 drive-relative `C:foo` 与 UNC `\\server\\share`）。
+
+    用于把「主机路径」从「项目内虚拟路径」里区分出来，从而走归一化/授权检查，
+    而不是被当作虚拟路径静默路由到项目根（否则 `C:foo` 会错变成 `项目根/C:foo`）。
+    """
+    if not p:
+        return False
+    s = str(p)
+    while s.startswith("/"):
+        s = s[1:]
+    return bool(_DRIVE_RE.match(s) or _UNC_RE.match(s))
+
+
+# 按 backend 类型缓存 grep 签名，避免每次 grep 都 inspect.signature 内省。
+_GREP_CONTEXT_CACHE: dict[type, bool] = {}
+
+
+def _grep_accepts_context_lines(backend) -> bool:
+    """内层 backend.grep 是否收 context_lines。
+
+    deepagents 单个 FilesystemBackend/LocalShellBackend 收，但聚合的
+    CompositeBackend.grep 不收。透传前用签名探测，避免把 context_lines
+    传给 CompositeBackend 触发 `got an unexpected keyword argument`。
+    签名由类决定，故按类型缓存探针结果。
+    """
+    cls = type(backend)
+    if cls not in _GREP_CONTEXT_CACHE:
+        try:
+            _GREP_CONTEXT_CACHE[cls] = "context_lines" in inspect.signature(backend.grep).parameters
+        except (TypeError, ValueError):
+            _GREP_CONTEXT_CACHE[cls] = False
+    return _GREP_CONTEXT_CACHE[cls]
 
 
 def _normalize_host(path: str) -> str:
-    """把 `/C:/Users/x/y` 或 `C:\\Users\\x\\y` 统一成 Windows 绝对路径（`C:\\Users\\x\\y`）。"""
+    """把 `/C:/x`、`C:\\x`、`C:x`、`\\server\\share` 统一成规范 Windows 路径。
+
+    drive-relative（`C:foo`）无法确定基准目录，保持原样——它不会命中任何已授权的绝对目录，
+    自然落入「未授权」教学错误，符合先拒绝原则。
+    """
     p = str(path)
     while p.startswith("/"):
         p = p[1:]
-    m = _DRIVE_NORM_RE.match(p)
-    if not m:
+    try:
+        return os.path.normpath(p)
+    except (OSError, ValueError):
         return p
-    rest = m.group(2).replace("/", "\\")
-    return f"{m.group(1)}\\{rest}"
 
 
 class AccessCoerceBackend(SandboxBackendProtocol):
@@ -82,9 +116,16 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         if self._registry is None:
             return None
         norm = _normalize_host(path)
-        n = os.path.normcase(os.path.normpath(norm))
+        # realpath 解析 junction/符号链接与 8.3 短名，避免「进了已批目录却因路径写法不同报未授权」
+        try:
+            n = os.path.normcase(os.path.realpath(norm))
+        except (OSError, ValueError):
+            n = os.path.normcase(os.path.normpath(norm))
         for e in self._registry.entries():
-            real = os.path.normcase(os.path.normpath(e["real_dir"]))
+            try:
+                real = os.path.normcase(os.path.realpath(e["real_dir"]))
+            except (OSError, ValueError):
+                real = os.path.normcase(os.path.normpath(e["real_dir"]))
             if n == real:
                 return e["prefix"]
             sep = os.sep
@@ -98,12 +139,50 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         if not path:
             return None, path
         p = str(path)
-        if not _DRIVE_RE.match(p):
-            return None, p  # 非主机路径 → 透传
+        if not _is_host_path(p):
+            return None, p  # 非主机路径（虚拟/相对） → 透传
         coerced = self._coerce_real(p)
         if coerced is not None:
             return None, coerced  # 已获批 → 自动改写为 /ext/<slug>/…
         return _GUIDE_MSG.format(path=p), p  # 未获批 → 教学式错误
+
+    def _route_prefix_for(self, path: str | None) -> str | None:
+        """若 path 落在某 /ext/<slug>/ 路由下，返回该路由前缀（带尾斜杠）；否则 None。"""
+        if self._registry is None or not path:
+            return None
+        p = str(path).replace("\\", "/")
+        best = None
+        for e in self._registry.entries():
+            prefix = str(e["prefix"] or "")
+            if not prefix.endswith("/"):
+                prefix += "/"
+            if p.startswith(prefix) and (best is None or len(prefix) > len(best)):
+                best = prefix
+        return best
+
+    def _normalize_glob_pattern(self, pattern, use_path) -> tuple[str | None, str | None]:
+        """glob/grep 的 pattern/glob 参数归一化。返回 (norm_pattern, error)。
+
+        解决两类问题：
+        - 带通配的主机模式（如 C:\\Users\\*\\*.md）此前因含通配符而跳过 _prep，
+          未获批也直接进内层搜——现在仍按主机路径走归一化/授权，未获批返回教学错误；
+        - path 与 pattern 都带 /ext/<slug>/ 前缀时，composite 的 routed 分支不剥前缀，
+          返回空——这里把 pattern 的路由前缀剥掉再传。
+        """
+        if not pattern:
+            return pattern, None
+        p = str(pattern)
+        if _is_host_path(p):
+            err, coerced = self._prep(p)
+            if err:
+                return None, err
+            p = coerced
+        rp = self._route_prefix_for(use_path)
+        if rp:
+            pp = p.replace("\\", "/")
+            if pp.startswith(rp):
+                p = pp[len(rp) :]
+        return p, None
 
     # ---- file tools：先 _prep（改写到 /ext/ 或拦下），再转内层 ----
     def ls(self, path: str) -> LsResult:
@@ -146,12 +225,10 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         err, use_path = self._prep(path)
         if err:
             return GlobResult(error=err)
-        if not _has_wildcard(pattern):
-            perr, use_pattern = self._prep(pattern)
-            if perr:
-                return GlobResult(error=perr)
-            pattern = use_pattern
-        return self._inner.glob(pattern, use_path)
+        npat, perr = self._normalize_glob_pattern(pattern, use_path)
+        if perr:
+            return GlobResult(error=perr)
+        return self._inner.glob(npat, use_path)
 
     def grep(
         self,
@@ -165,16 +242,19 @@ class AccessCoerceBackend(SandboxBackendProtocol):
         err, use_path = self._prep(path)
         if err:
             return GrepResult(error=err)
-        if glob is not None and not _has_wildcard(glob):
-            gerr, use_glob = self._prep(glob)
+        if glob is not None:
+            nglob, gerr = self._normalize_glob_pattern(glob, use_path)
             if gerr:
                 return GrepResult(error=gerr)
-            glob = use_glob
-        return self._inner.grep(
-            pattern, use_path, glob, max_count=max_count, context_lines=context_lines
-        )
+            glob = nglob
+        if _grep_accepts_context_lines(self._inner):
+            return self._inner.grep(
+                pattern, use_path, glob, max_count=max_count, context_lines=context_lines
+            )
+        return self._inner.grep(pattern, use_path, glob, max_count=max_count)
 
-    # ---- upload/download：转内层（已由 middleware 校验），只保证不中断 ----
+    # ---- upload/download：SandboxBackendProtocol 接口要求实现，但当前没有暴露给 Agent 的
+    #      对应工具，属纯透传（middleware 已校验）。保留以保证接口完整，勿删除。----
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         return self._inner.upload_files(files)
 

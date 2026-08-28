@@ -51,7 +51,6 @@ class Lesson:
     success_path: str = ""  # 实现步骤
     environment: str = ""
     notes: str = ""
-    artifacts: str = ""  # 弃用：不再写入文档
     errors: str = ""
     model: str = ""
     policy: str = ""
@@ -63,10 +62,6 @@ class Lesson:
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     filename: str = ""  # 相对 memory/，如 experiences/exp_....md
-
-    @property
-    def name(self) -> str:
-        return f"project-experience-{_stamp()}"
 
     @property
     def description(self) -> str:
@@ -691,6 +686,58 @@ _AI_SUMMARY_SYSTEM = """你是 WokBee 的「经验总结」助手。根据「上
 """
 
 
+def _extract_json_object(text: str) -> str | None:
+    """从可能带围栏/前后叙述的文本里截出第一个平衡的 {…} JSON 对象。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _parse_ai_summary_json(text: str) -> dict | None:
+    """宽松解析 AI 总结 JSON：去围栏 → 直接 → 截首个平衡 {…} → 失败返回 None。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t)
+        t = re.sub(r"\s*```\s*$", "", t)
+    try:
+        data = json.loads(t)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        pass
+    obj = _extract_json_object(t)
+    if obj is not None:
+        try:
+            data = json.loads(obj)
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def summarize_lesson_with_ai(
     *,
     model: Any,
@@ -755,12 +802,9 @@ def summarize_lesson_with_ai(
             )
         text = str(raw).strip()
 
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    data = json.loads(text)
-    if not isinstance(data, dict):
-        raise ValueError("AI 总结返回非对象 JSON")
+    data = _parse_ai_summary_json(text)
+    if data is None:
+        raise ValueError("AI 总结未返回有效 JSON（已按宽松解析尝试，仍失败）")
     out: dict[str, Any] = {}
     for key in (
         "summary",

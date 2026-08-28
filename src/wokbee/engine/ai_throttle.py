@@ -6,6 +6,19 @@ import threading
 import time
 
 
+def _shared_settings():
+    """进程内缓存 WokBeeSettings 单例，避免每次 wait() 都重跑构造 + 全量 _ensure_defaults。"""
+    global _SETTINGS
+    if _SETTINGS is None:
+        from wokbee.core.settings import WokBeeSettings
+
+        _SETTINGS = WokBeeSettings()
+    return _SETTINGS
+
+
+_SETTINGS = None
+
+
 class AICallThrottle:
     """限制两次 AI 调用的发起时间至少相隔 `interval` 毫秒。
 
@@ -27,9 +40,9 @@ class AICallThrottle:
         if self._override_interval is not None:
             return self._override_interval
         try:
-            from wokbee.core.settings import WokBeeSettings
-
-            return WokBeeSettings().ai_interval_ms
+            # WokBeeSettings() 每次都重构并跑一遍 _ensure_defaults 循环；缓存实例（其内部
+            # 仍绑定 Config 单例，实时读不改值），避免每次调用都做无谓初始化。
+            return _shared_settings().ai_interval_ms
         except Exception:
             return 0
 

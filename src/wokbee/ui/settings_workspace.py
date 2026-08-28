@@ -22,84 +22,13 @@ from tokbee.ui.combo_style import (
 )
 from tokbee.core.provider_store import ProviderStore
 
-from wokbee.core.models import ApprovalFlags
 from wokbee.core.settings import WokBeeSettings
-
-
-def _tip(parent: QWidget, theme: Theme, message: str):
-    c = theme.colors
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("提示")
-    dlg.setFixedSize(380, 150)
-    dlg.setStyleSheet(f"background: {c['content_bg']};")
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(24, 20, 24, 18)
-    msg = QLabel(message)
-    msg.setWordWrap(True)
-    msg.setStyleSheet(f"font-size: 14px; color: {c['text']};")
-    layout.addWidget(msg)
-    layout.addStretch()
-    row = QHBoxLayout()
-    row.addStretch()
-    ok = QPushButton("知道了")
-    ok.setFixedSize(80, 34)
-    ok.setCursor(Qt.CursorShape.PointingHandCursor)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_bg"]}; color: {c["text"]};
-            border: none; border-radius: 6px; font-size: 13px;
-        }}
-        QPushButton:hover {{ background: {c["btn_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(ok)
-    layout.addLayout(row)
-    dlg.exec()
-
-
-def build_approval_checkboxes(
-    theme: Theme,
-    parent: QWidget | None = None,
-) -> tuple[QWidget, dict[str, QCheckBox]]:
-    """创建四个审核勾选控件，返回容器与 checkbox 字典。"""
-    c = theme.colors
-    box = QWidget(parent)
-    lay = QVBoxLayout(box)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(6)
-
-    defs = [
-        ("skip_read", "读免审", "读操作免审"),
-        ("skip_write", "写免审", "写操作免审"),
-        ("skip_routine", "常规操作免审", "常规操作免审"),
-        ("skip_high_risk", "高危操作免审", "高危操作免审"),
-    ]
-    checks: dict[str, QCheckBox] = {}
-    cb_qss = checkbox_qss(c)
-    for key, label, tip in defs:
-        cb = QCheckBox(label)
-        cb.setToolTip(tip)
-        cb.setStyleSheet(cb_qss)
-        lay.addWidget(cb)
-        checks[key] = cb
-
-    return box, checks
-
-
-def apply_flags_to_checks(checks: dict[str, QCheckBox], flags: ApprovalFlags) -> None:
-    checks["skip_read"].setChecked(flags.skip_read)
-    checks["skip_write"].setChecked(flags.skip_write)
-    checks["skip_routine"].setChecked(flags.skip_routine)
-    checks["skip_high_risk"].setChecked(flags.skip_high_risk)
-
-
-def flags_from_checks(checks: dict[str, QCheckBox]) -> ApprovalFlags:
-    return ApprovalFlags(
-        skip_read=checks["skip_read"].isChecked(),
-        skip_write=checks["skip_write"].isChecked(),
-        skip_routine=checks["skip_routine"].isChecked(),
-        skip_high_risk=checks["skip_high_risk"].isChecked(),
-    )
+from wokbee.ui.dialogs import (
+    apply_flags_to_checks,
+    build_approval_checkboxes,
+    flags_from_checks,
+    tip as _tip,
+)
 
 
 class WokBeeSettingsWorkspace(QWidget):

@@ -68,18 +68,6 @@ class ApprovalFlags:
     def copy(self) -> ApprovalFlags:
         return ApprovalFlags.from_dict(self.to_dict())
 
-    def needs_approval(self, risk: RiskLevel | str) -> bool:
-        """返回 True 表示该风险级别仍需人工审批。"""
-        key = risk.value if isinstance(risk, RiskLevel) else str(risk)
-        mapping = {
-            RiskLevel.READ.value: self.skip_read,
-            RiskLevel.WRITE.value: self.skip_write,
-            RiskLevel.ROUTINE.value: self.skip_routine,
-            RiskLevel.HIGH_RISK.value: self.skip_high_risk,
-        }
-        skip = mapping.get(key, False)
-        return not skip
-
     def summary(self) -> str:
         labels = []
         if self.skip_read:
@@ -208,6 +196,15 @@ class Project:
             status_e = ProjectStatus(status)
         except ValueError:
             status_e = ProjectStatus.IDLE
+
+        def _opt_int(v, default: int = 0) -> int:
+            if v is None or v == "":
+                return default
+            try:
+                return max(0, int(v))
+            except (TypeError, ValueError):
+                return default
+
         return cls(
             id=data.get("id") or new_project_id(),
             title=(
@@ -217,13 +214,13 @@ class Project:
             goal=(str(data.get("goal") or "")).replace("\x00", "").strip(),
             status=status_e,
             approval=ApprovalFlags.from_legacy(data),
-            progress_done=int(data.get("progress_done") or 0),
-            progress_total=int(data.get("progress_total") or 0),
+            progress_done=_opt_int(data.get("progress_done")),
+            progress_total=_opt_int(data.get("progress_total")),
             current_step=data.get("current_step") or "",
             artifacts_summary=data.get("artifacts_summary") or "",
             provider=data.get("provider") or "",
             model_id=data.get("model_id") or "",
-            pinned=bool(data.get("pinned", False)),
+            pinned=data.get("pinned") is True,
             created_at=data.get("created_at") or _now(),
             updated_at=data.get("updated_at") or _now(),
         )

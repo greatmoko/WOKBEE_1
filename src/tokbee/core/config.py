@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import threading
 from pathlib import Path
 
 from tokbee.core.safe_io import safe_write_json
@@ -73,6 +74,9 @@ class Config:
         return _config_instance
 
     def __init__(self, config_path: str | None = None):
+        # 线程安全：共享单例 _data 的读-改-写要加锁（worker 线程写 additional_directories 与
+        # 主线程设置页并发，无锁会丢一方更新）。用 RLock 允许 save/_load 等嵌套持锁。
+        self._lock = getattr(self, "_lock", None) or threading.RLock()
         if config_path:
             self._path = Path(config_path)
         else:
@@ -86,37 +90,39 @@ class Config:
 
     def reload(self):
         """从磁盘重新加载配置（外部修改 config.json 后调用）。"""
-        self._data = {}
-        self._load()
+        with self._lock:
+            self._data = {}
+            self._load()
 
     def _load(self):
-        if self._path.exists():
-            try:
-                self._data = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._data = {}
-        else:
-            # 新路径无配置时，尝试读旧 ~/.tokbee/config.json
-            legacy = Path.home() / ".tokbee" / "config.json"
-            if legacy.exists() and legacy != self._path:
+        with self._lock:
+            if self._path.exists():
                 try:
-                    self._data = json.loads(legacy.read_text(encoding="utf-8"))
+                    self._data = json.loads(self._path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
                     self._data = {}
             else:
-                self._data = {}
-        # 旧配置段 autobee → wokbee
-        if isinstance(self._data, dict) and "autobee" in self._data:
-            legacy_ab = self._data.pop("autobee")
-            if isinstance(legacy_ab, dict):
-                cur = self._data.get("wokbee")
-                if not isinstance(cur, dict):
-                    self._data["wokbee"] = legacy_ab
+                # 新路径无配置时，尝试读旧 ~/.tokbee/config.json
+                legacy = Path.home() / ".tokbee" / "config.json"
+                if legacy.exists() and legacy != self._path:
+                    try:
+                        self._data = json.loads(legacy.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        self._data = {}
                 else:
-                    for k, v in legacy_ab.items():
-                        if k not in cur:
-                            cur[k] = v
-        self._merge_defaults(self._data, dict(self.DEFAULT_CONFIG))
+                    self._data = {}
+            # 旧配置段 autobee → wokbee
+            if isinstance(self._data, dict) and "autobee" in self._data:
+                legacy_ab = self._data.pop("autobee")
+                if isinstance(legacy_ab, dict):
+                    cur = self._data.get("wokbee")
+                    if not isinstance(cur, dict):
+                        self._data["wokbee"] = legacy_ab
+                    else:
+                        for k, v in legacy_ab.items():
+                            if k not in cur:
+                                cur[k] = v
+            self._merge_defaults(self._data, dict(self.DEFAULT_CONFIG))
 
     @staticmethod
     def _merge_defaults(data: dict, defaults: dict):
@@ -127,24 +133,35 @@ class Config:
             elif isinstance(v, dict) and isinstance(data.get(k), dict):
                 Config._merge_defaults(data[k], v)
 
+    @property
+    def lock(self) -> threading.RLock:
+        """共享单例的写入锁：跨方法持锁可让「读-改-写」整体原子化（如 add/remove 目录白名单）。
+
+        仅单例（无 config_path）实例与持有同一 _lock 的 worker 线程/主线程设置页共享这把锁。
+        """
+        return self._lock
+
     def save(self):
-        safe_write_json(self._path, self._data)
+        with self._lock:
+            safe_write_json(self._path, self._data)
 
     def get(self, key: str, default=None):
-        keys = key.split(".")
-        val = self._data
-        for k in keys:
-            if isinstance(val, dict):
-                val = val.get(k)
-            else:
-                return default
-            if val is None:
-                return default
-        return val
+        with self._lock:
+            keys = key.split(".")
+            val = self._data
+            for k in keys:
+                if isinstance(val, dict):
+                    val = val.get(k)
+                else:
+                    return default
+                if val is None:
+                    return default
+            return val
 
     def set(self, key: str, value):
-        keys = key.split(".")
-        d = self._data
-        for k in keys[:-1]:
-            d = d.setdefault(k, {})
-        d[keys[-1]] = value
+        with self._lock:
+            keys = key.split(".")
+            d = self._data
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value

@@ -191,7 +191,8 @@ class ProjectStore:
             root = self.path_for(project.id)
             ensure_project_layout(root)
             safe_write_json(meta_path(root), project.to_dict())
-            self._rebuild_index()
+            # 只更新本项目索引条目，避免每次保存/事件都全量扫描全部项目（O(n²) 卡顿）
+            self._touch_index_entry(project)
 
     def patch(self, project_id: str, **fields) -> Project | None:
         """原子更新若干字段：持锁下重新读盘再写，避免并行工具互相覆盖。"""
@@ -590,6 +591,36 @@ class ProjectStore:
     def effective_approval(self, project: Project) -> ApprovalFlags:
         """项目自带审核策略（创建时已从全局拷贝，之后独立）。"""
         return project.approval.copy()
+
+    def _touch_index_entry(self, project: Project) -> None:
+        """只更新本项目的索引条目（标题/时间），不扫描全部项目。
+
+        常驻路径（每事件/每次保存）不再走 _rebuild_index 的 list_projects() O(n) 读盘；
+        结构性增删（create 首现/delete 移除）仍由对应方法保证索引正确。
+        """
+        with _META_LOCK:
+            path = self.workspace_root / "_index.json"
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                data = None
+            if not isinstance(data, dict):
+                data = {"version": 1, "projects": []}
+            projects = data.get("projects")
+            if not isinstance(projects, list):
+                projects = []
+            entry = {"id": project.id, "title": project.title, "updated_at": project.updated_at}
+            for i, e in enumerate(projects):
+                if isinstance(e, dict) and e.get("id") == project.id:
+                    projects[i] = entry  # 保序替换
+                    break
+            else:
+                projects.append(entry)
+            data["projects"] = projects
+            try:
+                safe_write_json(path, data)
+            except OSError:
+                logger.warning("写入索引失败: %s", project.id)
 
     def _rebuild_index(self) -> None:
         projects = self.list_projects()

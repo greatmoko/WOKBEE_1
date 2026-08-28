@@ -213,10 +213,6 @@ description: {description or safe}
         self._save_enabled_map(data)
         return True
 
-    def sync_to_project(self, project_root: Path) -> list[str]:
-        """兼容旧接口：不再复制到项目，改为返回全局 Skills 虚拟路径。"""
-        return self.global_skills_paths()
-
     def global_skills_paths(self) -> list[str]:
         """供 create_deep_agent(skills=...)：通过 CompositeBackend 挂载全局目录。"""
         if self.list_enabled():

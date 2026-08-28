@@ -77,6 +77,16 @@ BUILTIN_PROVIDERS: list[BuiltinProvider] = [
         notes="月之暗面 Kimi",
     ),
     BuiltinProvider(
+        id="mimo",
+        name="小米 MiMo",
+        icon="🟠",
+        api_host="https://api.xiaomimimo.com/v1",
+        # MiMo 思考型模型不接受 temperature / top_p（会 400），且用 max_completion_tokens，
+        # 因此独立成 family（见 request_builder.build_completion_params 的 mimo 分支）。
+        family="mimo",
+        notes="小米 MiMo 开放平台（OpenAI 兼容）",
+    ),
+    BuiltinProvider(
         id="openrouter",
         name="OpenRouter",
         icon="🌐",
@@ -122,6 +132,8 @@ def infer_family(provider_id: str, api_host: str = "") -> str:
         return "glm"
     if "moonshot" in host:
         return "kimi"
+    if "xiaomimimo.com" in host:
+        return "mimo"
     if "openai.com" in host:
         return "openai"
     return "openai_compat"

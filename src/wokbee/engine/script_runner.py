@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from wokbee.core.paths import scripts_dir
+from wokbee.engine.archive_guard import command_touches_archives
 from wokbee.engine.runtime_env import collect_runtime_env, enrich_shell_env
 
 logger = logging.getLogger("wokbee")
@@ -195,6 +196,27 @@ def _persist_script_callback(project_root: Path, script_rel: str, body: str) -> 
         return str(out)
 
 
+def _script_touches_archives(cmd, script_file: Path) -> bool:
+    """脚本命令或内容是否触及 archives/（与 execute 同一套检查）。
+
+    固化脚本由 subprocess 直跑，绕过 execute 的归档守卫；这里补一层：命令串
+    （shell 命令或 argv 拼接）命中即拒，文本脚本内容也可能内嵌 archive 引用。
+    command_touches_archives 对「仅提到 archives 字样」偏保守，本系统禁止归档作数据源，
+    宁可误拒也放行违规脚本。
+    """
+    probe = cmd if isinstance(cmd, str) else " ".join(str(x) for x in cmd)
+    if command_touches_archives(probe):
+        return True
+    if script_file.suffix.lower() in {".py", ".sh", ".bat", ".cmd", ".ps1", ".js", ".vbs"}:
+        try:
+            head = script_file.read_text(encoding="utf-8", errors="replace")[:20000]
+        except OSError:
+            head = ""
+        if command_touches_archives(head):
+            return True
+    return False
+
+
 def run_one_script(
     project_root: Path,
     entry: dict,
@@ -270,6 +292,15 @@ def run_one_script(
             description=desc,
             step_id=step_id,
         )
+    # 归档守卫：脚本直跑绕过 execute 的 command_touches_archives，这里补一层拦截
+    if _script_touches_archives(cmd, script_file):
+        return ScriptRunItem(
+            path=rel,
+            ok=False,
+            error="脚本命令或内容触及 archives/，已拒绝执行（归档不可作为数据来源）",
+            description=desc,
+            step_id=step_id,
+        )
     try:
         proc = subprocess.run(
             cmd,
@@ -281,9 +312,10 @@ def run_one_script(
         )
         out = _decode_bytes(proc.stdout)
         err = _decode_bytes(proc.stderr)
-        ok = proc.returncode == 0 and not out.startswith("脚本执行失败")
-        if out.startswith("错误：") or "失败：" in out[:80]:
-            ok = False
+        # 约定：固化脚本失败路径都会输出固定哨兵「脚本执行失败」并退出非零码（见 script_factory.py）。
+        # 以「退出码为 0 且全量输出不含该哨兵」为成功判定 —— 既往只查 out[:80] 与任意「失败：」
+        # 子串，会在失败信息落到中后段、或脚本 _save("失败…") 后 exit(0) 时误判成功。
+        ok = proc.returncode == 0 and "脚本执行失败" not in out
         # 主机兜底：无论脚本内部是否 _save，都把输出落到 workspace
         persist_body = out if out else err
         if persist_body:
@@ -505,22 +537,6 @@ def build_user_message_for_ai_phase(
             ]
         )
     return "\n".join(parts)
-
-
-# 兼容旧名
-def run_pipeline(project_root: Path, *, timeout_sec: int = 120) -> PipelineRunResult:
-    return run_pipeline_until_ai_or_end(project_root, timeout_sec=timeout_sec)
-
-
-def build_user_message_after_scripts(
-    *,
-    original_message: str,
-    pipeline: PipelineRunResult,
-) -> str:
-    return build_user_message_for_ai_phase(
-        original_message=original_message,
-        pipeline=pipeline,
-    )
 
 
 def format_order_markdown(steps: list[dict]) -> str:

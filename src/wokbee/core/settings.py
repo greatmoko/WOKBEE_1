@@ -203,52 +203,69 @@ class WokBeeSettings:
                 continue
             if not rp.is_dir():
                 continue
-            out.append({"name": name or rp.name, "path": str(rp)})
+            out.append({
+                "name": name or rp.name,
+                "path": str(rp),
+                "slug": str(item.get("slug") or "") if isinstance(item, dict) else "",
+            })
         return out
 
     @additional_directories.setter
     def additional_directories(self, value: list[dict[str, str]]) -> None:
         self.set("additional_directories", list(value or []))
 
-    def add_additional_directory(self, name: str, path: str | Path) -> dict[str, str] | None:
-        """把目录加入全局白名单（去重、保存）。目录不存在则返回 None。"""
-        try:
-            rp = Path(str(path)).expanduser().resolve()
-        except OSError:
-            return None
-        if not rp.is_dir():
-            return None
-        cur = self._canonicalize(self.get("additional_directories") or []) or []
-        key = str(rp)
-        for item in cur:
-            if item["path"] == key:
-                item["name"] = name or item.get("name") or rp.name
-                self._config.set("wokbee.additional_directories", cur)
-                self._config.save()
-                return {"name": item["name"], "path": item["path"]}
-        entry = {"name": name or rp.name, "path": key}
-        cur.append(entry)
-        self._config.set("wokbee.additional_directories", cur)
-        self._config.save()
-        return entry
+    def add_additional_directory(self, name: str, path: str | Path, slug: str = "") -> dict[str, str] | None:
+        """把目录加入全局白名单（去重、保存）。目录不存在则返回 None。
+
+        slug 是 /ext/<slug>/ 虚拟路由段；持久化它，下次会话重建 composite 时能复命同一个
+        虚拟路径，避免旧 /ext/<slug>/ 引用（经验/脚本里的路径）跨会话失效或串路由。
+
+        此方法可能从 worker 线程（request_access 工具）调用，与主线程设置页并发读-改-写同一
+        单例 Config → 用其锁串行化整段操作，避免更新丢失。
+        """
+        with self._config.lock:
+            try:
+                rp = Path(str(path)).expanduser().resolve()
+            except OSError:
+                return None
+            if not rp.is_dir():
+                return None
+            cur = self._canonicalize(self.get("additional_directories") or []) or []
+            key = str(rp)
+            for item in cur:
+                if item["path"] == key:
+                    item["name"] = name or item.get("name") or rp.name
+                    if slug:
+                        item["slug"] = slug  # 更新为最新选中的 slug
+                    self._config.set("wokbee.additional_directories", cur)
+                    self._config.save()
+                    return {"name": item["name"], "path": item["path"], "slug": item.get("slug", "")}
+            entry = {"name": name or rp.name, "path": key}
+            if slug:
+                entry["slug"] = slug
+            cur.append(entry)
+            self._config.set("wokbee.additional_directories", cur)
+            self._config.save()
+            return entry
 
     def remove_additional_directory(self, path: str | Path) -> bool:
         """按路径移除白名单项。"""
-        try:
-            key = str(Path(str(path)).expanduser().resolve())
-        except OSError:
+        with self._config.lock:
+            try:
+                key = str(Path(str(path)).expanduser().resolve())
+            except OSError:
+                return False
+            cur = self._canonicalize(self.get("additional_directories") or []) or []
+            new = [x for x in cur if x["path"] != key]
+            if len(new) != len(cur):
+                self._config.set("wokbee.additional_directories", new)
+                self._config.save()
+                return True
             return False
-        cur = self._canonicalize(self.get("additional_directories") or []) or []
-        new = [x for x in cur if x["path"] != key]
-        if len(new) != len(cur):
-            self._config.set("wokbee.additional_directories", new)
-            self._config.save()
-            return True
-        return False
 
     @staticmethod
     def _canonicalize(items: list) -> list[dict[str, str]]:
-        """把 [str] 或 [dict] 混合列表统一成 [{"name","path"}]。"""
+        """把 [str] 或 [dict] 混合列表统一成 [{"name","path","slug"}]。"""
         out: list[dict[str, str]] = []
         for item in items:
             if isinstance(item, dict) and item.get("path"):
@@ -265,7 +282,11 @@ class WokBeeSettings:
                 continue
             if not rp.is_dir():
                 continue
-            out.append({"name": name or rp.name, "path": str(rp)})
+            out.append({
+                "name": name or rp.name,
+                "path": str(rp),
+                "slug": str(item.get("slug") or "") if isinstance(item, dict) else "",
+            })
         return out
 
     @property

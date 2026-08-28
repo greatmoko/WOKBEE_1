@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QLineEdit, QDialog, QCheckBox, QComboBox,
@@ -14,36 +14,7 @@ from PySide6.QtWidgets import (
 
 from tokbee.ui.styles.theme import Theme
 from wokbee.core.mcp_store import McpServerConfig, McpStore
-
-
-def _tip(parent: QWidget, theme: Theme, message: str):
-    c = theme.colors
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("提示")
-    dlg.setFixedSize(420, 180)
-    dlg.setStyleSheet(f"background: {c['content_bg']};")
-    lay = QVBoxLayout(dlg)
-    lay.setContentsMargins(24, 20, 24, 18)
-    msg = QLabel(message)
-    msg.setWordWrap(True)
-    msg.setStyleSheet(f"font-size: 13px; color: {c['text']};")
-    lay.addWidget(msg)
-    lay.addStretch()
-    row = QHBoxLayout()
-    row.addStretch()
-    ok = QPushButton("知道了")
-    ok.setFixedSize(80, 34)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_bg"]}; color: {c["text"]};
-            border: none; border-radius: 6px;
-        }}
-        QPushButton:hover {{ background: {c["btn_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(ok)
-    lay.addLayout(row)
-    dlg.exec()
+from wokbee.ui.dialogs import tip as _tip
 
 
 class _McpCard(QFrame):
@@ -277,6 +248,7 @@ class McpWorkspace(QWidget):
         super().__init__(parent)
         self.theme = theme
         self.store = store or McpStore()
+        self._test_workers: list[_McpTestWorker] = []  # 持有引用，避免后台测试线程被 GC
         self._build()
         self.refresh()
 
@@ -421,18 +393,41 @@ class McpWorkspace(QWidget):
         if not conn:
             _tip(self, self.theme, "配置不完整，无法连接。")
             return
+        # 后台线程测试连接，避免主线程 asyncio.run 无超时卡死窗口。
+        worker = _McpTestWorker(server, parent=self)
+        self._test_workers.append(worker)
+        worker.result.connect(lambda msg: _tip(self, self.theme, msg))
+        worker.result.connect(lambda *_: self._test_workers.remove(worker) if worker in self._test_workers else None)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+
+class _McpTestWorker(QThread):
+    """后台测试 MCP 连接：带超时 via asyncio.wait_for，结果经信号回主线程。"""
+
+    result = Signal(str)
+
+    def __init__(self, server: McpServerConfig, parent=None):
+        super().__init__(parent)
+        self._server = server
+
+    def run(self):
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
             import asyncio
 
             async def _test():
-                client = MultiServerMCPClient({server.name or server.id: conn})
-                tools = await client.get_tools()
-                return tools
+                conn = self._server.to_connection()
+                client = MultiServerMCPClient({self._server.name or self._server.id: conn})
+                # 超时保护：MCP 服务器无响应时不许拖死后台线程（进而占住 UI）。
+                return await asyncio.wait_for(client.get_tools(), timeout=8)
 
             tools = asyncio.run(_test())
             names = ", ".join(getattr(t, "name", str(t)) for t in tools[:12])
             more = f" 等共 {len(tools)} 个" if len(tools) > 12 else f"（共 {len(tools)} 个）"
-            _tip(self, self.theme, f"连接成功，工具：{names or '(无)'}{more}")
+            self.result.emit(f"连接成功，工具：{names or '(无)'}{more}")
         except Exception as e:
-            _tip(self, self.theme, f"连接失败：{e}")
+            if isinstance(e, TimeoutError) or "Timeout" in type(e).__name__:
+                self.result.emit("连接超时：服务器无响应（超过 8 秒）。")
+            else:
+                self.result.emit(f"连接失败：{e}")

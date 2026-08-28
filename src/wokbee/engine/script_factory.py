@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,12 +19,8 @@ from wokbee.core.paths import archives_dir, ensure_project_layout, scripts_dir
 SCRIPTABLE_TOOLS = frozenset({"web_search", "http_get", "http_request", "execute"})
 
 # execute 命令中可固化为本地脚本的扩展名
-_SCRIPT_FILE_RE = re.compile(
-    r"""(?ix)
-    (?:^|[\\/"'\s])
-    (?P<path>(?:[A-Za-z]:[\\/])?[^\s"'<>|]+\.(?:py|bat|cmd|ps1))
-    """
-)
+_SCRIPT_EXTS = (".py", ".bat", ".cmd", ".ps1")
+
 _REDIRECT_RE = re.compile(
     r"""(?ix)
     \s*(?:>>?)\s*(?:"[^"]*"|'[^']*'|[^\s&|;]+)
@@ -32,6 +29,40 @@ _REDIRECT_RE = re.compile(
     \s*2>&1
     """
 )
+
+# 共享的 _save 模板：_COMMON_HEADER 与 _EXECUTE_HEADER 各以 {{SAVE_FUNC}} 占位，
+# 组装时用 _hdr() 注入，避免两份几乎相同的 _save()。
+_SAVE_FUNC = '''def _save(result: str, *, label: str = "") -> None:
+    """把脚本 callback 写入 workspace/，便于后续 AI 步骤读取复用。"""
+    from datetime import datetime
+
+    root = Path(__file__).resolve().parents[1]
+    ws = root / "workspace"
+    ws.mkdir(parents=True, exist_ok=True)
+    script_path = Path(__file__).resolve()
+    stem = (label or script_path.stem).strip() or script_path.stem
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    body = (
+        f"# 脚本 callback：{stem}\\n\\n"
+        f"- 生成时间：{stamp}\\n"
+        f"- 脚本：scripts/{script_path.name}\\n\\n"
+        f"---\\n\\n"
+        f"{result}\\n"
+    )
+    out = ws / f"script_callback_{stem}.md"
+    out.write_text(body, encoding="utf-8")
+    print(f"[callback 已写入] {out.relative_to(root).as_posix()}")
+    print(result)
+
+
+'''
+
+_SAVE_FUNC_MARK = "{{SAVE_FUNC}}"
+
+
+def _hdr(header: str) -> str:
+    return header.replace(_SAVE_FUNC_MARK, _SAVE_FUNC)
+
 
 _COMMON_HEADER = '''# -*- coding: utf-8 -*-
 """WokBee 固化脚本 — 本地执行，不耗 Token。由经验总结自动生成。
@@ -107,28 +138,7 @@ def _resp_text(resp) -> str:
     return _decode_http_bytes(resp.content or b"", resp.headers.get("content-type") or "")
 
 
-def _save(result: str) -> None:
-    """把脚本 callback 写入 workspace/，便于后续 AI 步骤读取复用。"""
-    from datetime import datetime
-
-    root = Path(__file__).resolve().parents[1]
-    ws = root / "workspace"
-    ws.mkdir(parents=True, exist_ok=True)
-    script_path = Path(__file__).resolve()
-    stem = script_path.stem
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    body = (
-        f"# 脚本 callback：{stem}\\n\\n"
-        f"- 生成时间：{stamp}\\n"
-        f"- 脚本：scripts/{script_path.name}\\n\\n"
-        f"---\\n\\n"
-        f"{result}\\n"
-    )
-    out = ws / f"script_callback_{stem}.md"
-    out.write_text(body, encoding="utf-8")
-    print(f"[callback 已写入] {out.relative_to(root).as_posix()}")
-    print(result)
-
+{{SAVE_FUNC}}
 '''
 
 _EXECUTE_HEADER = '''# -*- coding: utf-8 -*-
@@ -140,6 +150,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -158,26 +169,39 @@ def _skills_home() -> Path:
     return Path.home() / ".wokbee" / "skills"
 
 
-def _save(result: str, *, label: str = "") -> None:
-    from datetime import datetime
+{{SAVE_FUNC}}
 
-    root = Path(__file__).resolve().parents[1]
-    ws = root / "workspace"
-    ws.mkdir(parents=True, exist_ok=True)
-    script_path = Path(__file__).resolve()
-    stem = (label or script_path.stem).strip() or script_path.stem
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    body = (
-        f"# 脚本 callback：{stem}\\n\\n"
-        f"- 生成时间：{stamp}\\n"
-        f"- 脚本：scripts/{script_path.name}\\n\\n"
-        f"---\\n\\n"
-        f"{result}\\n"
+def _decode_bytes(data: bytes | None) -> str:
+    """尽量用 utf-8 / gbk 解码脚本输出（Windows 常见混码）。"""
+    if not data:
+        return ""
+
+    def _try(enc: str) -> str | None:
+        try:
+            return data.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            return None
+
+    for enc in ("utf-8", "utf-8-sig", "gbk", "cp936", "big5"):
+        hit = _try(enc)
+        if hit is not None:
+            return hit.strip()
+    return data.decode("utf-8", errors="replace").strip()
+
+
+def _pwsh_argv(command: str) -> list[str] | None:
+    """Windows 上用 pwsh/powershell -Command，而非 cmd 执行（cmd 缺 head 等）。"""
+    if os.name != "nt":
+        return None
+    exe = shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
+    if not exe:
+        return None
+    ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        + command
     )
-    out = ws / f"script_callback_{stem}.md"
-    out.write_text(body, encoding="utf-8")
-    print(f"[callback 已写入] {out.relative_to(root).as_posix()}")
-    print(result)
+    return [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd]
 
 '''
 
@@ -277,11 +301,51 @@ def _strip_shell_redirects(cmd: str) -> str:
     return text
 
 
+def _unescape_token(tok: str) -> str:
+    """去掉 shlex(posix=False) 保留在 token 两端的一对引号。"""
+    if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
+        return tok[1:-1]
+    return tok
+
+
+def _split_cmd_tokens(cmd: str) -> list[str]:
+    """拆分执行命令为 token，保留引号内空格与 Windows 反斜杠（posix=False）。
+
+    pwsh 的 `& "C:\\my script\\run.ps1"` 调用符、带空格路径都能完整取到，
+    避免按空白截断导致路径/标签识别错误。
+    """
+    if not cmd:
+        return []
+    try:
+        toks = shlex.split(cmd, posix=False)
+    except ValueError:
+        # 引号不配对等 parse 失败 → 退回按空白粗切
+        toks = (cmd or "").replace('"', " ").replace("'", " ").split()
+    return [_unescape_token(t.strip()) for t in toks if t.strip()]
+
+
+def _script_tokens(cmd: str) -> list[str]:
+    """从命令里取出引用脚本文件的 token（含扩展名）。"""
+    out: list[str] = []
+    for tok in _split_cmd_tokens(cmd):
+        low = tok.lower()
+        if any(low.endswith(ext) for ext in _SCRIPT_EXTS):
+            out.append(tok)
+    return out
+
+
 def _execute_script_label(cmd: str) -> str:
-    m = _SCRIPT_FILE_RE.search(cmd or "")
-    if m:
-        return Path(m.group("path").strip("\"'")).stem[:40] or "execute"
-    return "execute"
+    toks = _script_tokens(cmd)
+    if not toks:
+        return "execute"
+    # 优先取像路径的 token（含盘符/斜杠），否则取首个
+    best = toks[0]
+    for tok in toks:
+        if "/" in tok or "\\" in tok or ":" in tok:
+            best = tok
+            break
+    stem = Path(best.strip('"\'')).stem[:40]
+    return stem or "execute"
 
 
 def _is_scriptable_execute(cmd: str) -> bool:
@@ -289,7 +353,7 @@ def _is_scriptable_execute(cmd: str) -> bool:
     text = _strip_shell_redirects(cmd)
     if not text or len(text) > 4000:
         return False
-    if not _SCRIPT_FILE_RE.search(text):
+    if not _script_tokens(text):
         return False
     # 排除明显危险的整盘操作（仍可由 AI 手动 execute）
     lowered = text.lower()
@@ -328,39 +392,38 @@ def _normalize_execute_command(cmd: str) -> tuple[str, str] | None:
     return text, label
 
 
-def _script_execute(command: str, label: str = "execute") -> str:
+def _script_execute(command: str, label: str = "execute", *, timeout: int = 180) -> str:
     cmd = json.dumps(command, ensure_ascii=False)
     lab = json.dumps(label or "execute", ensure_ascii=False)
     return (
-        _EXECUTE_HEADER
+        _hdr(_EXECUTE_HEADER)
         + f"""
 CMD_TEMPLATE = {cmd}
 LABEL = {lab}
+TIMEOUT = {int(timeout)}
 
 def main() -> None:
     skills = _skills_home()
     cmd = CMD_TEMPLATE.replace("{{SKILLS}}", str(skills).replace("\\\\", "/"))
     # 本脚本位于 scripts/，工作目录应为项目根
     root = Path(__file__).resolve().parents[1]
+    argv = _pwsh_argv(cmd)
     try:
         proc = subprocess.run(
-            cmd,
-            shell=True,
+            argv if argv is not None else cmd,
             cwd=str(root),
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=180,
+            shell=argv is None,
+            timeout=TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        _save("脚本执行失败：超时（>180s）", label=LABEL)
+        _save(f"脚本执行失败：超时（>{{TIMEOUT}}s）", label=LABEL)
         sys.exit(1)
     except OSError as e:
         _save(f"脚本执行失败：{{e}}", label=LABEL)
         sys.exit(1)
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
+    out = _decode_bytes(proc.stdout)
+    err = _decode_bytes(proc.stderr)
     body = out if out else err
     if proc.returncode != 0:
         msg = body or f"exit={{proc.returncode}}"
@@ -475,7 +538,7 @@ def _script_web_search(query: str, max_results: int = 5) -> str:
     q = json.dumps(query, ensure_ascii=False)
     mr = int(max_results)
     return (
-        _COMMON_HEADER
+        _hdr(_COMMON_HEADER)
         + f"""
 QUERY = {q}
 MAX_RESULTS = {mr}
@@ -518,7 +581,7 @@ def _script_http_get(url: str, max_chars: int = 12000) -> str:
     u = json.dumps(url, ensure_ascii=False)
     mc = int(max_chars)
     return (
-        _COMMON_HEADER
+        _hdr(_COMMON_HEADER)
         + f"""
 URL = {u}
 MAX_CHARS = {mc}
@@ -564,7 +627,7 @@ def _script_http_request(
     max_chars: int = 12000,
 ) -> str:
     return (
-        _COMMON_HEADER
+        _hdr(_COMMON_HEADER)
         + f"""
 URL = {json.dumps(url, ensure_ascii=False)}
 METHOD = {json.dumps(method, ensure_ascii=False)}

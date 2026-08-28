@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ from wokbee.engine.access_request import (
     mount_dir,
 )
 from wokbee.engine.access_coerce import AccessCoerceBackend
+from wokbee.engine.readonly_backend import ReadOnlyBackend
 from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
@@ -65,7 +67,7 @@ from wokbee.engine.ask_user import (
     is_ask_user_interrupt,
     normalize_ask_user_value,
 )
-from wokbee.engine.project_tools import PROJECT_META_TOOL_NAMES, build_project_meta_tools
+from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.script_factory import (
     apply_ai_authored_scripts,
     apply_ai_pipeline_steps,
@@ -669,10 +671,21 @@ class AgentRunner:
         self._approval_decisions = None
         if self.on_approval_needed:
             self.on_approval_needed(pending)
-        # 最长等待 1 小时
+        # 总超时兜底（真实 deadline，避免窗口关闭/审批无响应时线程永久阻塞）；默认 1 小时
+        deadline = time.monotonic() + (
+            float(getattr(self, "_approval_wait_timeout", 3600.0) or 3600.0)
+        )
+        cancelled = False
         while not self._approval_event.wait(timeout=0.5):
             if self._cancel.is_set():
-                return [{"type": "reject", "message": "用户取消"} for _ in pending]
+                cancelled = True
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("审批等待超时，自动拒绝")
+                cancelled = True
+                break
+        if cancelled and self._cancel.is_set():
+            return [{"type": "reject", "message": "用户取消"} for _ in pending]
         decisions = self._approval_decisions or [
             {"type": "reject", "message": "无审批结果"} for _ in pending
         ]
@@ -689,8 +702,14 @@ class AgentRunner:
         self._ask_user_answers = None
         if self.on_ask_user_needed:
             self.on_ask_user_needed(payload)
+        deadline = time.monotonic() + (
+            float(getattr(self, "_ask_user_wait_timeout", 3600.0) or 3600.0)
+        )
         while not self._ask_user_event.wait(timeout=0.5):
             if self._cancel.is_set():
+                return {"cancelled": True}
+            if time.monotonic() >= deadline:
+                logger.warning("等待澄清超时，按取消处理")
                 return {"cancelled": True}
         return self._ask_user_answers or {"cancelled": True}
 
@@ -714,9 +733,9 @@ class AgentRunner:
         )
         project_backend = project_inner
         interrupt_on = build_interrupt_on(req.approval)
-        if req.approval.skip_routine:
-            for n in PROJECT_META_TOOL_NAMES:
-                interrupt_on.pop(n, None)
+        # 项目元信息工具（get_project_info/update_project_title/update_project_goal）始终免费：
+        # 它们只读/写本项目名与目标，属低风险元数据操作，不在 build_interrupt_on 任何桶内，
+        # 因此 interrupt_on 不会包含它们，无须 pop。
 
         # chat 与 run 共用项目 checkpointer，但 thread_id 不同，状态不串
         checkpointer = _get_checkpointer(req.project.id)
@@ -730,14 +749,17 @@ class AgentRunner:
             skills_paths = skills_store.global_skills_paths()
             enabled_skills = [s.name for s in skills_store.list_enabled()]
             if skills_paths:
-                skills_inner = FilesystemBackend(
-                    root_dir=str(skills_store.root),
-                    virtual_mode=True,
+                # 只读挂载：全局技能库不是本项目产物，只允许读/列/搜，禁止写/改/删
+                skills_inner = ReadOnlyBackend(
+                    FilesystemBackend(
+                        root_dir=str(skills_store.root),
+                        virtual_mode=True,
+                    )
                 )
                 routes["/skills/"] = skills_inner
                 skills_extra_lines = [
                     f"- 全局 Skills 目录（真实路径，execute 可用）：{skills_store.root}",
-                    "- 全局 Skills 虚拟路径：/skills/<技能名>/SKILL.md（read/edit/write 可用）",
+                    "- 全局 Skills 虚拟路径：/skills/<技能名>/SKILL.md（只读，仅 read/ls/glob/grep）",
                     f"- 已启用 Skills：{', '.join(enabled_skills) or '（无）'}",
                 ]
                 self._emit(
@@ -759,6 +781,8 @@ class AgentRunner:
                 entry["path"],
                 name=entry.get("name") or "",
                 persist=False,
+                slug=entry.get("slug") or "",
+                project_root=req.project_root,
             )
             if prefix:
                 access_extra_lines.append(
@@ -868,7 +892,8 @@ class AgentRunner:
             + list(project_tools)
             + [build_ask_user_tool()]
             + [build_access_request_tool(
-                composite_backend, access_registry, self.settings, emit=self._emit
+                composite_backend, access_registry, self.settings,
+                emit=self._emit, project_root=req.project_root,
             )]
             + ([deepseek_search] if deepseek_search is not None else [])
             + list(mcp_tools)
@@ -2060,7 +2085,6 @@ class AgentRunner:
                 success_path=path_f,
                 environment=env_f,
                 notes=notes_f,
-                artifacts="",  # 明确不写产物
                 errors=errors,
                 model=f"{req.resolved.provider_name}/{req.resolved.model_id}",
                 policy=req.approval.summary(),

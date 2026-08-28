@@ -279,6 +279,13 @@ class MainWindow(QMainWindow):
             self._services.autobee_scheduler.shutdown(wait=False)
         except Exception:
             pass
+        # 先收尾后台线程（agent/lesson/压缩/改名），避免 QThread 仍在运行时销毁
+        wokbee = self._views.get("wokbee")
+        if wokbee is not None:
+            try:
+                wokbee.shutdown()
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def _set_titlebar_color(self):

@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -14,49 +10,7 @@ from PySide6.QtWidgets import (
 
 from tokbee.ui.styles.theme import Theme
 from wokbee.core.skills_store import SkillsStore, SkillInfo
-
-
-def _tip(parent: QWidget, theme: Theme, message: str):
-    c = theme.colors
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("提示")
-    dlg.setFixedSize(400, 150)
-    dlg.setStyleSheet(f"background: {c['content_bg']};")
-    lay = QVBoxLayout(dlg)
-    lay.setContentsMargins(24, 20, 24, 18)
-    msg = QLabel(message)
-    msg.setWordWrap(True)
-    msg.setStyleSheet(f"font-size: 14px; color: {c['text']};")
-    lay.addWidget(msg)
-    lay.addStretch()
-    row = QHBoxLayout()
-    row.addStretch()
-    ok = QPushButton("知道了")
-    ok.setFixedSize(80, 34)
-    ok.setStyleSheet(f"""
-        QPushButton {{
-            background: {c["btn_bg"]}; color: {c["text"]};
-            border: none; border-radius: 6px;
-        }}
-        QPushButton:hover {{ background: {c["btn_hover"]}; }}
-    """)
-    ok.clicked.connect(dlg.accept)
-    row.addWidget(ok)
-    lay.addLayout(row)
-    dlg.exec()
-
-
-def _open_path(path):
-    path = str(path)
-    try:
-        if sys.platform == "win32":
-            os.startfile(path)  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
-    except OSError:
-        pass
+from wokbee.ui.dialogs import open_path as _open_path, tip as _tip
 
 
 class _SkillCard(QFrame):

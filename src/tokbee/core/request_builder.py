@@ -40,19 +40,22 @@ def build_completion_params(
     opts = settings.provider_options
     # DeepSeek 官方：思考模式下 temperature / top_p 等无效
     skip_sampling = family == "deepseek" and _deepseek_thinking_active(opts)
+    # 小米 MiMo：思考型模型不接受 temperature / top_p（传了会 400），统一跳过采样
+    mimo_thinking = family == "mimo"
 
-    if settings.temperature is not None and not skip_sampling and not (
+    if settings.temperature is not None and not skip_sampling and not mimo_thinking and not (
         family == "openai" and _is_openai_reasoning_model(model_id)
     ):
         body["temperature"] = settings.temperature
 
-    if settings.top_p is not None and not skip_sampling and not (
+    if settings.top_p is not None and not skip_sampling and not mimo_thinking and not (
         family == "openai" and _is_openai_reasoning_model(model_id)
     ):
         body["top_p"] = settings.top_p
 
     if settings.max_tokens is not None and settings.max_tokens > 0:
-        if family == "openai" and _is_openai_reasoning_model(model_id):
+        # MiMo 用 max_completion_tokens（而非旧的 max_tokens）
+        if family == "mimo" or (family == "openai" and _is_openai_reasoning_model(model_id)):
             body["max_completion_tokens"] = settings.max_tokens
         else:
             body["max_tokens"] = settings.max_tokens
@@ -97,6 +100,9 @@ def _apply_provider_options(
             raw = (opts.openai_reasoning_effort or "").strip().lower()
             if raw in _DEEPSEEK_EFFORT_MAP:
                 body["reasoning_effort"] = _DEEPSEEK_EFFORT_MAP[raw]
+        return
+
+    if family == "mimo":
         return
 
     if family in ("qwen", "glm", "kimi", "openai_compat"):

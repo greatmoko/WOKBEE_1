@@ -208,13 +208,17 @@ def _probe_cli_tools() -> tuple[dict[str, str], dict[str, str]]:
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(_one, job) for job in jobs]
-        for fut in as_completed(futures, timeout=6):
-            try:
-                label, ver = fut.result()
-                if ver:
-                    versions[label] = ver
-            except Exception:
-                continue
+        try:
+            for fut in as_completed(futures, timeout=6):
+                try:
+                    label, ver = fut.result()
+                    if ver:
+                        versions[label] = ver
+                except Exception:
+                    continue
+        except TimeoutError:
+            # 整体超时：返回已收集的结果，别让首次环境探测成为硬依赖
+            pass
     return paths, versions
 
 
@@ -235,7 +239,8 @@ def _do_probe_runtime_env() -> RuntimeEnv:
         probed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     env.pwsh_exe = _which("pwsh")
-    env.powershell_exe = _which("powershell") or _which("powershell.exe")
+    # shutil.which 已按 PATHEXT 补 .exe，“powershell” 即可命中 powershell.exe，无需再补全名。
+    env.powershell_exe = _which("powershell")
 
     shell_jobs: list[tuple[str, list[str]]] = []
     if env.pwsh_exe:
@@ -253,16 +258,19 @@ def _do_probe_runtime_env() -> RuntimeEnv:
     if shell_jobs:
         with ThreadPoolExecutor(max_workers=2) as pool:
             futs = {pool.submit(_run_version, argv): key for key, argv in shell_jobs}
-            for fut in as_completed(futs, timeout=4):
-                key = futs[fut]
-                try:
-                    ver = fut.result()
-                except Exception:
-                    ver = ""
-                if key == "pwsh":
-                    env.pwsh_version = ver
-                elif key == "ps5":
-                    env.powershell_version = ver
+            try:
+                for fut in as_completed(futs, timeout=4):
+                    key = futs[fut]
+                    try:
+                        ver = fut.result()
+                    except Exception:
+                        ver = ""
+                    if key == "pwsh":
+                        env.pwsh_version = ver
+                    elif key == "ps5":
+                        env.powershell_version = ver
+            except TimeoutError:
+                pass
 
     if env.pwsh_exe and not env.pwsh_version:
         env.pwsh_version = _run_version([env.pwsh_exe, "-NoProfile", "-v"])
@@ -372,8 +380,15 @@ def enrich_shell_env(base: dict[str, str] | None = None, *, project_root: str | 
     if rt.pwsh_exe:
         env["WOKBEE_PWSH"] = rt.pwsh_exe
         pwsh_dir = str(Path(rt.pwsh_exe).parent)
+        # Windows 环境变量名大小写不敏感，宿主可能是 "Path"；大小写不敏感查找，
+        # 避免新建 "PATH" 键挤掉整条原始 PATH（后续子进程找不到 git/python/cmd）。
         path_key = "PATH"
-        existing = env.get(path_key, "")
+        existing = ""
+        for k in list(env.keys()):
+            if k.upper() == "PATH":
+                path_key = k
+                existing = str(env[k] or "")
+                break
         if pwsh_dir.lower() not in existing.lower():
             env[path_key] = pwsh_dir + os.pathsep + existing if existing else pwsh_dir
     if project_root:
