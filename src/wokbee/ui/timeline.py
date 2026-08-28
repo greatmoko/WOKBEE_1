@@ -736,12 +736,25 @@ class _Timeline(QFrame):
         layout.addWidget(scroll)
         bar = self._scroll.verticalScrollBar()
         bar.valueChanged.connect(self._on_user_scroll)
+        bar.rangeChanged.connect(self._on_scroll_range_changed)
 
     def _on_user_scroll(self, value: int) -> None:
         if self._scroll_programmatic:
             return
         bar = self._scroll.verticalScrollBar()
         self._stick_to_bottom = (bar.maximum() - value) <= SCROLL_STICK_THRESHOLD
+
+    def _on_scroll_range_changed(self, _min: int, _max: int) -> None:
+        """内容高度变化（布局逐步稳定）时，若应贴底则继续滚到底，避免停在旧位置。
+
+        长会话/多项目重排时，_schedule_scroll_to_bottom 的固定 0/30/100/250/500ms
+        重刷可能早于实际布局完成（气泡高度异步算出），此时 maximum 仍为 0，
+        等到高度真正爆发后已无重刷跟进 → 时间线停在顶部。rangeChanged 在范围
+        **真实变化**的那一刻触发，只要贴底就补滚到底，且范围不再变化就不会再滚。
+        """
+        if not self._stick_to_bottom:
+            return
+        self._scroll_to_bottom()
 
     def set_agent_running(self, running: bool) -> None:
         self._agent_running = bool(running)

@@ -7,11 +7,14 @@ FilesystemBackend 实际允许 write/edit/delete。这里包一层只读 facade�
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 
 from deepagents.backends.protocol import (
     DeleteResult,
     EditResult,
+    FileDownloadResponse,
+    FileUploadResponse,
     GlobResult,
     GrepResult,
     LsResult,
@@ -65,9 +68,25 @@ class ReadOnlyBackend:
             )
         return self._inner.grep(pattern, path, glob, max_count=max_count)
 
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        """下载技能文件：读操作，放行给内层。"""
+        return self._inner.download_files(paths)
+
+    async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        return await asyncio.to_thread(self.download_files, paths)
+
     # ---- 拦截：写入操作 ----
     def write(self, file_path: str, content: str) -> WriteResult:
         return WriteResult(error=_READONLY_MSG)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        """上传技能文件：写操作，一律拒绝（保持只读不变量）。"""
+        return [FileUploadResponse(path=name, error=_READONLY_MSG) for name, _ in files]
+
+    async def aupload_files(
+        self, files: list[tuple[str, bytes]]
+    ) -> list[FileUploadResponse]:
+        return await asyncio.to_thread(self.upload_files, files)
 
     def edit(
         self,
