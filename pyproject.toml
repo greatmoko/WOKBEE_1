@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokbee"
-version = "0.1.0"
+version = "0.2.0"
 description = "WokBee — AI 桌面助手；对话模块 TokBee + 项目工作流 WokBee"
 requires-python = ">=3.11"
 dependencies = [

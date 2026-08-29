@@ -43,8 +43,6 @@ from wokbee.core.models import MAX_PROJECT_TITLE_LEN, Project, ProjectEvent, Pro
 from wokbee.core.paths import deliverables_dir, list_deliverable_names, uploads_dir
 from wokbee.core.project_store import MAX_ARCHIVES, ProjectStore, TRASH_RETENTION_DAYS
 from wokbee.engine.lessons import build_success_path_from_timeline_events, collect_events_log
-from wokbee.engine.runner import AgentRunner, RunRequest, resolve_model_for_project
-from wokbee.engine.worker import AgentWorker, LessonWorker
 from wokbee.ui.action_bar import _ActionBar
 from wokbee.ui.ask_user_dialog import AskUserDialog
 from wokbee.ui.dialogs import (
@@ -145,7 +143,8 @@ class _RefineMetaWorker(QThread):
 
     def __init__(
         self,
-        client: AIClient,
+        settings,
+        project,
         *,
         current_title: str,
         current_goal: str,
@@ -154,13 +153,14 @@ class _RefineMetaWorker(QThread):
         parent=None,
     ):
         super().__init__(parent)
-        self._client = client
+        self._settings = settings
+        self._project = project
         self._current_title = current_title
         self._current_goal = current_goal
         self._timeline_log = timeline_log
         self._max_title_len = max_title_len
         self._cancelled = False
-        client.cancel_check = lambda: self._cancelled
+        self._client = None
 
     def cancel(self):
         self._cancelled = True
@@ -168,6 +168,29 @@ class _RefineMetaWorker(QThread):
     def run(self):
         if self._cancelled:
             return
+        # 模型解析 + AIClient 构造放进 worker 线程，避免 UI 线程 import 重型引擎。
+        from wokbee.engine import ensure_engine_warm
+
+        ensure_engine_warm()
+        from wokbee.engine.runner import resolve_model_for_project
+
+        try:
+            resolved = resolve_model_for_project(self._project, self._settings)
+        except Exception as e:
+            if not self._cancelled:
+                self.failed.emit(str(e))
+            return
+        if not (resolved.api_key and resolved.api_host and resolved.model_id):
+            self.failed.emit("请先在「厂商设置」配置可用模型。")
+            return
+        client = AIClient(
+            resolved.api_host,
+            resolved.api_key,
+            resolved.model_id,
+            family=resolved.family,
+        )
+        self._client = client
+        client.cancel_check = lambda: self._cancelled
         system = (
             "你是项目元信息助手。根据当前名称、目标与最近运行/对话记录，"
             "生成更贴切的「项目名称」和「项目目标」。\n"
@@ -673,7 +696,6 @@ class _ProjectWorkspace(QWidget):
         self._worker_project_id: str | None = None
         self._compact_project_id: str | None = None
         self._refine_project_id: str | None = None
-        self._runner: AgentRunner | None = None
         self._worker_mode: str = "run"  # run | chat | lesson
         self._status_before_chat: ProjectStatus | None = None
         self._status_before_lesson: ProjectStatus | None = None
@@ -968,29 +990,16 @@ class _ProjectWorkspace(QWidget):
         project = self.store.get(self._project_id)
         if not project:
             return
-        try:
-            resolved = resolve_model_for_project(project, self.store.settings)
-        except ValueError as e:
-            _tip(self, self.theme, str(e))
-            return
-        if not (resolved.api_key and resolved.api_host and resolved.model_id):
-            _tip(self, self.theme, "请先在「厂商设置」配置可用模型。")
-            return
 
         events = self.store.list_events(self._project_id)
         # 取最近片段，控制 token
         recent = events[-80:] if len(events) > 80 else events
         timeline_log = collect_events_log(recent, max_chars=8000)
-        client = AIClient(
-            resolved.api_host,
-            resolved.api_key,
-            resolved.model_id,
-            family=resolved.family,
-        )
         self._essentials.set_ai_refine_busy(True)
         self._refine_project_id = self._project_id  # 发起时捕获，切换项目不写错
         worker = _RefineMetaWorker(
-            client,
+            self.store.settings,
+            project,
             current_title=project.title,
             current_goal=project.goal,
             timeline_log=timeline_log,
@@ -1061,9 +1070,34 @@ class _ProjectWorkspace(QWidget):
         self.store.append_event(self._project_id, ev)
         self._timeline.append_event(ev)
         self._schedule_essentials_refresh()
+        # 运行中把策略改成「全部免审」时，自动放行当前已挂起的审批，否则会一直卡在待审批。
+        # 只针对审批中断（approval），不影响 ask_user 澄清提问；仅在项目处于「待审批」状态才放行，
+        # 避免在普通执行中误发「已自动批准」。
+        all_skipped = (
+            updated.skip_read
+            and updated.skip_write
+            and updated.skip_routine
+            and updated.skip_high_risk
+        )
+        running = self._worker is not None and self._worker.isRunning()
+        pending_n = getattr(self._worker, "_last_pending_count", 0) or 0
+        awaiting = (
+            (self.store.get(self._project_id) or project).status
+            == ProjectStatus.AWAITING_APPROVAL
+        )
+        if all_skipped and running and pending_n > 0 and awaiting:
+            self._worker.approve_all()
+            note = ProjectEvent(
+                kind="approval",
+                content=f"策略已改为全部免审，自动批准当前 {pending_n} 项待审操作。",
+            )
+            self.store.append_event(self._project_id, note)
+            self._timeline.append_event(note)
 
     def _on_send(self, text: str):
         """非运行期：对话模式回复提问（可与目标无关），可改名称/目标。"""
+        from wokbee.engine.worker import AgentWorker
+
         if not self._project_id:
             _tip(self, self.theme, "请先新建或选择一个项目。")
             return
@@ -1091,12 +1125,6 @@ class _ProjectWorkspace(QWidget):
         self.store.append_event(self._project_id, uev)
         self._timeline.append_event(uev)
 
-        try:
-            resolved = resolve_model_for_project(project, self.store.settings)
-        except ValueError as e:
-            _tip(self, self.theme, str(e))
-            return
-
         self._status_before_chat = project.status
         self.store.set_status(
             self._project_id,
@@ -1105,29 +1133,32 @@ class _ProjectWorkspace(QWidget):
         )
         self._schedule_essentials_refresh()
 
-        req = RunRequest(
-            project=project,
-            project_root=self.store.path_for(project.id),
-            user_message=text,
-            resolved=resolved,
-            approval=project.approval.copy(),
-            max_steps=self.store.settings.max_steps,
-        )
         self._worker_project_id = self._project_id  # 发起时捕获，运行中切项目不串写
-        self._runner = AgentRunner(self.store.settings)
         self._worker_mode = "chat"
-        self._worker = AgentWorker(self._runner, req, parent=self, mode="chat")
+        self._worker = AgentWorker(
+            self.store.settings,
+            project,
+            self.store.path_for(project.id),
+            text,
+            project.approval.copy(),
+            self.store.settings.max_steps,
+            parent=self,
+            mode="chat",
+        )
         self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
+        self._worker.model_error.connect(self._on_worker_model_error)
         self._actions.set_running(True)
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
         self._worker.start()
 
     def _on_run(self):
+        from wokbee.engine.worker import AgentWorker
+
         if not self._project_id:
             _tip(self, self.theme, "请先新建或选择一个项目。")
             return
@@ -1188,12 +1219,6 @@ class _ProjectWorkspace(QWidget):
             _tip(self, self.theme, "请先设置项目目标或在输入框填写指令。")
             return
 
-        try:
-            resolved = resolve_model_for_project(project, self.store.settings)
-        except ValueError as e:
-            _tip(self, self.theme, str(e))
-            return
-
         self._status_before_chat = None
         self._worker_mode = "run"
         self.store.set_status(
@@ -1205,22 +1230,23 @@ class _ProjectWorkspace(QWidget):
         )
         self._schedule_essentials_refresh()
 
-        req = RunRequest(
-            project=project,
-            project_root=self.store.path_for(project.id),
-            user_message=user_message,
-            resolved=resolved,
-            approval=project.approval.copy(),
-            max_steps=self.store.settings.max_steps,
-        )
         self._worker_project_id = self._project_id  # 发起时捕获，运行中切项目不串写
-        self._runner = AgentRunner(self.store.settings)
-        self._worker = AgentWorker(self._runner, req, parent=self, mode="run")
+        self._worker = AgentWorker(
+            self.store.settings,
+            project,
+            self.store.path_for(project.id),
+            user_message,
+            project.approval.copy(),
+            self.store.settings.max_steps,
+            parent=self,
+            mode="run",
+        )
         self._timeline.begin_run()
         self._worker.event_emitted.connect(self._on_engine_event)
         self._worker.approval_needed.connect(self._on_approval_needed)
         self._worker.ask_user_needed.connect(self._on_ask_user_needed)
         self._worker.finished_result.connect(self._on_engine_finished)
+        self._worker.model_error.connect(self._on_worker_model_error)
         self._actions.set_running(True)
         self._actions.set_cache_stats("")
         self._actions.hide_approval()
@@ -1343,6 +1369,22 @@ class _ProjectWorkspace(QWidget):
             self._timeline.resume_after_approval(approved=False)
             self._worker.reject_all("用户拒绝该操作")
 
+    def _on_worker_model_error(self, err: str):
+        """worker 线程发现模型解析失败：复位 UI 并提示（不写进程事件）。"""
+        target = self._worker_project_id or self._project_id
+        self._worker = None
+        self._worker_mode = "run"
+        self._actions.set_running(False)
+        self._actions.hide_approval()
+        if target:
+            prev = self._status_before_chat
+            self._status_before_chat = None
+            restore = prev if prev and prev != ProjectStatus.RUNNING else ProjectStatus.IDLE
+            self.store.set_status(target, restore, current_step="待模型")
+            self._schedule_essentials_refresh()
+        self._worker_project_id = None
+        _tip(self, self.theme, err)
+
     def _on_engine_finished(self, result: object):
         self._actions.set_running(False)
         self._actions.hide_approval()
@@ -1397,7 +1439,6 @@ class _ProjectWorkspace(QWidget):
             self._status_before_chat = None
             self._worker_mode = "run"
             self._worker = None
-            self._runner = None
             self._worker_project_id = None
             self._schedule_essentials_refresh()
             self._refresh_context_usage()
@@ -1453,7 +1494,6 @@ class _ProjectWorkspace(QWidget):
                 project.artifacts_summary = ", ".join(names)
                 self.store.save(project)
         self._worker = None
-        self._runner = None
         self._worker_mode = "run"
         self._worker_project_id = None
         self._schedule_essentials_refresh()
@@ -1543,6 +1583,8 @@ class _ProjectWorkspace(QWidget):
 
     def _on_summarize(self):
         """人工发起：根据当前时间线写入一条经验（后台线程，避免卡住 UI）。"""
+        from wokbee.engine.worker import LessonWorker
+
         if not self._project_id:
             _tip(self, self.theme, "请先选择项目。")
             return
@@ -1580,18 +1622,6 @@ class _ProjectWorkspace(QWidget):
         if not summary:
             summary = (project.goal or "人工总结当前会话")[:800]
 
-        try:
-            resolved = resolve_model_for_project(project, self.store.settings)
-        except ValueError:
-            from types import SimpleNamespace
-
-            resolved = SimpleNamespace(
-                provider_name="unknown",
-                model_id="unknown",
-                api_key="",
-                api_host="",
-            )
-
         notes = (
             "- 本条由用户点击「总结经验」人工发起。\n"
             "- 需要实时数据时必须联网，禁止凭记忆编造。\n"
@@ -1600,16 +1630,6 @@ class _ProjectWorkspace(QWidget):
         if errors:
             notes = f"- 时间线错误摘录：{errors[:300]}\n" + notes
 
-        req = RunRequest(
-            project=project,
-            project_root=self.store.path_for(project.id),
-            user_message=project.goal or summary,
-            resolved=resolved,  # type: ignore[arg-type]
-            approval=project.approval.copy(),
-            max_steps=self.store.settings.max_steps,
-        )
-        runner = AgentRunner(self.store.settings)
-        self._runner = runner
         self._worker_mode = "lesson"
         self._status_before_lesson = project.status
         self.store.set_status(
@@ -1622,8 +1642,10 @@ class _ProjectWorkspace(QWidget):
         self._worker_project_id = self._project_id  # 发起时捕获，运行中切项目不串写
 
         worker = LessonWorker(
-            runner,
-            req,
+            self.store.settings,
+            project,
+            self.store.path_for(project.id),
+            user_message=project.goal or summary,
             outcome=outcome,
             summary=summary,
             errors=errors,
@@ -1641,7 +1663,6 @@ class _ProjectWorkspace(QWidget):
     def _restore_after_lesson(self):
         target = self._worker_project_id or self._project_id
         self._lesson_worker = None
-        self._runner = None
         self._worker_mode = "run"
         self._actions.set_running(False)
         if not target:

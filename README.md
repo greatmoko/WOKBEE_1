@@ -3,7 +3,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-greatmoko%2FWOKBEE__1-blue?logo=github)](https://github.com/greatmoko/WOKBEE_1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.1.0**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
+**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.0**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
 在同一套界面中集成三类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**，统一对接 OpenAI 兼容 API。
 
 ### 设计思想
@@ -118,7 +118,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python main.py
 ```
 
-启动成功后，窗口标题显示 **WokBee v0.1.0**。
+启动成功后，窗口标题显示 **WokBee v0.2.0**。
 
 ### 5. 日常使用快捷方式（可选）
 
@@ -264,7 +264,7 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 
 ## 版本
 
-当前版本：**0.1.0**
+当前版本：**0.2.0**
 
 ---
 

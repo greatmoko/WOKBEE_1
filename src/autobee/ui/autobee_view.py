@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, Signal, QTimer, QThread, QSize
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QLineEdit,
     QTextEdit, QComboBox, QScrollArea, QPushButton, QStackedWidget,
-    QSizePolicy, QListWidget, QListWidgetItem, QDialog,
+    QSizePolicy, QListWidget, QListWidgetItem, QDialog, QMessageBox,
 )
 
 from apscheduler.triggers.cron import CronTrigger
@@ -1112,8 +1112,19 @@ class _TaskDetail(QWidget):
         if task_type == TaskType.WOKBEE:
             pid = data["project_id"]
             if not pid:
+                # 不再静默放弃：提示用户补齐项目（NL 生成也可能缺 project_id）
+                QMessageBox.warning(
+                    self, "缺少关联项目",
+                    "WokBee 任务需要关联一个项目，请先在下方填写项目 ID。",
+                )
+                self._project_id.setFocus()
                 return
             if self.project_store.get(pid) is None:
+                QMessageBox.warning(
+                    self, "项目不存在",
+                    f"项目 {pid} 不存在，请重新选择。",
+                )
+                self._project_id.setFocus()
                 return
 
         if self._task_id and self.store.get(self._task_id):

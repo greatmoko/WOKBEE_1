@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QStackedWidget, QWidget
 
 from tokbee.ui.styles.theme import Theme
 
@@ -44,8 +44,17 @@ __all__ = [
 ]
 
 
+# 无项目时的「欢迎」占位 tab 键；真实项目键为其 project_id
+_WELCOME_TAB = "__welcome__"
+
+
 class WokBeeView(QWidget):
-    """wokbee 主页面：中栏项目列表 + 右栏三段工作区。"""
+    """wokbee 主页面：左侧项目列表 + 右侧单工作区（无独立 tab 条）。
+
+    项目切换全由左侧栏驱动，右侧只显示当前选中项目的工作区。每个项目各有独立的
+    _ProjectWorkspace 与 worker；被切走时其工作区仅隐藏（不销毁），任务仍在后台线程继续运行，
+    切回即见当次运行的实时进度。多个项目可**同时运行**（引擎本就按 project_id 隔离）。
+    """
 
     def __init__(
         self,
@@ -58,6 +67,7 @@ class WokBeeView(QWidget):
         self.theme = theme
         self.settings = settings or WokBeeSettings()
         self.store = store or ProjectStore(self.settings)
+        self._workspaces: dict[str, _ProjectWorkspace] = {}
         self._build()
 
     def _build(self):
@@ -70,38 +80,110 @@ class WokBeeView(QWidget):
         self._sidebar.project_changed.connect(self._on_list_changed)
         layout.addWidget(self._sidebar)
 
-        self._workspace = _ProjectWorkspace(self.theme, self.store)
-        self._workspace.status_changed.connect(self._on_workspace_status_changed)
-        layout.addWidget(self._workspace, stretch=1)
+        self._stack = QStackedWidget()
+        # 右侧不强加 tab 条：项目切换由左侧栏驱动；切走的项目工作区仅隐藏不销毁，任务后台继续跑。
+        layout.addWidget(self._stack, stretch=1)
 
-        projects = self.store.list_projects()
-        if projects:
-            self._sidebar.select(projects[0].id)
+        # 不在 __init__ 自动选中项目：默认 tab 是「对话」，本视图不可见；
+        # 项目加载/标签创建推迟到 showEvent（首次真正显示时）再做，启动更快。
+        self._ensure_welcome_tab()
+
+    # ── 工作区标签管理 ────────────────────────────────────────────
+
+    def _make_workspace(self) -> _ProjectWorkspace:
+        ws = _ProjectWorkspace(self.theme, self.store, parent=self._stack)
+        ws.status_changed.connect(self._on_workspace_status_changed)
+        return ws
+
+    def _ws_key(self, ws) -> str | None:
+        for key, w in self._workspaces.items():
+            if w is ws:
+                return key
+        return None
+
+    def _add_ws(self, ws: _ProjectWorkspace) -> int:
+        # 只入栈不显示：切换到该项目时才由 _on_selected 设为当前页
+        return self._stack.addWidget(ws)
+
+    # 无右侧 tab 条：项目「运行中/待审批」状态由侧栏状态点展示，无需维护标签标题。
+    def _ensure_welcome_tab(self) -> None:
+        if _WELCOME_TAB in self._workspaces:
+            return
+        ws = self._make_workspace()
+        self._workspaces[_WELCOME_TAB] = ws
+        self._add_ws(ws)
+
+    def _remove_welcome_tab(self) -> None:
+        ws = self._workspaces.pop(_WELCOME_TAB, None)
+        if ws is None:
+            return
+        idx = self._stack.indexOf(ws)
+        if idx >= 0:
+            self._stack.removeWidget(ws)
+        ws.deleteLater()
+
+    def _workspace_for(self, project_id: str) -> _ProjectWorkspace:
+        ws = self._workspaces.get(project_id)
+        if ws is not None:
+            return ws
+        ws = self._make_workspace()
+        self._workspaces[project_id] = ws
+        ws.load_project(project_id)
+        self._add_ws(ws)
+        return ws
 
     def _on_selected(self, project_id: str):
-        self._workspace.load_project(project_id)
+        # 左侧栏驱动：切换到该项目工作区；其 worker 在后台线程继续运行，不受切换影响。
+        if project_id == "":
+            self._ensure_welcome_tab()
+            self._stack.setCurrentWidget(self._workspaces[_WELCOME_TAB])
+            return
+        if not project_id:
+            return
+        self._remove_welcome_tab()
+        ws = self._workspace_for(project_id)
+        if ws._project_id != project_id:
+            ws.load_project(project_id)
+        else:
+            ws._refresh_essentials()  # 同项目：只刷新要素，保留在跑的实时时间线
+        self._stack.setCurrentWidget(ws)
 
     def _on_list_changed(self):
-        # 删除后无项目时清空工作区
-        if not self.store.list_projects():
-            self._workspace.show_welcome()
+        # 项目已删除 → 关闭对应工作区；无项目时保证有「欢迎」占位
+        for key in list(self._workspaces.keys()):
+            if key == _WELCOME_TAB:
+                continue
+            if self.store.get(key) is None:
+                ws = self._workspaces.pop(key)
+                ws.shutdown()  # 取消/等待在途 worker，再销毁视图
+                idx = self._stack.indexOf(ws)
+                if idx >= 0:
+                    self._stack.removeWidget(ws)
+                ws.deleteLater()
+        if self.store.list_projects():
+            self._remove_welcome_tab()
+        else:
+            self._ensure_welcome_tab()
 
     def _on_workspace_status_changed(self):
-        """工作区状态变更时刷新侧栏，保持「完成/运行中」一致。"""
+        """工作区状态变更时刷新侧栏状态点（运行/待审批在侧栏即可看出）。"""
         self._sidebar.refresh()
 
     def shutdown(self):
-        """退出前收尾：转发给内部工作区取消/等待所有在途 worker。"""
-        self._workspace.shutdown()
+        """退出前收尾：转发给各工作区取消/等待所有在途 worker。"""
+        for ws in self._workspaces.values():
+            if ws is not None:
+                ws.shutdown()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._sidebar.refresh()
-        # 同一项目不要反复 load_project/整表重绘，否则总结经验或弹窗关闭后会跳到旧记录
         sel = self._sidebar._selected_id
         if not sel:
+            # 首次显示本视图时才自动选中第一个项目（启动时默认在「对话」，不进这里）
+            projects = self.store.list_projects()
+            if projects:
+                self._sidebar.select(projects[0].id)
             return
-        if self._workspace._project_id != sel:
-            self._workspace.load_project(sel)
-        else:
-            self._workspace._refresh_essentials()
+        # 同项目不反复 load_project/整表重绘，否则总结经验或弹窗关闭后会跳到旧记录
+        self._on_selected(sel)

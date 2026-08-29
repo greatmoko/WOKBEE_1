@@ -415,6 +415,7 @@ def main() -> None:
             capture_output=True,
             shell=argv is None,
             timeout=TIMEOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
         )
     except subprocess.TimeoutExpired:
         _save(f"脚本执行失败：超时（>{{TIMEOUT}}s）", label=LABEL)

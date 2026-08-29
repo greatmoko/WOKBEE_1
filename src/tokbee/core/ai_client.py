@@ -328,12 +328,13 @@ class AIClient:
             raise AIError(f"网络连接失败 (重试{max_retries}次后仍失败): {last_exc}") from last_exc
 
         try:
-            buffer = ""
+            # 按字节缓冲，只对「完整行」解码：多字节 UTF-8 被切成两块时不再出现 �
+            buf = b""
             for raw_bytes in resp:
-                buffer += raw_bytes.decode("utf-8", errors="replace")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
+                buf += raw_bytes
+                while b"\n" in buf:
+                    line_b, buf = buf.split(b"\n", 1)
+                    line = line_b.strip().decode("utf-8", errors="replace")
                     if not line:
                         continue
                     if line.startswith("data:"):

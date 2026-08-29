@@ -46,7 +46,7 @@ class AutoBeeStore:
                 self._logs[str(tid)] = [
                     JobLog.from_dict(it) for it in items if isinstance(it, dict)
                 ]
-        except (json.JSONDecodeError, OSError, TypeError) as e:
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
             logger.warning("读取 autobee.json 失败: %s", e)
             self._tasks = {}
             self._logs = {}

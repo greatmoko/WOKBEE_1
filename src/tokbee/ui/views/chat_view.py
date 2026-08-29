@@ -449,6 +449,8 @@ class _AIChatWorker(QThread):
                 self._model.api_host, self._model.api_key, self._model.model_id,
                 family=self._model.family,
             )
+            # 让同步请求的等待/退避可被取消（A7）
+            client.cancel_check = lambda: self._cancelled
             if self._stream:
                 self._run_stream(client)
             else:
@@ -475,12 +477,15 @@ class _AIChatWorker(QThread):
         except Exception as e:
             logger.error("AI 流式调用异常: %s", e)
             if has_content:
-                self.stream_done.emit(self.session_id)
+                # 已有部分内容：不再当完整回答落盘，标记为「已中断」由 error 路径保留
+                self.error.emit(self.session_id, f"流式中断（保留部分内容）：{e}")
             else:
                 raise
 
     def _run_sync(self, client: AIClient):
         resp = client.chat(self._messages, settings=self._settings)
+        if self._cancelled:
+            return
         self.non_stream_done.emit(self.session_id, resp.content, resp.reasoning_content)
 
 
@@ -1671,6 +1676,11 @@ class _ChatWorkspace(QWidget):
         if not display_text.strip() and saved_attachments:
             display_text = ""
 
+        # 无模型时先提示再返回：不持久化用户消息、不显示气泡，避免「孤儿提问」（A3）
+        if not self._current_model or not self._current_model.api_host:
+            self._show_tip("请先在「AI配置 → 厂商设置」中配置模型的 API 地址")
+            return
+
         user_msg: dict = {"role": "user", "content": display_text}
         if saved_attachments:
             user_msg["attachments"] = saved_attachments
@@ -1682,10 +1692,6 @@ class _ChatWorkspace(QWidget):
         self._add_bubble("user", display_text, attachments=saved_attachments)
         # 提问后立刻定位到最新用户气泡（布局完成前多次补滚）
         self._scroll_to_latest(force=True)
-
-        if not self._current_model or not self._current_model.api_host:
-            self._show_tip("请先在「AI配置 → 厂商设置」中配置模型的 API 地址")
-            return
 
         params = self._session.get_params()
         params.provider = self._current_model.provider_id
@@ -1711,9 +1717,12 @@ class _ChatWorkspace(QWidget):
         for m in hist:
             atts = m.get("attachments") or []
             img_parts = []
+            doc_parts = []
             for att in atts:
                 path = att.get("path") if isinstance(att, dict) else str(att)
-                if path and is_image(path) and Path(path).is_file():
+                if not path:
+                    continue
+                if is_image(path) and Path(path).is_file():
                     try:
                         b64, mime = read_image_as_base64(path)
                         img_parts.append({
@@ -1722,26 +1731,44 @@ class _ChatWorkspace(QWidget):
                         })
                     except Exception:
                         pass
+                elif is_document(path) and Path(path).is_file():
+                    # 历史条目的文档文本发送时未落盘，这里按路径重新提取（A4）
+                    try:
+                        txt = read_file_as_text(path)
+                    except Exception:
+                        txt = ""
+                    if txt.strip():
+                        doc_parts.append(txt)
             content = m.get("content") or ""
+            if doc_parts:
+                doc_text = "\n\n".join(doc_parts)
+                content = (content + "\n\n" if content else "") + doc_text
+            # 有附件但文本为空时给非空兜底，避免 content:"" 触发部分端点 400（A4）
+            if not content.strip() and (img_parts or atts):
+                content = "（附件）"
             if img_parts:
                 parts = []
-                if content:
+                if content.strip():
                     parts.append({"type": "text", "text": content})
                 parts.extend(img_parts)
                 api_messages.append({"role": m["role"], "content": parts})
             else:
                 api_messages.append({"role": m["role"], "content": content})
         return api_messages
+        return api_messages
 
-    def _assemble_api_messages(self, api_user_content, params: SessionSettings) -> list[dict]:
-        assert self._session is not None
+    def _assemble_api_messages(self, api_user_content, params: SessionSettings, session=None) -> list[dict]:
+        # 按传入会话组装，缺省用当前显示会话。压缩/发送回调必须用「发起时」的会话，
+        # 不能用 self._session —— 否则压缩 worker 运行期间切到别的会话，会用错上下文。
+        sess = session or self._session
+        assert sess is not None
         ctx_window = 0
         max_out = params.max_tokens
         if self._current_model:
             ctx_window = int(self._current_model.context_window or 0)
         summary, hist = ctxman.build_context_message_dicts(
-            messages=self._session.messages,
-            compaction_points=self._session.compaction_points,
+            messages=sess.messages,
+            compaction_points=sess.compaction_points,
             system_prompt=params.system_prompt,
             max_context_message_count=params.max_context_message_count,
             context_window=ctx_window,
@@ -1762,7 +1789,9 @@ class _ChatWorkspace(QWidget):
         if not self._current_model:
             self._set_sending(False)
             return
-        api_messages = self._assemble_api_messages(api_user_content, params)
+        # 历史必须按该 sid 对应会话组装，而非当前显示会话（压缩/异步回调期间可能已切会话）
+        session = self.manager.get(sid) or self._session
+        api_messages = self._assemble_api_messages(api_user_content, params, session=session)
         use_stream = params.stream
         self._cancel_worker_for_session(sid)
 
@@ -1790,14 +1819,18 @@ class _ChatWorkspace(QWidget):
         worker.start()
         self._refresh_context_ring()
 
-    def _compute_usage(self, *, include_draft: bool = True) -> ctxman.ContextUsage:
-        params = self._session.get_params() if self._session else SessionSettings()
+    def _compute_usage(self, *, include_draft: bool = True, session=None) -> ctxman.ContextUsage:
+        # 传 session 时为「非当前显示会话」计算（如压缩回调对发起会话做决策），
+        # 此时输入框草稿/待附图片属当前视图，不应混入其它会话。
+        sess = session or self._session
+        visible = sess is self._session
+        params = sess.get_params() if sess else SessionSettings()
         ctx_window = int(self._current_model.context_window or 0) if self._current_model else 0
-        draft = self._input_box.toPlainText() if include_draft else ""
-        pending_imgs = sum(1 for p in self._pending_files if is_image(p))
+        draft = self._input_box.toPlainText() if (include_draft and visible) else ""
+        pending_imgs = (sum(1 for p in self._pending_files if is_image(p))) if visible else 0
         return ctxman.estimate_session_usage(
-            messages=self._session.messages if self._session else [],
-            compaction_points=self._session.compaction_points if self._session else [],
+            messages=sess.messages if sess else [],
+            compaction_points=sess.compaction_points if sess else [],
             system_prompt=params.system_prompt,
             max_context_message_count=params.max_context_message_count,
             context_window=ctx_window,
@@ -1831,10 +1864,12 @@ class _ChatWorkspace(QWidget):
         self._pending_send = None
         self._start_compaction(manual=True)
 
-    def _start_compaction(self, *, manual: bool):
-        if not self._session:
+    def _start_compaction(self, *, manual: bool, session=None):
+        # session 缺省为当前显示会话；压缩回调期间可能切走，回调要用「发起时」的会话对象
+        sess = session or self._session
+        if not sess:
             return
-        plan = ctxman.plan_compaction(self._session.messages, self._session.compaction_points)
+        plan = ctxman.plan_compaction(sess.messages, sess.compaction_points)
         if plan is None:
             if manual:
                 self._show_tip("当前对话较短，无需压缩")
@@ -1867,22 +1902,24 @@ class _ChatWorkspace(QWidget):
         )
         self._compact_worker = worker
         worker.finished.connect(
-            lambda summary, boundary, pin, m=manual: self._on_compact_done(
-                summary, boundary, m, pin_end=pin
+            lambda summary, boundary, pin, m=manual, s=sess: self._on_compact_done(
+                summary, boundary, m, pin_end=pin, sess=s
             )
         )
         worker.failed.connect(lambda err, m=manual: self._on_compact_failed(err, m))
         worker.start()
         self._refresh_context_ring()
 
-    def _on_compact_done(self, summary: str, boundary: int, manual: bool, pin_end: int = 0):
+    def _on_compact_done(self, summary: str, boundary: int, manual: bool, pin_end: int = 0, sess=None):
         self._compact_worker = None
-        if not self._session:
+        # 用「发起压缩时」的会话，而非当前显示会话（压缩期间用户可能已切换）
+        session = sess or self._session
+        if session is None:
             self._set_sending(False)
             self._pending_send = None
             return
-        self._session.compaction_points = ctxman.append_compaction_point(
-            self._session.compaction_points,
+        session.compaction_points = ctxman.append_compaction_point(
+            session.compaction_points,
             summary=summary,
             boundary_index=boundary,
             pin_end=pin_end,
@@ -1896,7 +1933,7 @@ class _ChatWorkspace(QWidget):
         if self._pending_send:
             ps = self._pending_send
             self._pending_send = None
-            usage = self._compute_usage(include_draft=False)
+            usage = self._compute_usage(include_draft=False, session=session)
             params = ps["params"]
             self._compact_rounds += 1
             if (
@@ -1904,7 +1941,7 @@ class _ChatWorkspace(QWidget):
                 and ctxman.needs_compaction(usage, auto_compaction=params.auto_compaction)
             ):
                 self._pending_send = ps
-                self._start_compaction(manual=False)
+                self._start_compaction(manual=False, session=session)
             else:
                 self._compact_rounds = 0
                 self._start_chat_request(ps["sid"], ps["api_user_content"], params)
@@ -2285,10 +2322,51 @@ class _ChatWorkspace(QWidget):
             return
         self._set_sending(False)
         self._refresh_context_ring()
-        if hasattr(self, "_stream_wrapper") and self._stream_wrapper:
-            self._stream_wrapper.deleteLater()
+        # 有部分流式内容：保留气泡并标注「已中断」，不落盘为完整回答（见 A2）
+        partial = (
+            (self._stream_content or "").strip()
+            or (self._stream_reasoning or "").strip()
+            or (getattr(self, "_think_buf", None) or "").strip()
+        )
+        if partial and getattr(self, "_stream_wrapper", None):
+            self._stream_ui_timer.stop()
+            self._flush_stream_ui()
+            if hasattr(self, "_think_buf") and self._think_buf:
+                if self._in_think_tag:
+                    self._show_reasoning_chunk(self._think_buf)
+                else:
+                    self._show_content_chunk(self._think_buf)
+                self._think_buf = ""
+            if not self._stream_content.strip() and self._stream_reasoning.strip():
+                self._stream_content = self._stream_reasoning
+                self._stream_reasoning = ""
+                if self._stream_reply_label:
+                    self._stream_reply_label.setMarkdown(self._stream_content)
+                if self._stream_thinking_frame:
+                    self._stream_thinking_frame.setVisible(False)
+                    self._stream_thinking_frame = None
+            if self._stream_phase == "reasoning" and self._stream_thinking_frame:
+                self._convert_thinking_to_collapsible()
+            if self._stream_reply_label:
+                self._stream_reply_label.set_height_cap(0)
+                banner = f"\n\n> ⚠ **回复中断**（保留部分内容）：{(error_msg or '未知错误')[:200]}"
+                self._stream_reply_label.setMarkdown(
+                    (self._stream_content or "") + banner
+                )
+                self._stream_reply_label._update_height()
             self._stream_wrapper = None
-        self._show_tip(f"AI 回复失败:\n{error_msg}")
+            self._stream_reply_label = None
+            self._stream_reasoning_label = None
+            self._stream_thinking_frame = None
+            self._stream_thinking_header = None
+            self._stream_ui_dirty_content = False
+            self._stream_ui_dirty_reasoning = False
+            self._scroll_to_bottom()
+        else:
+            if getattr(self, "_stream_wrapper", None):
+                self._stream_wrapper.deleteLater()
+                self._stream_wrapper = None
+            self._show_tip(f"AI 回复失败:\n{error_msg}")
 
     def _show_params_dialog(self):
         if not self._session:

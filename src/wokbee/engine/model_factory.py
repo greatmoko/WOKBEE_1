@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
@@ -61,6 +63,7 @@ def _inject_reasoning() -> None:
 
 
 _THROTTLE_PATCHED = False
+_THROTTLE_LOCK = threading.Lock()
 
 
 def _apply_throttle_patch() -> None:
@@ -72,9 +75,12 @@ def _apply_throttle_patch() -> None:
     节流器 `ai_throttle` 为进程级单例，间隔实时读设置。
     """
     global _THROTTLE_PATCHED
-    if _THROTTLE_PATCHED:
-        return
-    _THROTTLE_PATCHED = True
+    # 标志位检查-设置必须加锁：否则并发线程会在检查时都看到 False，
+    # 各自包装 _generate/_stream，导致每次请求等两次节流（C1）。
+    with _THROTTLE_LOCK:
+        if _THROTTLE_PATCHED:
+            return
+        _THROTTLE_PATCHED = True
 
     from wokbee.engine.ai_throttle import ai_throttle
 
@@ -132,8 +138,20 @@ def _apply_throttle_patch() -> None:
         setattr(ChatOpenAI, "_astream", _as_wrapped)
 
 
-def build_chat_model(resolved: ResolvedModel, *, temperature: float = 0.2) -> ChatOpenAI:
-    """使用 OpenAI 兼容 Chat Completions（非 Responses API）。"""
+def build_chat_model(
+    resolved: ResolvedModel,
+    *,
+    temperature: float = 0.2,
+    timeout: float | None = None,
+) -> ChatOpenAI:
+    """使用 OpenAI 兼容 Chat Completions（非 Responses API）。
+
+    timeout>0 时给单次模型请求挂硬超时：真正卡死的连接会在此范围内抛错，避免
+    agent.stream() 永久阻塞在模型调用上——那样「终止」只能翻到下一个 chunk 边界才生效，
+    用户点停止后任务会一直卡在运行中/待审核。流式响应的读超时按「相邻字节间隔」计，
+    持续出 token 的正常流式不受影响，只拦真正无响应的挂死连接。
+    max_retries=1：不重试一次就卡死的请求（默认 2 会把一次挂起放大成三次）。
+    """
     _apply_throttle_patch()
     base = normalize_base_url(resolved.api_host)
     if not base:
@@ -144,9 +162,13 @@ def build_chat_model(resolved: ResolvedModel, *, temperature: float = 0.2) -> Ch
         raise ValueError("未指定模型。")
 
     _inject_reasoning()
-    return ChatOpenAI(
-        model=resolved.model_id,
-        api_key=resolved.api_key,
-        base_url=base,
-        temperature=temperature,
-    )
+    kwargs: dict = {
+        "model": resolved.model_id,
+        "api_key": resolved.api_key,
+        "base_url": base,
+        "temperature": temperature,
+        "max_retries": 1,
+    }
+    if timeout and timeout > 0:
+        kwargs["timeout"] = float(timeout)
+    return ChatOpenAI(**kwargs)

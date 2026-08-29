@@ -80,4 +80,8 @@ class Application:
     def run(self) -> int:
         """启动应用主循环，返回退出码。"""
         self.window.show()
+        # 窗口先显示，再在后台线程预加载引擎（deepagents 栈），避免拖慢启动
+        from wokbee.engine import start_engine_warmup
+
+        start_engine_warmup()
         return self.qt_app.exec()

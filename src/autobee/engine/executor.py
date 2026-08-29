@@ -10,10 +10,10 @@ from typing import Any, Callable
 
 from tokbee.core.ai_client import AIClient
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
+from tokbee.core.subprocess_util import nowin
 
 from wokbee.core.models import ApprovalFlags, Project, ProjectEvent, ProjectStatus
 from wokbee.core.project_store import ProjectStore
-from wokbee.engine.runner import AgentRunner, RunRequest, resolve_model_for_project
 from wokbee.core.settings import WokBeeSettings
 
 from autobee.core.models import ScheduledTask, TaskType
@@ -44,15 +44,23 @@ class TaskExecutor:
         # 按 project_id 加锁，防两个任务并发跑同一项目、共用 checkpointer 互相覆盖
         self._project_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
-        self._progress_handler: Callable[[str], None] | None = None
+        # 进度回调按 task_id 键控，避免两个并发任务互相覆盖、把 A 的进度写进 B 的 last_message
+        self._progress_handlers: dict[str, Callable[[str], None]] = {}
+        self._progress_guard = threading.Lock()
 
-    def set_progress_handler(self, handler) -> None:
-        self._progress_handler = handler
+    def set_progress_handler(self, task_id: str, handler: Callable[[str], None] | None) -> None:
+        with self._progress_guard:
+            if handler is None:
+                self._progress_handlers.pop(task_id, None)
+            else:
+                self._progress_handlers[task_id] = handler
 
-    def _emit_progress(self, message: str) -> None:
-        if self._progress_handler:
+    def _emit_progress(self, task_id: str, message: str) -> None:
+        with self._progress_guard:
+            handler = self._progress_handlers.get(task_id)
+        if handler:
             try:
-                self._progress_handler(message)
+                handler(message)
             except Exception:
                 logger.exception("进度回调失败")
 
@@ -135,6 +143,7 @@ class TaskExecutor:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                creationflags=nowin(),
             )
         except subprocess.TimeoutExpired:
             return {"ok": False, "message": "", "error": f"脚本执行超时（> {timeout} 秒）"}
@@ -164,6 +173,11 @@ class TaskExecutor:
 
     # ── wokbee ─────────────────────────────────────────────
     def _run_wokbee(self, task: ScheduledTask) -> dict:
+        # 无人值守线程内按需加载引擎（deepagents 栈），避免拖慢启动
+        from wokbee.engine import ensure_engine_warm
+        from wokbee.engine.runner import AgentRunner, RunRequest
+
+        ensure_engine_warm()
         pid = (task.project_id or "").strip()
         if not pid:
             return {"ok": False, "message": "", "error": "未关联 WokBee 项目"}
@@ -194,7 +208,7 @@ class TaskExecutor:
                 self.project_store.set_status(
                     project.id, ProjectStatus.RUNNING, current_step="AutoBee 定时触发",
                 )
-                self._emit_progress("WokBee Agent 运行中…")
+                self._emit_progress(task.id, "WokBee Agent 运行中…")
                 result = runner.run(req)
             except Exception as e:
                 logger.exception("定时运行 WokBee 项目失败: %s", pid)
@@ -231,6 +245,8 @@ class TaskExecutor:
 
     def _resolve_exec_model(self, task: ScheduledTask, project: Project) -> ResolvedModel:
         """优先任务约束的 exec 模型，否则回落到项目自身解析链。"""
+        from wokbee.engine.runner import resolve_model_for_project
+
         if task.exec_provider and task.exec_model_id:
             resolved = self.provider_store.resolve(task.exec_provider, task.exec_model_id)
             if resolved:
@@ -249,7 +265,7 @@ class TaskExecutor:
                 logger.exception("写入项目事件失败")
             brief = (content or "").replace("\n", " ").strip()
             if brief:
-                self._emit_progress(f"[{kind}] {brief[:120]}")
+                self._emit_progress(task.id, f"[{kind}] {brief[:120]}")
 
         def _on_approval(pending: list):
             # 无人值守：自动放行

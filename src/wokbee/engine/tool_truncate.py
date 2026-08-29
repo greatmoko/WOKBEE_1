@@ -2,15 +2,69 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
 from pathlib import Path
 from typing import Any, Callable
 
 
 logger = logging.getLogger("wokbee")
+
+# 单个工具执行超时：超过时限立即返回失败结果，交给 Agent 接管。
+# 人在环工具（ask_user 在工具体内 interrupt()）与子代理工具（task）不套硬超时，
+# 否则会吞掉 graph interrupt 或误杀长时间合法的子代理运行。
+TOOL_TIMEOUT_EXEMPT = frozenset({"ask_user", "task", "request_access"})
+
+# 供同步工具超时使用的共享线程池（进程级、跨运行复用）。
+_TOOL_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(8, min(16, (os.cpu_count() or 2) + 4)),
+    thread_name_prefix="wokbee-tool",
+)
+
+
+def tool_timeout_result(tool_name: str, timeout: float) -> str:
+    return (
+        f"工具 `{tool_name}` 执行超时（> {timeout:g} 秒），已被终止并交由 AI 接管。"
+        "请拆成更小的步骤，或改用更轻量的替代方式。"
+    )
+
+
+def _callable_with_timeout(fn: Callable, tool_name: str, timeout: float) -> Callable:
+    """给工具执行挂上超时：超时返回失败结果，其余异常照常抛出。
+
+    - 异步 coroutine 用 asyncio.wait_for，可真正取消。
+    - 同步函数用共享线程池跑 + result(timeout)：超时后主线程返回失败。
+      被放弃的线程会继续到其自身收尾（execute/网络工具自带子进程与连接超时，
+      因而不会被无限占用）；纯 Python 线程无法在进程内强杀，此为已知边界。
+    """
+    if not timeout or timeout <= 0 or tool_name in TOOL_TIMEOUT_EXEMPT:
+        return fn
+    if inspect.iscoroutinefunction(fn):
+        async def _aw(*args, **kwargs):
+            try:
+                return await asyncio.wait_for(fn(*args, **kwargs), timeout=timeout)
+            except asyncio.TimeoutError:
+                return tool_timeout_result(tool_name, timeout)
+            except asyncio.CancelledError:
+                return tool_timeout_result(tool_name, timeout)
+
+        _aw.__name__ = getattr(fn, "__name__", "_aw")
+        return _aw
+
+    def _sw(*args, **kwargs):
+        future = _TOOL_EXECUTOR.submit(fn, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except _FutureTimeout:
+            return tool_timeout_result(tool_name, timeout)
+
+    _sw.__name__ = getattr(fn, "__name__", "_sw")
+    return _sw
 
 
 TOOL_RESULT_MAX_CHARS = 12_000
@@ -26,8 +80,15 @@ def tool_name_of(tool: Any) -> str:
 
 
 def sort_tools_by_name(tools: list) -> list:
-    """稳定排序，避免 MCP 返回顺序抖动破坏 tools 前缀。"""
-    return sorted(list(tools or []), key=lambda t: tool_name_of(t).lower())
+    """稳定排序，避免 MCP 返回顺序抖动破坏 tools 前缀。
+
+    顶层按小写名排序；同名（含大小写不一致）再用原名作二级键兜底，
+    保证不同轮次即便输入顺序不同，也得到完全一致的排序。
+    """
+    return sorted(
+        list(tools or []),
+        key=lambda t: (tool_name_of(t).lower(), tool_name_of(t)),
+    )
 
 
 def prefix_fingerprint(system_prompt: str, tool_names: list[str]) -> str:
@@ -74,8 +135,9 @@ def wrap_tools_truncate_results(
     *,
     project_root: Path | None = None,
     max_chars: int = TOOL_RESULT_MAX_CHARS,
+    tool_timeout: float | None = None,
 ) -> list:
-    """包装工具返回值，避免超长 callback 污染后续前缀增长。"""
+    """包装工具返回值：超长截断 + 单工具超时。"""
     dump_dir = None
     if project_root is not None:
         dump_dir = Path(project_root) / "workspace"
@@ -83,14 +145,27 @@ def wrap_tools_truncate_results(
     wrapped: list = []
     for tool in tools or []:
         try:
-            wrapped.append(_wrap_one_tool(tool, dump_dir=dump_dir, max_chars=max_chars))
+            wrapped.append(
+                _wrap_one_tool(
+                    tool,
+                    dump_dir=dump_dir,
+                    max_chars=max_chars,
+                    tool_timeout=tool_timeout,
+                )
+            )
         except Exception:
             logger.exception("包装工具失败，使用原工具：%s", tool_name_of(tool))
             wrapped.append(tool)
     return wrapped
 
 
-def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
+def _wrap_one_tool(
+    tool: Any,
+    *,
+    dump_dir: Path | None,
+    max_chars: int,
+    tool_timeout: float | None = None,
+) -> Any:
     name = tool_name_of(tool)
 
     def _truncate(result: Any) -> Any:
@@ -124,7 +199,7 @@ def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
     # 异步入口（async @tool / MCP 等）必须一并包装，否则 ainvoke 走 coroutine 时绕过截断
     coro = getattr(tool, "coroutine", None)
     if inspect.iscoroutinefunction(coro):
-        aw = _hook(coro)
+        aw = _hook(_callable_with_timeout(coro, name, tool_timeout))
         try:
             return tool.model_copy(update={"coroutine": aw})
         except Exception:
@@ -137,7 +212,7 @@ def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
     # StructuredTool / BaseTool：优先包 _run / func
     if hasattr(tool, "func") and callable(getattr(tool, "func")):
         orig = tool.func
-        newfunc = _hook(orig)
+        newfunc = _hook(_callable_with_timeout(orig, name, tool_timeout))
         update = {"func": newfunc}
         if inspect.iscoroutinefunction(orig):
             # func 为协程时同步替换 coroutine，避免 ainvoke 返回裸协程
@@ -159,7 +234,7 @@ def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
             # 异步 _run：优先包配套的异步 _arun（ainvoke 实际走它）
             arun = getattr(tool, "_arun", None)
             if inspect.iscoroutinefunction(arun):
-                aw = _hook(arun)
+                aw = _hook(_callable_with_timeout(arun, name, tool_timeout))
                 try:
                     object.__setattr__(tool, "_arun", aw)
                     return tool
@@ -178,9 +253,7 @@ def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
                     pass
             return tool
 
-        def hooked_run(*args, **kwargs):
-            return _truncate(orig_run(*args, **kwargs))
-
+        hooked_run = _hook(_callable_with_timeout(orig_run, name, tool_timeout))
         try:
             object.__setattr__(tool, "_run", hooked_run)
         except Exception:
@@ -193,7 +266,7 @@ def _wrap_one_tool(tool: Any, *, dump_dir: Path | None, max_chars: int) -> Any:
         # 若只包 _run，自定义 async 工具经 ainvoke 会绕过截断，把前缀撑大、命中率掉。
         arun = getattr(tool, "_arun", None)
         if inspect.iscoroutinefunction(arun):
-            aw = _hook(arun)
+            aw = _hook(_callable_with_timeout(arun, name, tool_timeout))
             try:
                 object.__setattr__(tool, "_arun", aw)
             except Exception:

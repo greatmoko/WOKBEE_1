@@ -30,6 +30,11 @@ DEFAULTS = {
     "ai_interval_ms": 0,
     # 是否把 DeepSeek 官方服务端搜索注册成 deepseek_web_search 工具
     "enable_deepseek_search": True,
+    # 单个工具执行超时（秒）：超时立即终止并返回失败，交由 AI 接管。
+    "tool_timeout_seconds": 90,
+    # 单次模型请求超时（秒）：真卡死的连接在此范围内抛错，避免运行永久卡在「运行中」。
+    # 流式读超时按相邻字节间隔计，持续出 token 的正常流式不受限，仅拦无响应的挂死连接。
+    "model_timeout_seconds": 180,
     # 已授权的附加目录（项目外）：Agent 可经 /ext/<slug>/ 虚拟路径用文件工具访问。
     # 元素为 {"name": <slug>, "path": <绝对路径>}，全局共享、跨项目生效。
     "additional_directories": [],
@@ -299,3 +304,25 @@ class WokBeeSettings:
     @ai_interval_ms.setter
     def ai_interval_ms(self, value: int) -> None:
         self.set("ai_interval_ms", max(0, int(value or 0)))
+
+    @property
+    def tool_timeout_seconds(self) -> int:
+        try:
+            return max(5, int(self.get("tool_timeout_seconds", 90) or 90))
+        except (TypeError, ValueError):
+            return 90
+
+    @tool_timeout_seconds.setter
+    def tool_timeout_seconds(self, value: int) -> None:
+        self.set("tool_timeout_seconds", max(5, min(3600, int(value))))
+
+    @property
+    def model_timeout_seconds(self) -> int:
+        try:
+            return max(10, int(self.get("model_timeout_seconds", 180) or 180))
+        except (TypeError, ValueError):
+            return 180
+
+    @model_timeout_seconds.setter
+    def model_timeout_seconds(self, value: int) -> None:
+        self.set("model_timeout_seconds", max(10, min(3600, int(value))))

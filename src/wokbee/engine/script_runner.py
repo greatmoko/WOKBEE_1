@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from wokbee.core.paths import scripts_dir
 from wokbee.engine.archive_guard import command_touches_archives
+from tokbee.core.subprocess_util import nowin
 from wokbee.engine.runtime_env import collect_runtime_env, enrich_shell_env
 
 logger = logging.getLogger("wokbee")
@@ -309,6 +310,7 @@ def run_one_script(
             timeout=timeout_sec,
             env=env,
             shell=use_shell,
+            creationflags=nowin(),
         )
         out = _decode_bytes(proc.stdout)
         err = _decode_bytes(proc.stderr)

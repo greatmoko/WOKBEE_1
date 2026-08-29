@@ -141,6 +141,7 @@ def command_touches_archives(command: str | None) -> bool:
 
 
 from wokbee.engine.runtime_env import enrich_shell_env, build_execute_invocation
+from tokbee.core.subprocess_util import nowin
 
 
 def _shell_env(base: dict | None = None, *, project_root: str | Path | None = None) -> dict[str, str]:
@@ -317,6 +318,7 @@ class ArchiveDeniedBackend(LocalShellBackend):
                 timeout=effective_timeout,
                 env=env,
                 cwd=cwd,
+                creationflags=nowin(),
                 **run_kw,
             )
             output_parts: list[str] = []

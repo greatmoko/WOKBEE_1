@@ -22,6 +22,30 @@ def _clean(value: str | None) -> str:
     return (value or "").replace("\x00", "").strip()
 
 
+def _as_int(value: Any, default: int) -> int:
+    """防御式 int：损坏值（如 '120s'）安全落到默认，不让启动崩溃。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """真正的布尔解析：字符串 'false'/'0'/'off' 视为假，规避 bool('false')==True。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in ("true", "yes", "1", "on"):
+        return True
+    if s in ("false", "no", "0", "off", ""):
+        return False
+    return default
+
+
 def _normalize_script_lang(value: Any) -> str:
     s = _clean(str(value or "")).lower()
     if s in ("js", "javascript", "node", "nodejs"):
@@ -132,16 +156,16 @@ class ScheduledTask:
             task_type=ttype,
             schedule=_clean(data.get("schedule") or "") or "*/30 * * * *",
             cron_text=_clean(data.get("cron_text")),
-            enabled=bool(data.get("enabled", True)),
+            enabled=_as_bool(data.get("enabled"), True),
             content=_clean(data.get("content")),
-            use_ai=bool(data.get("use_ai", False)),
+            use_ai=_as_bool(data.get("use_ai"), False),
             code=_clean(data.get("code")),
             script_lang=_normalize_script_lang(data.get("script_lang")),
-            timeout_s=max(1, int(data.get("timeout_s") or 120)),
+            timeout_s=max(1, _as_int(data.get("timeout_s") or 120, 120)),
             project_id=_clean(data.get("project_id")),
             user_message=_clean(data.get("user_message")),
-            max_steps=max(1, int(data.get("max_steps") or 40)),
-            push_wecom=bool(data.get("push_wecom", False)),
+            max_steps=max(1, _as_int(data.get("max_steps") or 40, 40)),
+            push_wecom=_as_bool(data.get("push_wecom"), False),
             webhook_url=_clean(data.get("webhook_url")),
             msgtype=_clean(data.get("msgtype") or "") or "text",
             mention=_clean(data.get("mention")),

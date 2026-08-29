@@ -30,7 +30,24 @@ class ContextUsage:
 def estimate_text_tokens(text: str) -> int:
     if not text:
         return 0
-    return max(1, (len(text) + 3) // 4)
+    # CJK 感知：中文等全角字符约 1 字 = 1 token，其余仍按英文启发式 (n+3)//4。
+    # 旧值把中文按 4 字=1 token 低估约 4 倍，导致压缩/裁剪启动过晚。
+    cjk = 0
+    others = 0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x4E00 <= cp <= 0x9FFF  # CJK 统一表意
+            or 0x3400 <= cp <= 0x4DBF  # 扩展 A
+            or 0x3000 <= cp <= 0x303F  # CJK 标点
+            or 0xFF00 <= cp <= 0xFFEF  # 全角符号/字母
+            or 0x3040 <= cp <= 0x30FF  # 日文假名
+            or 0xAC00 <= cp <= 0xD7AF  # 韩文
+        ):
+            cjk += 1
+        else:
+            others += 1
+    return max(1, cjk + (others + 3) // 4)
 
 
 def estimate_content_tokens(content: Any) -> int:

@@ -223,8 +223,12 @@ class SchedulerService:
         task.last_status = TaskRunStatus.RUNNING.value
         task.last_message = "运行中…"
         task.last_run = log.started_at
-        self.store.save_task(task)
-        self.store.append_log(log)
+        # 启动日志单独 try：写盘失败也不应让任务卡在 _running_tasks（B3）
+        try:
+            self.store.save_task(task)
+            self.store.append_log(log)
+        except Exception:
+            logger.exception("任务 %s 启动日志写入失败", task_id)
         self.notifier.task_started.emit(task_id)
 
         def _on_progress(message: str) -> None:
@@ -234,11 +238,14 @@ class SchedulerService:
             if len(brief) > 200:
                 brief = brief[:200] + "…"
             task.last_message = brief
-            self.store.save_task(task)
+            try:
+                self.store.save_task(task)
+            except Exception:
+                logger.exception("任务 %s 进度写盘失败", task_id)
             self.notifier.task_progress.emit(task_id, brief)
 
         try:
-            self.executor.set_progress_handler(_on_progress)
+            self.executor.set_progress_handler(task_id, _on_progress)
             result = self.executor.run(task)
             ok = bool(result.get("ok"))
             log.status = TaskRunStatus.SUCCESS if ok else TaskRunStatus.FAILED
@@ -253,12 +260,19 @@ class SchedulerService:
             task.last_status = TaskRunStatus.FAILED.value
             task.last_message = str(e)
         finally:
-            self.executor.set_progress_handler(None)
+            self.executor.set_progress_handler(task_id, None)
             log.finished_at = _now()
             log.duration_s = max(0.0, (datetime.now() - started_dt).total_seconds())
-            self.store.update_log(log)
+            try:
+                self.store.update_log(log)
+            except Exception:
+                logger.exception("任务 %s 结束日志写盘失败", task_id)
             task.last_run = log.started_at
-            self.store.save_task(task)
+            try:
+                self.store.save_task(task)
+            except Exception:
+                logger.exception("任务 %s 结束状态写盘失败", task_id)
+            # 无论写成功与否，都保证任务从运行集合移除，防止永久卡死（B3）
             with self._lock:
                 self._running_tasks.discard(task_id)
             self.notifier.task_finished.emit(

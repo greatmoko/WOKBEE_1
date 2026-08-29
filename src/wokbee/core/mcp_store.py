@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import shlex
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,6 +15,30 @@ from typing import Any
 from tokbee.core.config import Config
 
 logger = logging.getLogger("wokbee")
+
+# 进程级 MCP 工具缓存：以「已启用连接配置指纹」为 key。同一会话内多次 build_agent
+# （chat 模式每轮重建 Agent）复用同一批工具对象，保证工具 JSON-Schema 字节级稳定，
+# 否则 MCP 每轮重连重取可能导致字段顺序/内容抖动，直接破坏 DeepSeek 前缀缓存。
+_MCP_TOOLS_CACHE: dict[str, list] = {}
+_MCP_TOOLS_LOCK = threading.Lock()
+_MCP_TOOLS_CACHE_MAX = 16
+
+
+def _connections_fingerprint(connections: dict[str, dict]) -> str:
+    """对连接配置做稳定 SHA-256：只依赖配置内容，不依赖插入顺序。"""
+    h = hashlib.sha256()
+    for key in sorted(connections or {}):
+        h.update(key.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            payload = json.dumps(
+                connections[key], sort_keys=True, ensure_ascii=False
+            )
+        except (TypeError, ValueError):
+            payload = str(connections[key])
+        h.update(payload.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:16]
 
 
 @dataclass
@@ -143,11 +170,22 @@ class McpStore:
             conns[key] = c
         return conns
 
-    def load_tools(self) -> list:
-        """同步加载已启用 MCP 的工具列表。"""
+    def load_tools(self, *, use_cache: bool = True) -> list:
+        """同步加载已启用 MCP 的工具列表。
+
+        同一配置指纹的结果会缓存：chat 模式每轮重建 Agent 时复用同一批工具对象，
+        保证工具 schema 字节级稳定，利于 DeepSeek 前缀缓存；仅在配置变化（启停/增删）
+        时指纹改变、强制重连重取。
+        """
         connections = self.build_connections()
         if not connections:
             return []
+        fp = _connections_fingerprint(connections)
+        if use_cache:
+            with _MCP_TOOLS_LOCK:
+                cached = _MCP_TOOLS_CACHE.get(fp)
+                if cached is not None:
+                    return list(cached)
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
         except ImportError:
@@ -155,14 +193,22 @@ class McpStore:
             return []
 
         async def _load():
-            client = MultiServerMCPClient(connections)
-            return await client.get_tools()
+            # async with 确保 aclose()：避免 stdio MCP 子进程每次加载后泄漏（B4）
+            async with MultiServerMCPClient(connections) as client:
+                return await client.get_tools()
 
         try:
-            return list(asyncio.run(_load()))
+            tools = list(asyncio.run(_load()))
         except Exception:
             logger.exception("加载 MCP 工具失败")
             raise
+        if use_cache:
+            with _MCP_TOOLS_LOCK:
+                # 仅成功才写入；超上限时移除最早条目，避免长期运行无限增长
+                if len(_MCP_TOOLS_CACHE) >= _MCP_TOOLS_CACHE_MAX:
+                    _MCP_TOOLS_CACHE.pop(next(iter(_MCP_TOOLS_CACHE)), None)
+                _MCP_TOOLS_CACHE[fp] = tools
+        return tools
 
 
 def re_key(name: str) -> str:

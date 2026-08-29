@@ -418,9 +418,11 @@ class _McpTestWorker(QThread):
 
             async def _test():
                 conn = self._server.to_connection()
-                client = MultiServerMCPClient({self._server.name or self._server.id: conn})
-                # 超时保护：MCP 服务器无响应时不许拖死后台线程（进而占住 UI）。
-                return await asyncio.wait_for(client.get_tools(), timeout=8)
+                # 超时保护 + async with 确保 aclose()：连接测试后不残留 MCP 子进程（B4）。
+                async with MultiServerMCPClient({
+                    self._server.name or self._server.id: conn,
+                }) as client:
+                    return await asyncio.wait_for(client.get_tools(), timeout=8)
 
             tools = asyncio.run(_test())
             names = ", ".join(getattr(t, "name", str(t)) for t in tools[:12])

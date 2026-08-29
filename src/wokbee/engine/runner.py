@@ -21,6 +21,10 @@ from langgraph.types import Command
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
 
 from wokbee.core.models import ApprovalFlags, Project, MAX_PROJECT_TITLE_LEN
+from wokbee.core.timeline_format import (
+    format_tool_call_for_timeline,
+    format_tool_callback_for_timeline,
+)
 from wokbee.core.paths import (
     ensure_project_layout,
     list_deliverable_names,
@@ -110,6 +114,10 @@ class RunResult:
 _CHECKPOINTERS: dict[str, InMemorySaver] = {}
 _AGENTS: dict[str, Any] = {}
 _LOCK = threading.Lock()
+
+# 【会话上下文】块的固定首行，用作「是否已注入」的稳定哨兵（内容可随项目变更，
+# 但首行字面量恒定）。判定已注入时以此为准，不依赖 project.title/goal 等易变内容。
+_CONTEXT_SENTINEL = "【会话上下文】"
 
 
 def _get_checkpointer(project_id: str) -> InMemorySaver:
@@ -334,69 +342,6 @@ def _format_tool_call(tc: Any) -> str:
     if len(args_s) > 400:
         args_s = args_s[:400] + "…"
     return f"{name}({args_s})"
-
-
-def _format_arg_preview(key: str, value: Any, *, max_chars: int = 240) -> str:
-    """把单个工具参数格式化为可读多行文本（避免整段 JSON 挤成一行）。"""
-    if value is None:
-        return "null"
-    if isinstance(value, (dict, list)):
-        raw = json.dumps(value, ensure_ascii=False, indent=2)
-    else:
-        raw = str(value)
-    # 还原字面 \\n，便于阅读 write_file content
-    if key in ("content", "command", "text", "body", "code") and "\\n" in raw and "\n" not in raw[:200]:
-        raw = raw.replace("\\n", "\n").replace("\\t", "\t")
-    raw = raw.strip()
-    if len(raw) > max_chars:
-        return raw[:max_chars].rstrip() + f"\n…（共 {len(raw)} 字，已截断）"
-    return raw
-
-
-def format_tool_call_for_timeline(name: str, args: dict | None) -> str:
-    """时间线展示：多行 Markdown，避免 call 挤成一行。"""
-    name = (name or "tool").strip() or "tool"
-    args = args if isinstance(args, dict) else {}
-    lines = [f"**call:** `{name}`"]
-    if not args:
-        lines.append("- （无参数）")
-        return "\n".join(lines)
-    # 优先展示路径类字段，content 放后并截断
-    preferred = (
-        "file_path",
-        "path",
-        "command",
-        "url",
-        "query",
-        "method",
-        "content",
-        "body",
-        "text",
-    )
-    keys = [k for k in preferred if k in args] + [
-        k for k in args.keys() if k not in preferred
-    ]
-    for k in keys[:12]:
-        preview = _format_arg_preview(str(k), args.get(k))
-        if "\n" in preview:
-            lines.append(f"- **{k}:**")
-            for ln in preview.splitlines():
-                lines.append(f"  {ln}")
-        else:
-            lines.append(f"- **{k}:** {preview}")
-    if len(args) > 12:
-        lines.append(f"- …另有 {len(args) - 12} 个参数未展示")
-    return "\n".join(lines)
-
-
-def format_tool_callback_for_timeline(name: str, body: str) -> str:
-    name = (name or "tool").strip() or "tool"
-    text = (body or "").strip()
-    if len(text) > 2000:
-        text = text[:2000].rstrip() + f"\n…（已截断，共约 {len(body or '')} 字）"
-    if not text:
-        return f"**callback:** `{name}`\n\n（无输出）"
-    return f"**callback:** `{name}`\n\n```\n{text}\n```"
 
 
 def build_success_path_from_messages(messages: list, *, limit: int = 40) -> str:
@@ -724,11 +669,15 @@ class AgentRunner:
         workspace_sandbox(req.project_root).mkdir(parents=True, exist_ok=True)
         _ensure_memory_files(req.project_root, req.project)
 
-        model = build_chat_model(req.resolved)
+        model = build_chat_model(
+            req.resolved,
+            timeout=self.settings.model_timeout_seconds,
+        )
         project_inner = ArchiveDeniedBackend(
             root_dir=str(req.project_root),
             virtual_mode=True,
-            timeout=180,
+            # 单工具执行超时：execute 子进程在内会按此阈值被杀掉（从 180s 固定值改为可配置）
+            timeout=int(self.settings.tool_timeout_seconds),
             inherit_env=True,
         )
         project_backend = project_inner
@@ -898,7 +847,11 @@ class AgentRunner:
             + ([deepseek_search] if deepseek_search is not None else [])
             + list(mcp_tools)
         )
-        tools = wrap_tools_truncate_results(tools, project_root=req.project_root)
+        tools = wrap_tools_truncate_results(
+            tools,
+            project_root=req.project_root,
+            tool_timeout=self.settings.tool_timeout_seconds,
+        )
         tool_names = [tool_name_of(t) for t in tools]
         fp = prefix_fingerprint(system_prompt, tool_names)
 
@@ -970,12 +923,51 @@ class AgentRunner:
     def _with_session_context(self, user_message: str) -> str:
         return compose_user_with_context(user_message, self._session_context_block)
 
-    def _inject_session_context_once(self, payload: Any) -> Any:
-        """仅首条用户消息注入【会话上下文】，保持后续轮次 append-only 前缀稳定。"""
+    def _context_already_in_state(self, agent, config: dict) -> bool:
+        """读 graph 已持久化消息：历史首条 user 是否已注入【会话上下文】。
+
+        run()/run_chat() 每次都会新建 AgentRunner，本 runner 的 _context_injected
+        无法跨轮生效，因此落到 checkpointer 的持久化消息上判重：只要首条 user 的消息
+        以固定哨兵头开头，就说明本会话已注入过——即使换成新 runner 也成立。
+        这保证第 2+ 轮的 user 只含纯问题，命中段最小化。
+        """
+        try:
+            state = agent.get_state(config)
+        except Exception:
+            return False
+        values = getattr(state, "values", None) or {}
+        messages = values.get("messages") if isinstance(values, dict) else None
+        if not messages:
+            return False
+        for m in messages:
+            role = str(
+                getattr(m, "type", None)
+                or (m.get("role") if isinstance(m, dict) else "")
+                or ""
+            )
+            if role not in ("user", "human", "HumanMessage"):
+                continue
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+            if _message_text(content).startswith(_CONTEXT_SENTINEL):
+                return True
+        return False
+
+    def _inject_session_context_once(
+        self, payload: Any, *, agent=None, config: dict | None = None
+    ) -> Any:
+        """仅首条用户消息注入【会话上下文】，保持后续轮次 append-only 前缀稳定。
+
+        去重依据二选一（满足即跳过）：
+        1. 本 runner 已注入过（同轮内多阶段/续跑去重）；
+        2. graph 持久化消息已含固定哨兵头（跨新 runner 去重）。
+        """
         if self._context_injected or not isinstance(payload, dict):
             return payload
         msgs = payload.get("messages")
         if not isinstance(msgs, list) or not msgs:
+            return payload
+        if agent is not None and config is not None and self._context_already_in_state(agent, config):
+            self._context_injected = True
             return payload
         out_msgs = []
         injected = False
@@ -1309,7 +1301,7 @@ class AgentRunner:
             )
             self._stream_until_pause(
                 agent,
-                self._inject_session_context_once(payload),
+                self._inject_session_context_once(payload, agent=agent, config=config),
                 config,
                 seen_msg_ids,
             )
@@ -1317,7 +1309,7 @@ class AgentRunner:
             self._emit("agent", "继续下一阶段 AI 执行…", {"phase": "hint"})
             self._stream_until_pause(
                 agent,
-                self._inject_session_context_once(payload),
+                self._inject_session_context_once(payload, agent=agent, config=config),
                 config,
                 seen_msg_ids,
             )
@@ -1979,7 +1971,11 @@ class AgentRunner:
                             f"模型：{model_label}\n"
                             f"输入：上一份经验 + 运行日志 + 脚本",
                         )
-                        chat = build_chat_model(req.resolved, temperature=0.2)
+                        chat = build_chat_model(
+                            req.resolved,
+                            temperature=0.2,
+                            timeout=self.settings.model_timeout_seconds,
+                        )
                         ai_fields = summarize_lesson_with_ai(
                             model=chat,
                             goal=req.project.goal or req.user_message,

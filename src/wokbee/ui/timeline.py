@@ -33,6 +33,10 @@ BUBBLE_COLLAPSED_HEIGHT = 200
 BUBBLE_COMPACT_HEIGHT = 22
 BUBBLE_COMPACT_CHARS = 80
 SCROLL_STICK_THRESHOLD = 48
+# 时间线虚拟化：初始只实例化**最近** N 条成行，避免一次性物化整条时间线
+# 卡顿首屏/切项目；更早的记录通过顶部「加载更早记录」按钮按批前置。
+INITIAL_RENDER = 120
+LOAD_OLDER_BATCH = 120
 
 
 def _preview_text(full: str, *, max_chars: int = BUBBLE_PREVIEW_CHARS, max_lines: int = BUBBLE_PREVIEW_LINES) -> tuple[str, bool]:
@@ -191,7 +195,7 @@ def _tool_event_display_text(ev: ProjectEvent) -> str:
     if phase == "call" and tool:
         args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
         try:
-            from wokbee.engine.runner import format_tool_call_for_timeline
+            from wokbee.core.timeline_format import format_tool_call_for_timeline
 
             return format_tool_call_for_timeline(tool, args)
         except Exception:
@@ -219,7 +223,7 @@ def _tool_event_display_text(ev: ProjectEvent) -> str:
         if body.startswith("callback:"):
             body = body.split("\n", 1)[-1] if "\n" in body else ""
         try:
-            from wokbee.engine.runner import format_tool_callback_for_timeline
+            from wokbee.core.timeline_format import format_tool_callback_for_timeline
 
             return format_tool_callback_for_timeline(tool, body or content)
         except Exception:
@@ -241,7 +245,7 @@ def _tool_event_display_text(ev: ProjectEvent) -> str:
                 pretty = args_s.replace("\\n", "\n")
                 return f"**call:** `{name}`\n\n```\n{pretty[:2500]}\n```"
             try:
-                from wokbee.engine.runner import format_tool_call_for_timeline
+                from wokbee.core.timeline_format import format_tool_call_for_timeline
 
                 return format_tool_call_for_timeline(name, args)
             except Exception:
@@ -647,7 +651,7 @@ class _ToolStepRow(QFrame):
         parts = []
         if self._args:
             try:
-                from wokbee.engine.runner import format_tool_call_for_timeline
+                from wokbee.core.timeline_format import format_tool_call_for_timeline
 
                 parts.append(format_tool_call_for_timeline(self.tool, self._args))
             except Exception:
@@ -710,6 +714,12 @@ class _Timeline(QFrame):
         self._agent_running = False
         self._scroll_programmatic = False
         self._global_compact = False
+        # 虚拟化窗口：_all_events 为完整历史，_window_lo/_window_hi 为当前已实例化的
+        # 事件下标区间 [lo, hi)；更早的在点「加载更早记录」时按批前置。
+        self._all_events: list[ProjectEvent] = []
+        self._window_lo = 0
+        self._window_hi = 0
+        self._older_btn: QPushButton | None = None
         self._build()
 
     def _build(self):
@@ -797,23 +807,88 @@ class _Timeline(QFrame):
         self._batch_order = []
         self._unmatched_calls = []
         self._pending_rows = set()
+        self._all_events = []
+        self._window_lo = 0
+        self._window_hi = 0
+        self._older_btn = None
 
     def render_events(self, events: list[ProjectEvent]):
-        """完整重绘（仅切换项目 / 归档后使用，运行中勿频繁调用）。"""
+        """完整重绘（仅切换项目 / 归档后使用，运行中勿频繁调用）。
+
+        为避免一次物化整条时间线导致首屏/切项目卡顿，只实例化**最近** `INITIAL_RENDER`
+        条成行；更早的历史通过顶部「加载更早记录」按钮按批前置。
+        """
         self._clear()
+        self._all_events = list(events)
         if not events:
             self.show_empty("尚无执行记录。在下方输入目标或指令，然后点击运行。")
             return
-        for widget in self._build_rows_from_events(events):
-            if isinstance(widget, _ToolStepRow):
-                self._track_row(widget)
-                widget = self._wrap_tool_row(widget)
-            self._layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
+        if len(events) <= INITIAL_RENDER:
+            self._window_lo, self._window_hi = 0, len(events)
+            rows = self._build_rows_from_events(events)
+        else:
+            self._window_lo = len(events) - INITIAL_RENDER
+            self._window_hi = len(events)
+            self._create_older_button()
+            rows = self._build_rows_from_events(events[self._window_lo:self._window_hi])
+        self._append_rows(rows)
         self._sync_bubble_widths()
         self.reset_scroll_anchor()
         self._schedule_scroll_to_bottom(force=True)
         if self._global_compact:
             self.set_global_compact_mode(True)
+
+    def _append_rows(self, rows: list[QWidget]) -> None:
+        """把一排（已按旧→新排序的）行挂到布局尾部，统一处理工具步骤行的包装。"""
+        for widget in rows:
+            if isinstance(widget, _ToolStepRow):
+                self._track_row(widget)
+                widget = self._wrap_tool_row(widget)
+            self._layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
+
+    def _create_older_button(self) -> None:
+        """时间线顶部放一个「加载更早记录」按钮，把剩余的早期事件按批前置。"""
+        accent = self.theme.colors.get("accent", "#2f6fed")
+        btn = QPushButton(f"▲ 更早记录（剩余 {self._window_lo} 条）")
+        btn.setObjectName("loadOlder")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip("点击加载更早的执行记录")
+        btn.setStyleSheet(
+            "QPushButton { border: none; background: transparent; font-weight: 600; "
+            f"color: {accent}; padding: 6px; text-align: center; }}"
+        )
+        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn.clicked.connect(self._load_older)
+        self._older_btn = btn
+        self._layout.insertWidget(0, btn, 0, Qt.AlignmentFlag.AlignTop)
+
+    def _load_older(self) -> None:
+        """前置一批更早的事件（旧→新），保持时间线顶部向下为旧→新。"""
+        if self._older_btn is None or self._window_lo <= 0:
+            return
+        batch = min(LOAD_OLDER_BATCH, self._window_lo)
+        new_lo = self._window_lo - batch
+        rows = self._build_rows_from_events(self._all_events[new_lo:self._window_lo])
+        idx = 1  # 「加载更早记录」按钮固定在 index 0，批行紧随其后
+        for widget in rows:
+            if isinstance(widget, _ToolStepRow):
+                self._track_row(widget)
+                widget = self._wrap_tool_row(widget)
+            self._layout.insertWidget(idx, widget, 0, Qt.AlignmentFlag.AlignTop)
+            idx += 1
+        self._window_lo = new_lo
+        if self._window_lo <= 0:
+            self._remove_older_button()
+        elif self._older_btn is not None:
+            self._older_btn.setText(f"▲ 更早记录（剩余 {self._window_lo} 条）")
+        self._sync_bubble_widths()
+
+    def _remove_older_button(self) -> None:
+        if self._older_btn is None:
+            return
+        btn = self._older_btn
+        self._older_btn = None
+        btn.deleteLater()
 
     def append_event(self, ev: ProjectEvent):
         """增量追加一条气泡（运行中用，避免整表重绘闪烁）。"""
@@ -822,6 +897,9 @@ class _Timeline(QFrame):
             w = self._layout.itemAt(0).widget()
             if isinstance(w, QLabel) and ("尚无执行记录" in (w.text() or "") or "选择或新建一个项目开始" in (w.text() or "")):
                 self._clear()
+        # 追加事件也进入虚拟化窗口（供「加载更早记录」保持区间一致）
+        self._all_events.append(ev)
+        self._window_hi += 1
         if ev.kind == "tool":
             self._route_tool_event(ev)
         else:
