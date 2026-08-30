@@ -240,11 +240,13 @@ class MainWindow(QMainWindow):
             self.theme,
             svc.role_manager,
             wokbee_settings=svc.wokbee_settings,
+            gateway_manager=svc.gateway_manager,
         )
         wokbee = WokBeeView(
             self.theme,
             store=svc.wokbee_store,
             settings=svc.wokbee_settings,
+            gateway_manager=svc.gateway_manager,
         )
         autobee = AutoBeeView(
             self.theme,
@@ -268,6 +270,8 @@ class MainWindow(QMainWindow):
 
         # 启动定时任务调度（幂等）
         svc.autobee_scheduler.start()
+        # 启动消息网关（幂等；未启用会打印提示而不报错）
+        svc.gateway_manager.start()
 
     def _switch_view(self, nav_id: str):
         view = self._views.get(nav_id)
@@ -277,6 +281,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         try:
             self._services.autobee_scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        try:
+            self._services.gateway_manager.shutdown(wait=False)
         except Exception:
             pass
         # 先收尾后台线程（agent/lesson/压缩/改名），避免 QThread 仍在运行时销毁

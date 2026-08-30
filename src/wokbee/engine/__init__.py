@@ -39,13 +39,29 @@ def _import_engine_stack() -> None:
 
 def _do_warmup() -> None:
     import logging
+    import time
 
-    try:
-        _import_engine_stack()
-    except Exception:
-        logging.getLogger("wokbee").exception(
-            "引擎后台预加载失败（首次运行时将按需加载）"
-        )
+    logger = logging.getLogger("wokbee")
+    for attempt in (1, 2):
+        try:
+            _import_engine_stack()
+            return
+        except Exception as exc:  # noqa: BLE001
+            # PySide6 6.11.x(shiboken) 与 Python 3.14 存在一个**偶发、非致命**的导入竞态：
+            # shiboken 注入的 meta_path 钩子 inspect 新导入模块（feature 检测）时，在**非主线程**
+            # 导入 pydantic 会递归进 inspect.getsource → unwrap。只发生在预加载后台线程，
+            # 且属临时性——重试一次通常即通过；失败也不致命（引擎随后按需加载）。
+            if attempt == 1:
+                logger.warning(
+                    "引擎后台预加载遇临时竞态（attempt 1），重试：%s: %s",
+                    type(exc).__name__, exc,
+                )
+                time.sleep(0.5)
+                continue
+            logger.warning(
+                "引擎后台预加载未完成（首次运行时将按需加载）：%s: %s",
+                type(exc).__name__, exc,
+            )
 
 
 def start_engine_warmup() -> threading.Thread | None:

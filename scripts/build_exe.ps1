@@ -25,6 +25,11 @@ Write-Host "Building WokBee..." -ForegroundColor Cyan
     --paths "src" `
     --collect-all PySide6 `
     --collect-all deepagents `
+    --collect-all lark_oapi `
+    --collect-all weixin_ilink `
+    --collect-all cryptography `
+    --collect-all websockets `
+    --collect-all pycryptodome `
     --collect-submodules langchain_openai `
     --collect-submodules langgraph `
     --collect-submodules langchain_mcp_adapters `

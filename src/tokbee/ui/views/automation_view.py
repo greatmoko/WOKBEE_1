@@ -66,6 +66,7 @@ class _SubNav(QFrame):
         ("wokbee_settings", "🐝", "WokBee 设置"),
         ("skills", "📚", "Skills"),
         ("mcp", "🔌", "MCP"),
+        ("gateway", "📡", "消息网关"),
     ]
 
     def __init__(self, theme: Theme, parent=None):
@@ -702,12 +703,14 @@ class AutomationView(QWidget):
         theme: Theme,
         role_manager: AIRoleManager | None = None,
         wokbee_settings=None,
+        gateway_manager=None,
         parent=None,
     ):
         super().__init__(parent)
         self.theme = theme
         self._role_manager = role_manager or AIRoleManager()
         self._wokbee_settings = wokbee_settings
+        self._gateway_manager = gateway_manager
         self._pages: dict[str, QWidget] = {}
         self._build()
 
@@ -756,6 +759,11 @@ class AutomationView(QWidget):
         mcp_page = McpWorkspace(self.theme, McpStore())
         self._pages["mcp"] = mcp_page
         self._stack.addWidget(mcp_page)
+
+        from wokbee.ui.gateway_workspace import GatewayWorkspace
+        gateway_page = GatewayWorkspace(self.theme, self._gateway_manager)
+        self._pages["gateway"] = gateway_page
+        self._stack.addWidget(gateway_page)
 
         self._subnav.select("ai_roles")
 

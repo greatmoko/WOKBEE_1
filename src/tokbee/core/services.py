@@ -24,6 +24,7 @@ class ServiceRegistry:
         self._autobee_store = None
         self._autobee_executor = None
         self._autobee_scheduler = None
+        self._gateway_manager = None
 
     @property
     def config(self) -> Config:
@@ -77,3 +78,18 @@ class ServiceRegistry:
                 store=self.autobee_store, executor=self.autobee_executor,
             )
         return self._autobee_scheduler
+
+    @property
+    def gateway_manager(self):
+        if self._gateway_manager is None:
+            from tokbee.core.provider_store import ProviderStore
+            from wokbee.gateway.manager import GatewayManager
+            from wokbee.gateway.store import GatewayStore
+            self._gateway_manager = GatewayManager(
+                store=GatewayStore(self._config),
+                settings=self.wokbee_settings,
+                project_store=self.wokbee_store,
+                provider_store=ProviderStore(),
+                parent=None,
+            )
+        return self._gateway_manager

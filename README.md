@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.0**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
-在同一套界面中集成三类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**，统一对接 OpenAI 兼容 API。
+在同一套界面中集成四类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**、**消息网关（多 IM 手机遥控本地 Agent）**，统一对接 OpenAI 兼容 API。
 
 ### 设计思想
 
@@ -24,6 +24,25 @@
 
 ---
 
+## 版本更新
+
+### v0.1.x —— 基础版
+- **TokBee**：多会话 AI 对话，支持文件附件（图片 / PDF / Word / Excel / PPT）、模型与角色选择、上下文用量环形指示器、流式 Markdown 输出。
+- **WokBee**：项目级 AI Agent，独立工作区，支持文件读写、联网检索、本机命令执行、脚本固化、经验沉淀、Skills / MCP 挂载、人机协作审批。
+- **AutoBee**：定时任务调度（文本 / 脚本 / WokBee 项目），自然语言生成 Cron，企业微信推送。
+- **AIConfig**：AI 角色库、厂商设置、TokBee / WokBee 设置、Skills、MCP。
+- 基础 UI 与系统样式、本地数据管理等。
+
+### v0.2.0 —— 本轮新增（含消息网关）
+- **消息网关（新）**：用手机上的 IM 扫码绑定本机一个项目 Agent，在微信 / 飞书里聊天即遥控本地 Agent 干活。支持多频道**同时在线**、按频道独立绑定默认项目、白名单限流、`@项目ID` 切换 / `#new` / `#list` / `#run` / `#help` 指令。
+- **多项目独立运行**：WokBee 改用「左侧栏驱动」单工作区；项目切换仅隐藏不销毁，各项目 worker 在后台线程独立继续运行，互不影响。
+- **单工具执行超时**：`tool_timeout_seconds`（默认 90s），超时立即终止并返回失败，交由 AI 接管；联网 / 脚手架 / execute 自终止，ask_user / task / request_access 豁免。
+- **单模型请求超时 + 终止修复**：`model_timeout_seconds`（默认 180s）并关闭重试，主 Agent 与「总结经验」模型均已套用；修复「点终止后一直卡在运行中 / 待审核」。
+- **附加目录白名单**：项目执行时需访问项目外路径时，可申请挂载 `/ext/<slug>/…` 虚拟路径。
+- **引擎后台预热**：启动时在后台线程预载引擎栈，避免首个 Agent 运行时同步导入卡住 UI；并对 PySide6 / Python 3.14 的偶发导入竞态做重试容错。
+
+---
+
 ## ⚠️ 重要声明
 
 > **请在使用前仔细阅读以下内容。**
@@ -38,6 +57,7 @@
    - API Key、对话内容、项目文件均保存在**本机**；发送至 AI 厂商的内容取决于你所选 API。  
    - WokBee Agent 可在本机执行命令（`execute`），使用前请理解审批策略。  
    - 使用第三方 AI 接口时，**请勿将涉密资料**粘贴进对话或 Agent 目标。
+   - **消息网关**：手机 IM 绑定后，对方可直接遥控本机 Agent 执行任务。请仅在**可信网络与可控账号**下启用，并务必配置「允许列表」限流；个人微信自动化存在**封号风险**，请自行评估。
 
 4. **按现状提供（AS IS）**  
    软件可能存在 Bug、不稳定或未覆盖的边界情况，使用后果由使用者自行承担。
@@ -78,7 +98,7 @@ WOKBEE_1/
 | 网络 | 可访问所配置的 AI API |
 | 磁盘 | 建议预留 500 MB 以上 |
 
-主要依赖：PySide6、APScheduler、Deep Agents / LangGraph、httpx、PDF/Office 文档解析等，完整列表见 `requirements.txt`。
+主要依赖：PySide6、APScheduler、Deep Agents / LangGraph、httpx、PDF/Office 文档解析、lark-oapi、weixin-ilink、qrcode 等，完整列表见 `requirements.txt`。
 
 ---
 
@@ -146,6 +166,7 @@ python main.py
 | 5 | **WokBee 设置** | 配置默认模型、执行步数上限、审批策略等 |
 | 6 | （可选）**Skills / MCP** | 挂载全局技能包或外挂 MCP 工具服务器 |
 | 7 | （可选）**AutoBee** | 需要定时任务时，新建任务并保存；可填企业微信 Webhook |
+| 8 | （可选）**消息网关** | 需要用手机遥控本机 Agent 时，进入 AIConfig → 消息网关扫码绑定 |
 
 内置支持的厂商类型包括 OpenAI、Google Gemini、DeepSeek、智谱 GLM、通义千问、Kimi 等 OpenAI 兼容接口；也支持自定义 Host 的中转服务。
 
@@ -153,7 +174,7 @@ python main.py
 
 ## 核心功能
 
-应用左侧一级导航：**TokBee → WokBee → AutoBee → AIConfig → Settings**。
+应用左侧一级导航：**TokBee → WokBee → AutoBee → AIConfig → Settings**；其中 **AIConfig** 内含消息网关页签。
 
 ### TokBee — 多会话 AI 对话
 
@@ -171,7 +192,7 @@ python main.py
 
 面向需要**持续执行、读写文件、跑脚本、产出交付物**的复杂任务。
 
-每个「项目」有独立工作区，Agent 在沙箱目录内运行，支持人机协作审批。
+每个「项目」有独立工作区，Agent 在沙箱目录内运行，支持人机协作审批。项目切换仅隐藏不销毁，各项目 worker 在后台线程**独立并继续运行**，互不影响。
 
 **Agent 能力**
 
@@ -184,6 +205,7 @@ python main.py
 | 经验沉淀 | 任务结束后自动生成 Lesson，供后续项目参考 |
 | Skills / MCP | 挂载技能包或外挂 MCP 工具 |
 | 人机协作 | 写文件、执行命令等可按风险等级要求人工审批 |
+| 超时保护 | 单工具 / 单模型请求分别有硬超时，超时交由 AI 接管，可随时终止 |
 
 **默认工作区路径**：`~/WokBeeWorkspace/`（可在 WokBee 设置中修改）
 
@@ -201,6 +223,43 @@ python main.py
 
 ---
 
+### 消息网关 — 手机 IM 遥控本地 Agent（v0.2.0 新增）
+
+用手机上的微信 / 飞书扫码，把本机一个 WokBee 项目 Agent 绑定为当前频道的默认项目，之后在 IM 里聊天即可遥控本机 WokBee 干活。
+
+> 在 **AIConfig → 消息网关**中配置。
+
+**两个频道、独立在线**
+
+- 飞书（lark-oapi）与微信（Tencent iLink 协议）各自建立独立长连接，**同时运行**，互不影响。
+- 每个频道可单独开关，绑定各自的默认项目。
+
+**首次绑定（扫码）**
+
+1. 选择频道（飞书 / 微信）→ 点击「生成二维码」。
+2. 用手机对应 App 扫码并确认登录。
+3. 绑定成功后，配置该项频道的默认项目，即完成接入。
+
+**发送指令**
+
+| 指令 | 作用 |
+|------|------|
+| `@项目ID` | 切换当前频道默认项目到该项目（示例：`@prj_532273073d4e`）；仅切换、不运行 |
+| `@项目ID 内容` | 切换默认项目，并按 `内容` 运行该项目的 Agent |
+| `#new 描述` | 新建项目，把 `描述` 设为项目目标，并绑定为当前频道默认 |
+| `#list` | 列出所有项目及各自的项目 ID |
+| `#run` | 用当前频道默认项目的「目标」运行 Agent |
+| `#help` | 返回可与 WokBee 交互的系统指令说明 |
+
+**说明**
+
+- 无前缀的普通消息 → 路由到当前频道的**默认项目**并运行。
+- `@` 专用于切换项目，且**只能按项目 ID**（不再按项目名匹配）。
+- 在面板「允许列表」填写发送者 open_id 后，仅限指定用户可用（空 = 默认放行）。
+- 个人微信自动化存在 **封号风险**；且 iLink 协议为私聊，群聊不在本通道范围。
+
+---
+
 ### AIConfig — 全局 AI 与扩展配置
 
 | 页签 | 作用 |
@@ -208,9 +267,10 @@ python main.py
 | **AI 角色** | 系统提示词角色库 |
 | **厂商设置** | API Key、Host、模型列表、默认模型 |
 | **TokBee 设置** | 新建对话默认参数 |
-| **WokBee 设置** | 默认模型、步数上限、审批策略、节流等 |
+| **WokBee 设置** | 默认模型、步数上限、审批策略、节流、超时等 |
 | **Skills** | 全局技能包目录 |
 | **MCP** | 外挂 MCP 服务器 |
+| **消息网关** | 飞书 / 微信频道绑定、默认项目、允许列表、连接状态 |
 
 ---
 
@@ -220,6 +280,7 @@ python main.py
 |------|------|
 | `~/.wokbee/` | 全局配置、厂商 Key、角色、对话记录、Skills、日志等 |
 | `~/.wokbee/autobee.json` | AutoBee 定时任务与运行日志 |
+| `~/.wokbee/wechat_cursor.txt` | 微信消息去重游标（重启不重放） |
 | `~/WokBeeWorkspace/` | WokBee 各项目目录 |
 
 ---
@@ -238,6 +299,9 @@ A：时间线中有待确认操作，在操作栏或弹窗中批准/拒绝。
 **Q：定时任务没有执行**  
 A：确认应用处于运行状态（AutoBee 调度器随主程序启动）。
 
+**Q：消息网关连不上 / 看不到二维码**  
+A：到 AIConfig → 消息网关，确认该频道已启用且有凭据；飞书需先在手机端扫码授权，微信需用对应账号扫码登录。凭证缺失时面板会有明确提示。
+
 **Q：如何升级版本**  
 A：`git pull` 拉取最新代码（或重新下载 ZIP），在虚拟环境中执行 `pip install -r requirements.txt`；`~/.wokbee/` 配置一般可保留。
 
@@ -253,10 +317,12 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 ├── pyproject.toml
 ├── requirements.txt
 ├── scripts/
-│   └── make_release.ps1    # 打 src zip 发布包（可选）
+│   ├── make_release.ps1    # 打 src zip 发布包（可选）
+│   └── build_exe.ps1       # 用 PyInstaller 打包 exe（可选）
 └── src/
     ├── tokbee/             # 应用壳 + TokBee 对话 + UI 样式
     ├── wokbee/             # WokBee 项目 Agent 工作流
+    │   └── gateway/        # 消息网关：飞书 / 微信频道、路由、扫码绑定
     └── autobee/            # AutoBee 定时任务
 ```
 

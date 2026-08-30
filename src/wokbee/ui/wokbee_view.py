@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QHBoxLayout, QStackedWidget, QWidget
 
 from tokbee.ui.styles.theme import Theme
 
+from wokbee.core.models import ProjectEvent
 from wokbee.core.project_store import ProjectStore
 from wokbee.core.settings import WokBeeSettings
 
@@ -61,12 +62,14 @@ class WokBeeView(QWidget):
         theme: Theme,
         store: ProjectStore | None = None,
         settings: WokBeeSettings | None = None,
+        gateway_manager=None,
         parent=None,
     ):
         super().__init__(parent)
         self.theme = theme
         self.settings = settings or WokBeeSettings()
         self.store = store or ProjectStore(self.settings)
+        self._gateway_manager = gateway_manager
         self._workspaces: dict[str, _ProjectWorkspace] = {}
         self._build()
 
@@ -79,6 +82,10 @@ class WokBeeView(QWidget):
         self._sidebar.project_selected.connect(self._on_selected)
         self._sidebar.project_changed.connect(self._on_list_changed)
         layout.addWidget(self._sidebar)
+        # 手机来消息：网关在后台线程逐条落盘事件 → 实时刷新（不等跑完）；跑完后再做一次终态刷新。
+        if self._gateway_manager is not None:
+            self._gateway_manager.notifier.message_done.connect(self._on_gateway_done)
+            self._gateway_manager.notifier.event_written.connect(self._on_gateway_event)
 
         self._stack = QStackedWidget()
         # 右侧不强加 tab 条：项目切换由左侧栏驱动；切走的项目工作区仅隐藏不销毁，任务后台继续跑。
@@ -168,6 +175,50 @@ class WokBeeView(QWidget):
     def _on_workspace_status_changed(self):
         """工作区状态变更时刷新侧栏状态点（运行/待审批在侧栏即可看出）。"""
         self._sidebar.refresh()
+
+    def _on_gateway_done(self, project_id: str, sender_id: str, reply_brief: str):
+        """手机来消息并已被网关处理完（事件已落盘）→ 实时刷新该项目时间线。
+
+        网关在后台线程里 `append_event`，UI 不主动刷新就看不到；此处经 `message_done`
+        信号（QueuedConnection 回主线程）触发，让桌面时间线与手机对话同步。
+        同时收起网关运行期间显示的「正在执行…」状态条，让时间线回到空闲
+        （否则会一直挂在「运行中」——issue 3）。
+        """
+        if project_id and project_id in self._workspaces:
+            ws = self._workspaces[project_id]
+            if ws._project_id == project_id:
+                # 该项目的桌面 worker 若在同时运行，不打断它的运行态；否则收掉网关的运行态
+                worker_running = ws._worker is not None and ws._worker.isRunning()
+                if not worker_running:
+                    ws._timeline.end_run()
+                # force_timeline: 已渲染过也重绘，追加「手机」相关事件
+                ws.load_project(project_id, force_timeline=True)
+        # 项目 updated_at 变了，刷新左侧列表顺序与状态点
+        self._sidebar.refresh()
+
+    def _on_gateway_event(self, project_id: str, kind: str, content: str, meta):
+        """网关后台线程逐条落盘事件时，实时同步到已打开的项目时间线（不等跑完）。
+
+        复用 `_Timeline.append_event` 的增量追加（含工具 call/callback 原位更新），
+        让手机上的对话流向桌面实时呈现；终态仍由 `_on_gateway_done` 全量重绘兜底。
+        """
+        if not project_id or project_id not in self._workspaces:
+            return
+        ws = self._workspaces[project_id]
+        if ws._project_id != project_id:
+            return
+        meta_d = meta if isinstance(meta, dict) else {}
+        ws._timeline.append_event(ProjectEvent(kind=kind, content=content, meta=meta_d))
+        if kind == "agent":
+            ws._timeline._status(
+                "正在思考…" if str(meta_d.get("phase") or "") == "reasoning" else "正在执行…"
+            )
+        elif kind == "error":
+            ws._timeline._status("出现错误")
+        elif kind == "approval":
+            ws._timeline._status("等待审批…", pulse=False)
+        # 防抖刷新顶栏要素与左侧状态点（项目 archived/updated_at 可能变化）
+        ws._schedule_essentials_refresh()
 
     def shutdown(self):
         """退出前收尾：转发给各工作区取消/等待所有在途 worker。"""
