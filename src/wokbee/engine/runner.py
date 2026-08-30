@@ -20,7 +20,7 @@ from langgraph.types import Command
 
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
 
-from wokbee.core.models import ApprovalFlags, Project, MAX_PROJECT_TITLE_LEN
+from wokbee.core.models import ApprovalFlags, Project, MAX_PROJECT_TITLE_LEN, _now
 from wokbee.core.timeline_format import (
     format_tool_call_for_timeline,
     format_tool_callback_for_timeline,
@@ -789,6 +789,8 @@ class AgentRunner:
             settings=self.settings,
         )
         context_extra: list[str] = list(skills_extra_lines) + access_extra_lines
+        if mode == "run":
+            context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
 
         self._session_context_block = build_session_context_block(
             title=req.project.title,
@@ -1385,10 +1387,11 @@ class AgentRunner:
 
         # 附带近期对话，便于「总结对话后改目标/名称」
         recent = self._recent_events_digest(req.project_root, limit=40)
-        user_content = question
+        sent_note = f"（发送时间：{_now()}）"
+        user_content = f"{question}\n\n{sent_note}"
         if recent:
             user_content = (
-                f"{question}\n\n"
+                f"{question}\n\n{sent_note}\n\n"
                 "——\n【近期时间线摘录（供参考，回答不必复述全文）】\n"
                 f"{recent}"
             )
