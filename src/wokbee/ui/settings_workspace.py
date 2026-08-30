@@ -239,13 +239,17 @@ class WokBeeSettingsWorkspace(QWidget):
         self._tool_timeout.setFixedWidth(120)
         self._tool_timeout.setSuffix(" s")
         self._tool_timeout.setStyleSheet(spin_qss)
-        self._tool_timeout.setToolTip("单个工具执行超过该时长即终止并返回失败，交由 AI 接管")
+        self._tool_timeout.setToolTip(
+            "单个工具执行的【默认】超时；超过该时长即终止并返回失败，交由 AI 接管。"
+            "AI 调用工具时可传 timeout_seconds 覆盖单次等待时长（默认值仅在 AI 未指定时生效）"
+        )
         timeout_row.addWidget(self._tool_timeout)
         timeout_row.addStretch()
         bl.addLayout(timeout_row)
         timeout_hint = QLabel(
-            "execute（子进程）与联网工具各自命中该阈值即被真正终止；"
-            "纯 Python 工具超时则返回失败、退出后台线程。ask_user/task（子代理）不套此超时。"
+            "此值为【默认】超时：联网工具命中即被真正终止，纯 Python 工具超时则返回失败、退出后台线程。"
+            "AI 调用工具时可传 timeout_seconds 覆盖单次等待（如下载大文件传更大值）；"
+            "ask_user/task（子代理）/request_access 不套此超时。"
         )
         timeout_hint.setWordWrap(True)
         timeout_hint.setStyleSheet(hint_label_qss(c))

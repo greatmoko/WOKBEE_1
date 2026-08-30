@@ -10,7 +10,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeout
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
+
+from pydantic import BaseModel, Field, create_model
 
 
 logger = logging.getLogger("wokbee")
@@ -19,6 +21,9 @@ logger = logging.getLogger("wokbee")
 # 人在环工具（ask_user 在工具体内 interrupt()）与子代理工具（task）不套硬超时，
 # 否则会吞掉 graph interrupt 或误杀长时间合法的子代理运行。
 TOOL_TIMEOUT_EXEMPT = frozenset({"ask_user", "task", "request_access"})
+
+# AI 逐调用覆盖默认超时的保留参数名：调用工具时传 `timeout_seconds`，未传则用全局默认值。
+PER_CALL_TIMEOUT_KEY = "timeout_seconds"
 
 # 供同步工具超时使用的共享线程池（进程级、跨运行复用）。
 _TOOL_EXECUTOR = ThreadPoolExecutor(
@@ -34,18 +39,74 @@ def tool_timeout_result(tool_name: str, timeout: float) -> str:
     )
 
 
-def _callable_with_timeout(fn: Callable, tool_name: str, timeout: float) -> Callable:
+def _resolve_tool_timeout(kwargs: dict, default_timeout: float | None) -> float | None:
+    """从调用 kwargs 里读出该次调用的生效超时（秒）。
+
+    规则：AI 显式传 `timeout_seconds` 则优先生效（>0 用之；<=0 视为"不限定"，返回 None）；
+    传了但非法（非数字）回落默认；未传则回落默认；默认 <=0 表示禁用超时。
+    同时把 `timeout_seconds` 从 kwargs 弹出，避免透传给真正的工具函数（其签名不认识它）。
+    """
+    base = None if (default_timeout is None or default_timeout <= 0) else float(default_timeout)
+    per_call = kwargs.pop(PER_CALL_TIMEOUT_KEY, None)
+    if per_call is None:
+        return base
+    try:
+        value = float(per_call)
+    except (TypeError, ValueError):
+        return base
+    return value if value > 0 else None
+
+
+def _inject_timeout_schema(schema: Any) -> Any:
+    """给工具 args_schema 注入可选的 `timeout_seconds` 字段，让模型看得到、传得了。
+
+    通过为原 schema 生成一个带新增字段的子类实现；若 schema 不是 pydantic BaseModel、
+    或注入失败，则原样返回（优雅降级：该工具无法用 timeout_seconds，仅影响覆盖面）。
+    """
+    if schema is None or not (isinstance(schema, type) and issubclass(schema, BaseModel)):
+        return schema
+    if PER_CALL_TIMEOUT_KEY in getattr(schema, "model_fields", {}):
+        return schema
+    try:
+        return create_model(
+            f"{schema.__name__}_WokBeeTimeout",
+            __base__=schema,
+            timeout_seconds=(
+                Optional[float],
+                Field(
+                    default=None,
+                    ge=1,
+                    description=(
+                        "覆盖此工具调用的默认超时（秒）。下载/长时任务可传较大值以延长等待，"
+                        "未传则用全局默认。"
+                    ),
+                ),
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        return schema
+
+
+def _callable_with_timeout(
+    fn: Callable, tool_name: str, default_timeout: float | None
+) -> Callable:
     """给工具执行挂上超时：超时返回失败结果，其余异常照常抛出。
+
+    `default_timeout` 是全局默认；AI 可在调用时传 `timeout_seconds` 覆盖（见
+    `_resolve_tool_timeout`），仅当两者都未提供/无效时才不超时。
 
     - 异步 coroutine 用 asyncio.wait_for，可真正取消。
     - 同步函数用共享线程池跑 + result(timeout)：超时后主线程返回失败。
       被放弃的线程会继续到其自身收尾（execute/网络工具自带子进程与连接超时，
       因而不会被无限占用）；纯 Python 线程无法在进程内强杀，此为已知边界。
     """
-    if not timeout or timeout <= 0 or tool_name in TOOL_TIMEOUT_EXEMPT:
+    if tool_name in TOOL_TIMEOUT_EXEMPT:
         return fn
     if inspect.iscoroutinefunction(fn):
         async def _aw(*args, **kwargs):
+            timeout = _resolve_tool_timeout(kwargs, default_timeout)
+            if not timeout:
+                return await fn(*args, **kwargs)
             try:
                 return await asyncio.wait_for(fn(*args, **kwargs), timeout=timeout)
             except asyncio.TimeoutError:
@@ -57,6 +118,9 @@ def _callable_with_timeout(fn: Callable, tool_name: str, timeout: float) -> Call
         return _aw
 
     def _sw(*args, **kwargs):
+        timeout = _resolve_tool_timeout(kwargs, default_timeout)
+        if not timeout:
+            return fn(*args, **kwargs)
         future = _TOOL_EXECUTOR.submit(fn, *args, **kwargs)
         try:
             return future.result(timeout=timeout)
@@ -167,6 +231,13 @@ def _wrap_one_tool(
     tool_timeout: float | None = None,
 ) -> Any:
     name = tool_name_of(tool)
+    # 往 tools schema 注入可选 `timeout_seconds`，让模型能控制该调用超时；
+    # 豁免工具不注入，避免在人机中断工具上误导模型。
+    timeout_schema = (
+        None
+        if name in TOOL_TIMEOUT_EXEMPT
+        else _inject_timeout_schema(getattr(tool, "args_schema", None))
+    )
 
     def _truncate(result: Any) -> Any:
         if result is None:
@@ -201,10 +272,15 @@ def _wrap_one_tool(
     if inspect.iscoroutinefunction(coro):
         aw = _hook(_callable_with_timeout(coro, name, tool_timeout))
         try:
-            return tool.model_copy(update={"coroutine": aw})
+            update = {"coroutine": aw}
+            if timeout_schema is not None:
+                update["args_schema"] = timeout_schema
+            return tool.model_copy(update=update)
         except Exception:
             try:
                 object.__setattr__(tool, "coroutine", aw)
+                if timeout_schema is not None:
+                    object.__setattr__(tool, "args_schema", timeout_schema)
                 return tool
             except Exception:
                 return tool
@@ -217,6 +293,8 @@ def _wrap_one_tool(
         if inspect.iscoroutinefunction(orig):
             # func 为协程时同步替换 coroutine，避免 ainvoke 返回裸协程
             update["coroutine"] = newfunc
+        if timeout_schema is not None:
+            update["args_schema"] = timeout_schema
         try:
             return tool.model_copy(update=update)
         except Exception:
@@ -224,11 +302,18 @@ def _wrap_one_tool(
                 tool.func = newfunc  # type: ignore[attr-defined]
                 if inspect.iscoroutinefunction(orig):
                     object.__setattr__(tool, "coroutine", newfunc)
+                if timeout_schema is not None:
+                    object.__setattr__(tool, "args_schema", timeout_schema)
                 return tool
             except Exception:
                 return tool
 
     if hasattr(tool, "_run") and callable(getattr(tool, "_run")):
+        if timeout_schema is not None:
+            try:
+                object.__setattr__(tool, "args_schema", timeout_schema)
+            except Exception:
+                pass
         orig_run = tool._run
         if inspect.iscoroutinefunction(orig_run):
             # 异步 _run：优先包配套的异步 _arun（ainvoke 实际走它）
