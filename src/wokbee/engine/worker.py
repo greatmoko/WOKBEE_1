@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from PySide6.QtCore import QThread, Signal
@@ -40,6 +41,7 @@ class AgentWorker(QThread):
         self.runner = None  # 运行到线程内才构造；空闲为 None
         self.request = None
         self._last_pending_count = 0  # 最近一次审批待决数量（由 _on_approval 填充）
+        self._cancel_requested = threading.Event()
 
     def run(self):
         # 在 worker 线程内预热引擎并构造 runner/request：UI 线程绝不 import 重型引擎。
@@ -59,6 +61,12 @@ class AgentWorker(QThread):
             self.model_error.emit(str(e))
             return
 
+        if self._cancel_requested.is_set():
+            self.finished_result.emit(
+                RunResult(ok=False, outcome="cancelled", error="已取消")
+            )
+            return
+
         self.runner = AgentRunner(self._settings)
         self.request = RunRequest(
             project=self._project,
@@ -71,6 +79,8 @@ class AgentWorker(QThread):
         self.runner.on_event = self._on_event
         self.runner.on_approval_needed = self._on_approval
         self.runner.on_ask_user_needed = self._on_ask_user
+        if self._cancel_requested.is_set():
+            self.runner.request_cancel()
 
         try:
             if self.mode == "chat":
@@ -93,6 +103,13 @@ class AgentWorker(QThread):
         self.ask_user_needed.emit(payload)
 
     def cancel(self):
+        self._cancel_requested.set()
+        try:
+            from tokbee.core.subprocess_util import kill_all_cancellable_runs
+
+            kill_all_cancellable_runs()
+        except Exception:
+            pass
         if self.runner is not None:
             self.runner.request_cancel()
 

@@ -3,7 +3,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-greatmoko%2FWOKBEE__1-blue?logo=github)](https://github.com/greatmoko/WOKBEE_1)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.0**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
+**WokBee** 是一个 Windows 桌面 AI 助手（当前版本 **v0.2.1**），已在 [GitHub 开源](https://github.com/greatmoko/WOKBEE_1)。  
 在同一套界面中集成四类能力：**日常对话（TokBee）**、**项目级 Agent 自动化（WokBee）**、**定时任务调度（AutoBee）**、**消息网关（多 IM 手机遥控本地 Agent）**，统一对接 OpenAI 兼容 API。
 
 ### 设计思想
@@ -32,6 +32,11 @@
 - **AutoBee**：定时任务调度（文本 / 脚本 / WokBee 项目），自然语言生成 Cron，企业微信推送。
 - **AIConfig**：AI 角色库、厂商设置、TokBee / WokBee 设置、Skills、MCP。
 - 基础 UI 与系统样式、本地数据管理等。
+
+### v0.2.1 —— 执行超时 / 暂停 / 去掉自动续跑
+- **execute 超时真正生效**：Windows 上 `playwright-cli open` 等会拉起孙进程的命令，不再把 `subprocess.run(timeout=)` 卡死；用墙钟轮询 + 进程树 / Job Object 超时后杀掉并返回失败（默认仍可用设置里的单工具超时，AI 也可传 `timeout` / `timeout_seconds`）。
+- **暂停对交互模式生效**：点击「暂停」立即终止当前本机命令并退出执行管线，不再停在「运行中…」。
+- **去掉自动续跑**：模型本轮答完即结束，不再出现「检测到模型仍在描述下一步、未继续调工具，自动续跑（n/5）」。
 
 ### v0.2.0 —— 本轮新增（含消息网关）
 - **消息网关（新）**：用手机上的 IM 扫码绑定本机一个项目 Agent，在微信 / 飞书里聊天即遥控本地 Agent 干活。支持多频道**同时在线**、按频道独立绑定默认项目、白名单限流、`@项目ID` 切换 / `#new` / `#list` / `#run` / `#help` 指令。
@@ -143,7 +148,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python main.py
 ```
 
-启动成功后，窗口标题显示 **WokBee v0.2.0**。
+启动成功后，窗口标题显示 **WokBee v0.2.1**。
 
 ---
 
@@ -326,7 +331,7 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 
 ## 版本
 
-当前版本：**0.2.0**
+当前版本：**0.2.1**
 
 ---
 

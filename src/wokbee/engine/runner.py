@@ -27,7 +27,6 @@ from wokbee.core.timeline_format import (
 )
 from wokbee.core.paths import (
     ensure_project_layout,
-    list_deliverable_names,
     memory_dir,
     workspace_sandbox,
 )
@@ -36,7 +35,7 @@ from wokbee.engine.approval_policy import (
     build_interrupt_on,
     risk_label_for_tool,
 )
-from wokbee.engine.archive_guard import ArchiveDeniedBackend
+from wokbee.engine.archive_guard import ArchiveDeniedBackend, attach_execute_watch
 from wokbee.engine.access_request import (
     ApprovedDirRegistry,
     build_access_request_tool,
@@ -57,7 +56,6 @@ from wokbee.engine.network_tools import NETWORK_TOOLS
 from wokbee.engine.cache_prefix import (
     CacheHitTracker,
     PrefixGuard,
-    ai_reply_suggests_pending_action,
     build_session_context_block,
     compose_user_with_context,
     prefix_fingerprint,
@@ -220,11 +218,7 @@ def _is_ai_message(msg: Any) -> bool:
 
 
 def _extract_text(messages: list) -> str:
-    """取最近一条**非空** AI 正文（跳过空 content / Tool / Human）。
-
-    续跑后模型常回一条 content=\"\" 的 AIMessage；若只看 messages[-1] 会误判
-    「已无待办」从而中断自动续跑、立刻 incomplete。
-    """
+    """取最近一条**非空** AI 正文（跳过空 content / Tool / Human）。"""
     if not messages:
         return ""
     for msg in reversed(list(messages)):
@@ -587,9 +581,30 @@ class AgentRunner:
 
     def request_cancel(self) -> None:
         self._cancel.set()
+        try:
+            from tokbee.core.subprocess_util import kill_all_cancellable_runs
+
+            kill_all_cancellable_runs()
+        except Exception:
+            pass
         # 若卡在审批/澄清，解开等待
         self.resolve_approval([{"type": "reject", "message": "用户取消运行"}])
         self.resolve_ask_user({"cancelled": True})
+
+    def _cancelled_result(
+        self, req: RunRequest, allow_auto_lesson: bool
+    ) -> RunResult:
+        lesson = None
+        if allow_auto_lesson:
+            lesson = self._maybe_auto_write_lesson(
+                req, "cancelled", "用户取消", ""
+            )
+        return RunResult(
+            ok=False,
+            outcome="cancelled",
+            error="已取消",
+            lesson_id=lesson.id if lesson else "",
+        )
 
     def resolve_approval(self, decisions: list[dict]) -> None:
         self._approval_decisions = decisions
@@ -680,6 +695,8 @@ class AgentRunner:
             timeout=int(self.settings.tool_timeout_seconds),
             inherit_env=True,
         )
+        # 暂停按钮与工具超时共用：execute 轮询此 Event，可在命令执行中途杀进程树
+        project_inner.cancel_event = self._cancel
         project_backend = project_inner
         interrupt_on = build_interrupt_on(req.approval)
         # 项目元信息工具（get_project_info/update_project_title/update_project_goal）始终免费：
@@ -746,6 +763,11 @@ class AgentRunner:
         composite_backend = CompositeBackend(default=project_backend, routes=routes)
         backend = AccessCoerceBackend(
             composite_backend, project_root=req.project_root, registry=access_registry
+        )
+        attach_execute_watch(
+            backend,
+            cancel_event=self._cancel,
+            default_timeout=float(self.settings.tool_timeout_seconds),
         )
 
         mcp_tools: list = []
@@ -992,24 +1014,53 @@ class AgentRunner:
         return payload
 
     def _stream_until_pause(self, agent, input_payload, config: dict, seen: set[str]) -> None:
-        """流式执行，边跑边把消息推到时间线；遇 interrupt 正常返回。"""
-        try:
-            for chunk in agent.stream(
-                input_payload,
-                config=config,
-                stream_mode="updates",
-            ):
-                if self._cancel.is_set():
-                    break
-                for msg in _collect_messages_from_update(chunk):
-                    _emit_message_events(
-                        self._emit,
-                        msg,
-                        seen,
-                        cache_tracker=self._cache_tracker,
-                    )
-        except GraphInterrupt:
-            pass
+        """流式执行，边跑边把消息推到时间线；遇 interrupt 正常返回。
+
+        stream 本身会堵在工具调用里。放到旁路线程跑，本线程轮询暂停：点暂停后立刻
+        杀 execute 进程树；若 stream 仍不退出则放弃等待，避免 UI 永远「运行中」。
+        """
+        if self._cancel.is_set():
+            return
+
+        from tokbee.core.subprocess_util import kill_all_cancellable_runs
+
+        stream_error: list[BaseException] = []
+
+        def _run_stream() -> None:
+            try:
+                for chunk in agent.stream(
+                    input_payload,
+                    config=config,
+                    stream_mode="updates",
+                ):
+                    if self._cancel.is_set():
+                        break
+                    for msg in _collect_messages_from_update(chunk):
+                        _emit_message_events(
+                            self._emit,
+                            msg,
+                            seen,
+                            cache_tracker=self._cache_tracker,
+                        )
+            except GraphInterrupt:
+                pass
+            except Exception as e:  # noqa: BLE001
+                stream_error.append(e)
+
+        t = threading.Thread(target=_run_stream, name="wokbee-agent-stream", daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(0.25)
+            if not self._cancel.is_set():
+                continue
+            kill_all_cancellable_runs()
+            t.join(8)
+            if t.is_alive():
+                logger.warning("暂停后 stream 未退出，放弃等待并结束本轮")
+                self._emit("info", "已暂停：正在退出执行管线（已终止本机命令）。")
+            break
+        if stream_error and not self._cancel.is_set():
+            raise stream_error[0]
         self._check_prefix_guard(agent, config)
 
     def _check_prefix_guard(self, agent, config: dict) -> None:
@@ -1041,24 +1092,6 @@ class AgentRunner:
                     f"本地脚本 `{item.path}` 失败：{item.error or (item.output or '')[:400]}",
                     {"script": item.path, "step_id": item.step_id},
                 )
-
-    def _agent_last_ai_text(self, agent, config: dict) -> str:
-        try:
-            state = agent.get_state(config)
-            values = getattr(state, "values", None) or {}
-            messages = values.get("messages") if isinstance(values, dict) else None
-            if messages:
-                return _extract_text(list(messages))
-        except Exception:
-            pass
-        return ""
-
-    def _tool_events_since(self, start: int) -> int:
-        return sum(
-            1
-            for e in self._run_events[start:]
-            if getattr(e, "kind", "") == "tool"
-        )
 
     def _drain_pending_interrupts(
         self,
@@ -1164,124 +1197,6 @@ class AgentRunner:
             )
         return None
 
-    def _nudge_user_text(self, nudge_i: int, last_text: str) -> str:
-        """按续跑轮次升级指令；英文模型常忽略中文软提示。"""
-        low = (last_text or "").lower()
-        wants_html = any(
-            k in low
-            for k in (
-                "href",
-                "raw html",
-                "rawhtml",
-                "curl",
-                "link structure",
-                "html links",
-                "原始 html",
-                "链接结构",
-            )
-        )
-        html_hint = (
-            "若需要页面链接/href：立即调用 http_get 或 http_request，并设 preserve_html=True"
-            "（不要只说要用 curl）。\n"
-            "If you need href/links: call http_get/http_request with preserve_html=True NOW "
-            "(do not only talk about curl).\n"
-            if wants_html
-            else ""
-        )
-        levels = [
-            (
-                "【系统续跑 / SYSTEM CONTINUE】你描述了下一步但还没调用工具。\n"
-                "You described the next step but did NOT call any tool.\n"
-                f"{html_hint}"
-                "请立刻发出 tool call（http_get / http_request / execute / read_file 等），"
-                "禁止只回复文字计划。\n"
-                "Emit a real tool call now. Do NOT reply with plan-only text."
-            ),
-            (
-                "【系统续跑 强制 / HARD REQUIREMENT】上轮你又只输出了文字、零工具调用。\n"
-                "Last turn was text-only with ZERO tool calls — that is invalid.\n"
-                f"{html_hint}"
-                "下一回合必须包含至少一次 function/tool call；纯文本视为失败。\n"
-                "Your next response MUST include at least one function/tool call."
-            ),
-            (
-                "【最后通牒 / FINAL】连续空转。现在唯一允许的动作是调用工具。\n"
-                "Stop narrating. Call a tool immediately.\n"
-                f"{html_hint}"
-                "推荐：http_get(url=..., preserve_html=True, max_chars=30000) "
-                "或 execute(command=curl ...)。完成后写入 deliverables/。"
-            ),
-        ]
-        return levels[min(nudge_i, len(levels) - 1)]
-
-    def _maybe_nudge_agent_continue(
-        self,
-        agent,
-        config: dict,
-        seen_msg_ids: set[str],
-        req: RunRequest,
-        *,
-        allow_auto_lesson: bool,
-        max_nudges: int = 5,
-    ) -> RunResult | None:
-        """最后一条 AI 回复仍在承诺下一步、却未再调工具时，自动续跑。
-
-        注意：同轮里先前已有 grep/ls 等工具时也要续跑——常见失败是
-        「先搜了一下 → 文字说接下来用 curl → 直接结束」。
-        """
-        for nudge_i in range(max_nudges):
-            if _has_pending(agent, config):
-                return None
-            last_text = self._agent_last_ai_text(agent, config)
-            suggests = ai_reply_suggests_pending_action(last_text)
-            if not suggests:
-                # 空正文不能当成「已收工」：续跑后模型常回 content="" 的 AIMessage
-                if (last_text or "").strip():
-                    return None
-                if nudge_i == 0 and self._tool_events_since(0) == 0:
-                    return None
-                # 继续用升级文案强制下一轮
-                last_text = last_text or "(empty)"
-            tools_before = self._tool_events_since(0)
-            # 仅统计本函数调用后新增的工具；用绝对起点会在长会话里失真，
-            # 这里用「续跑前后差」判断是否真的动手了。
-            event_mark = len(self._run_events)
-            nudge_text = self._nudge_user_text(nudge_i, last_text)
-            self._emit(
-                "info",
-                f"检测到模型仍在描述下一步、未继续调工具，自动续跑（{nudge_i + 1}/{max_nudges}）…",
-            )
-            self._stream_until_pause(
-                agent,
-                {"messages": [{"role": "user", "content": nudge_text}]},
-                config,
-                seen_msg_ids,
-            )
-            early = self._drain_pending_interrupts(
-                agent,
-                config,
-                seen_msg_ids,
-                req,
-                allow_auto_lesson=allow_auto_lesson,
-            )
-            if early is not None:
-                return early
-            tools_after = self._tool_events_since(0)
-            new_tools = self._tool_events_since(event_mark)
-            if tools_after > tools_before:
-                # 已动手：若最新回复仍是「计划口吻」则再续；否则结束
-                continue
-            if new_tools == 0:
-                # 本轮续跑零工具，再试下一轮（文案已升级）
-                continue
-        if ai_reply_suggests_pending_action(self._agent_last_ai_text(agent, config)):
-            self._emit(
-                "info",
-                "模型仍未调用工具完成操作；请检查审核策略（execute 是否需审批）或换更强模型后重试。"
-                "若需页面链接，请用 http_get/http_request 并设 preserve_html=True。",
-            )
-        return None
-
     def _run_agent_turn(
         self,
         agent,
@@ -1316,6 +1231,10 @@ class AgentRunner:
                 seen_msg_ids,
             )
 
+        # 暂停后立刻结束本轮，不再进入审批等待
+        if self._cancel.is_set():
+            return self._cancelled_result(req, allow_auto_lesson)
+
         early = self._drain_pending_interrupts(
             agent,
             config,
@@ -1326,28 +1245,8 @@ class AgentRunner:
         if early is not None:
             return early
 
-        early = self._maybe_nudge_agent_continue(
-            agent,
-            config,
-            seen_msg_ids,
-            req,
-            allow_auto_lesson=allow_auto_lesson,
-        )
-        if early is not None:
-            return early
-
         if self._cancel.is_set():
-            lesson = None
-            if allow_auto_lesson:
-                lesson = self._maybe_auto_write_lesson(
-                    req, "cancelled", "用户取消", ""
-                )
-            return RunResult(
-                ok=False,
-                outcome="cancelled",
-                error="已取消",
-                lesson_id=lesson.id if lesson else "",
-            )
+            return self._cancelled_result(req, allow_auto_lesson)
 
         if _has_pending(agent, config):
             pending = _pending_from_state(agent, config)
@@ -1360,7 +1259,6 @@ class AgentRunner:
 
     def run_chat(self, req: RunRequest) -> RunResult:
         """非运行期对话：回答提问（可与目标无关），可读写项目名称/目标；不跑经验管线。"""
-        self._cancel.clear()
         self._run_events = []
         self._context_injected = False
         thread_id = f"wokbee-chat-{req.project.id}"
@@ -1410,6 +1308,8 @@ class AgentRunner:
             if early:
                 # 对话模式：取消/失败原样返回；审批等待也返回
                 return early
+            if self._cancel.is_set():
+                return self._cancelled_result(req, False)
 
             final_text = ""
             try:
@@ -1423,14 +1323,6 @@ class AgentRunner:
                 pass
 
             self._emit("info", "本轮回复已完成")
-            had_tool = any(
-                getattr(e, "kind", "") == "tool" for e in self._run_events
-            )
-            if not had_tool and final_text and ai_reply_suggests_pending_action(final_text):
-                self._emit(
-                    "info",
-                    "模型未调用工具；可回复「继续」让它继续推进。",
-                )
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
@@ -1488,7 +1380,6 @@ class AgentRunner:
             return ""
 
     def run(self, req: RunRequest, *, resume: bool = False) -> RunResult:
-        self._cancel.clear()
         self._run_events = []
         self._context_injected = False
         thread_id = f"wokbee-{req.project.id}"
@@ -1557,6 +1448,8 @@ class AgentRunner:
                 )
 
                 for _ in range(max_phases):
+                    if self._cancel.is_set():
+                        return self._cancelled_result(req, True)
                     pipe = run_pipeline_until_ai_or_end(
                         req.project_root,
                         start_phase=phase_idx,
@@ -1691,102 +1584,10 @@ class AgentRunner:
             except Exception:
                 pass
 
-            # 末轮若仍在「计划口吻」，再给一次续跑机会（覆盖管线阶段刚结束的情况）
-            if ai_reply_suggests_pending_action(final_text):
-                early = self._maybe_nudge_agent_continue(
-                    agent,
-                    config,
-                    seen_msg_ids,
-                    req,
-                    allow_auto_lesson=False,
-                    max_nudges=4,
-                )
-                if early:
-                    return early
-                try:
-                    state = agent.get_state(config)
-                    values = getattr(state, "values", None) or {}
-                    messages = (
-                        values.get("messages") if isinstance(values, dict) else None
-                    )
-                    if messages:
-                        trajectory_messages = list(messages)
-                        final_text = _extract_text(trajectory_messages) or final_text
-                except Exception:
-                    pass
+            if self._cancel.is_set():
+                return self._cancelled_result(req, True)
 
             success_path = build_success_path_from_messages(trajectory_messages)
-            arts = list_deliverable_names(req.project_root)
-            still_planning = ai_reply_suggests_pending_action(final_text)
-
-            # 末次定向续跑：仅当「看起来仍在计划」且「尚无交付物」时给一次强制落盘机会，
-            # 避免因模型只是忘了落盘/只描述未动手就被判未完成。
-            if still_planning and not arts:
-                finalize = (
-                    "【收尾要求 / FINALIZE】请把本任务最终成果写入 deliverables/ 下的一个文件"
-                    "（用 write_file，path=deliverables/…，内容为最终报告/数据），"
-                    "写完后用一句话说明成果文件路径。\n"
-                    "若确实无需落盘成果，用 ask_user 询问用户后再结束。\n"
-                    "Write the final result to a file under deliverables/ now, then reply in one line. "
-                    "If no artifact is needed, ask the user via ask_user."
-                )
-                self._emit(
-                    "info",
-                    "模型仍停留在描述阶段且无交付物；已发出强制落盘要求（最后机会）。",
-                )
-                self._stream_until_pause(
-                    agent,
-                    {"messages": [{"role": "user", "content": finalize}]},
-                    config,
-                    seen_msg_ids,
-                )
-                final_early = self._drain_pending_interrupts(
-                    agent,
-                    config,
-                    seen_msg_ids,
-                    req,
-                    allow_auto_lesson=False,
-                )
-                if final_early is not None:
-                    return final_early
-                # 复评：重新取文本 / 交付物 / 是否仍在计划
-                try:
-                    state = agent.get_state(config)
-                    values = getattr(state, "values", None) or {}
-                    messages = (
-                        values.get("messages") if isinstance(values, dict) else None
-                    )
-                    if messages:
-                        trajectory_messages = list(messages)
-                        final_text = _extract_text(trajectory_messages) or final_text
-                except Exception:
-                    pass
-                success_path = build_success_path_from_messages(trajectory_messages)
-                arts = list_deliverable_names(req.project_root)
-                still_planning = ai_reply_suggests_pending_action(final_text)
-
-            incomplete = still_planning and not arts
-            if incomplete:
-                reasons = []
-                if still_planning:
-                    reasons.append("模型仍在描述下一步、未真正收尾")
-                if not arts:
-                    reasons.append("deliverables/ 无交付物")
-                reason = "；".join(reasons)
-                self._emit(
-                    "info",
-                    f"任务似乎未完成（{reason}）。"
-                    "已跳过自动经验总结，避免把未完成流程固化进 scripts/pipeline.json。"
-                    "可再次点「运行」继续，或确认完成后点「总结」。",
-                )
-                self._emit("info", "运行结束：未完成")
-                return RunResult(
-                    ok=False,
-                    outcome="incomplete",
-                    error="",
-                    final_text=final_text,
-                )
-
             lesson = self._maybe_auto_write_lesson(
                 req,
                 "success",

@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
-$Version = "0.2.0"
+$Version = "0.2.1"
 $PyProject = Join-Path $Root "pyproject.toml"
 if (Test-Path $PyProject) {
     $m = Select-String -Path $PyProject -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
@@ -21,6 +21,7 @@ $ExcludeNames = @(
     ".venv", "venv", "dist", "build", "release",
     ".git", ".cursor", ".idea", ".vscode",
     ".wokbee", "__pycache__", "artifacts",
+    ".learnings", ".agents",
     "WokBee.spec"
 )
 

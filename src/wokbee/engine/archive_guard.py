@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
+import time
 from pathlib import Path, PurePosixPath
 
 from deepagents.backends import LocalShellBackend
@@ -141,7 +141,7 @@ def command_touches_archives(command: str | None) -> bool:
 
 
 from wokbee.engine.runtime_env import enrich_shell_env, build_execute_invocation
-from tokbee.core.subprocess_util import nowin
+from tokbee.core.subprocess_util import run_cancellable
 
 
 def _shell_env(base: dict | None = None, *, project_root: str | Path | None = None) -> dict[str, str]:
@@ -272,7 +272,11 @@ class ArchiveDeniedBackend(LocalShellBackend):
         这是对 `LocalShellBackend.execute` 的**有意 fork**（长驻实现）：在透传前注入
         归档守卫（`command_touches_archives`），并把输出统一 UTF-8 解码加截断。上游
         deepagents 升级会改动它的 execute（run/echo/os.environ 等）时，需同步本方法；
-        否则归档守卫会随漂移而失效。改动前先diff上游 `backends/filesystem.py`。
+        否则归档守卫会随漂移而失效。改动前先diff上游 `backends/local_shell.py`。
+
+        不用 `subprocess.run(timeout=)`：Windows 上孙进程继承管道时，超时杀父进程后
+        communicate 仍会永久阻塞。改为墙钟轮询 + 杀进程树；`cancel_event` 供暂停按钮
+        在命令执行中途打断（交互/运行模式共用）。
         """
         if command_touches_archives(command):
             return ExecuteResponse(output=_DENY_MSG, exit_code=1, truncated=False)
@@ -295,32 +299,48 @@ class ArchiveDeniedBackend(LocalShellBackend):
             project_root=getattr(self, "root_dir", None),
         )
         cwd = str(getattr(self, "cwd", os.getcwd()))
+        cancel_event = getattr(self, "cancel_event", None)
 
         try:
-            argv, shell_mode = build_execute_invocation(command)
+            argv, _shell_mode = build_execute_invocation(command)
             if argv:
-                run_kw: dict = {
-                    "args": argv,
-                    "shell": False,
-                }
+                result = run_cancellable(
+                    argv,
+                    timeout=float(effective_timeout),
+                    cancel_event=cancel_event,
+                    cwd=cwd,
+                    env=env,
+                    shell=False,
+                    max_output_bytes=max_bytes,
+                )
             else:
-                run_kw = {
-                    "args": command,
-                    "shell": True,
-                }
-            result = subprocess.run(  # noqa: S602
-                check=False,
-                capture_output=True,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective_timeout,
-                env=env,
-                cwd=cwd,
-                creationflags=nowin(),
-                **run_kw,
-            )
+                result = run_cancellable(
+                    command,
+                    timeout=float(effective_timeout),
+                    cancel_event=cancel_event,
+                    cwd=cwd,
+                    env=env,
+                    shell=True,
+                    max_output_bytes=max_bytes,
+                )
+            if result.cancelled:
+                return ExecuteResponse(
+                    output="命令已取消：用户点击了暂停，进程树已被终止。",
+                    exit_code=130,
+                    truncated=False,
+                )
+            if result.timed_out:
+                if timeout is not None:
+                    msg = (
+                        f"Error: Command timed out after {effective_timeout} seconds "
+                        "(custom timeout). The command may be stuck or require more time."
+                    )
+                else:
+                    msg = (
+                        f"Error: Command timed out after {effective_timeout} seconds. "
+                        "For long-running commands, re-run using the timeout parameter."
+                    )
+                return ExecuteResponse(output=msg, exit_code=124, truncated=False)
             output_parts: list[str] = []
             if result.stdout:
                 output_parts.append(result.stdout)
@@ -340,21 +360,66 @@ class ArchiveDeniedBackend(LocalShellBackend):
                 exit_code=result.returncode,
                 truncated=truncated,
             )
-        except subprocess.TimeoutExpired:
-            if timeout is not None:
-                msg = (
-                    f"Error: Command timed out after {effective_timeout} seconds "
-                    "(custom timeout). The command may be stuck or require more time."
-                )
-            else:
-                msg = (
-                    f"Error: Command timed out after {effective_timeout} seconds. "
-                    "For long-running commands, re-run using the timeout parameter."
-                )
-            return ExecuteResponse(output=msg, exit_code=124, truncated=False)
         except Exception as e:  # noqa: BLE001
             return ExecuteResponse(
                 output=f"Error executing command ({type(e).__name__}): {e}",
                 exit_code=1,
                 truncated=False,
             )
+
+
+_EXEC_WATCH = None
+
+
+def _exec_watch_pool():
+    global _EXEC_WATCH
+    if _EXEC_WATCH is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _EXEC_WATCH = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="wokbee-exec-watch"
+        )
+    return _EXEC_WATCH
+
+
+def attach_execute_watch(backend, *, cancel_event, default_timeout: float) -> None:
+    """给 backend.execute 再套一层墙钟等待：内层哪怕卡死，外层也会在超时/暂停时返回。
+
+    LangGraph 调的是最外层 backend（AccessCoerceBackend）。仅改 ArchiveDeniedBackend
+    时，若调用链没走进去或 communicate 卡死，UI 仍会永远「调用中」。
+    """
+    from concurrent.futures import TimeoutError as FutTimeout
+    from tokbee.core.subprocess_util import kill_all_cancellable_runs
+
+    inner = backend.execute
+    default = max(1.0, float(default_timeout or 90))
+
+    def execute(command: str, *, timeout: int | None = None):
+        cap = float(timeout) if timeout is not None and float(timeout) > 0 else default
+        fut = _exec_watch_pool().submit(inner, command, timeout=timeout)
+        deadline = time.monotonic() + cap
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                kill_all_cancellable_runs()
+                return ExecuteResponse(
+                    output="命令已取消：用户点击了暂停，进程树已被终止。",
+                    exit_code=130,
+                    truncated=False,
+                )
+            left = deadline - time.monotonic()
+            if left <= 0:
+                kill_all_cancellable_runs()
+                return ExecuteResponse(
+                    output=(
+                        f"Error: Command timed out after {cap:g} seconds "
+                        "(watchdog). The command may be stuck or require more time."
+                    ),
+                    exit_code=124,
+                    truncated=False,
+                )
+            try:
+                return fut.result(timeout=min(0.25, max(0.05, left)))
+            except FutTimeout:
+                continue
+
+    backend.execute = execute  # type: ignore[method-assign]

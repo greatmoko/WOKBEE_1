@@ -1507,7 +1507,12 @@ class _ProjectWorkspace(QWidget):
             return
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
-            ev = ProjectEvent(kind="info", content="用户请求暂停/取消当前运行。")
+            mode = getattr(self._worker, "mode", self._worker_mode) or "run"
+            if mode == "chat":
+                msg = "用户请求暂停：正在终止当前交互（含正在执行的命令）。"
+            else:
+                msg = "用户请求暂停/取消当前运行。"
+            ev = ProjectEvent(kind="info", content=msg)
             self.store.append_event(self._project_id, ev)
             self._timeline.append_event(ev)
             return
