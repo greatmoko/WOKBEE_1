@@ -199,9 +199,25 @@ class MainWindow(QMainWindow):
         self.resize(960, 640)
         self.setMinimumSize(QSize(720, 480))
 
-        icon_path = _RESOURCES / "icon.ico"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        icon = QIcon()
+        ico_path = _RESOURCES / "icon.ico"
+        logo_path = _RESOURCES / "logo.png"
+        if ico_path.exists():
+            icon.addFile(str(ico_path))
+        if logo_path.exists():
+            pm = QPixmap(str(logo_path))
+            if not pm.isNull():
+                for size in (16, 24, 32, 48, 64, 128, 256):
+                    icon.addPixmap(
+                        pm.scaled(
+                            size,
+                            size,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+        if not icon.isNull():
+            self.setWindowIcon(icon)
 
         self.setStyleSheet(self.theme.stylesheet())
 

@@ -134,22 +134,16 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ### 4. 启动应用
 
+**日常推荐**：双击项目根目录的 `启动WokBee.vbs`（或 `启动WokBee.bat`）。  
+使用 `pythonw` 无黑窗后台启动，关掉 CMD 不会退出软件；任务栏显示 WokBee 图标。只能通过关闭软件窗口结束进程。
+
+调试或看控制台输出时，仍可用：
+
 ```powershell
 python main.py
 ```
 
 启动成功后，窗口标题显示 **WokBee v0.2.0**。
-
-### 5. 日常使用快捷方式（可选）
-
-可将以下内容保存为 `启动WokBee.bat`，放在桌面双击启动：
-
-```bat
-@echo off
-cd /d C:\path\to\WOKBEE_1
-call .venv\Scripts\activate
-python main.py
-```
 
 ---
 
@@ -314,6 +308,8 @@ A：欢迎 Fork 仓库自行修改，或通过 GitHub Issue / Pull Request 参�
 
 ```
 ├── main.py                 # 启动入口
+├── 启动WokBee.vbs          # 一键后台启动（推荐）
+├── 启动WokBee.bat          # 同上（调用 vbs）
 ├── pyproject.toml
 ├── requirements.txt
 ├── scripts/
