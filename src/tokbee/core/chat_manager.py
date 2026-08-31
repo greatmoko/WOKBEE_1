@@ -16,6 +16,7 @@ class ChatSession:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     title: str = "新对话"
     pinned: bool = False
+    pinned_at: str = ""
     model_provider: str = ""
     model_name: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -71,6 +72,8 @@ class ChatManager:
                         filtered["messages"] = []
                     if filtered.get("params") is None:
                         filtered["params"] = {}
+                    if not isinstance(filtered.get("pinned_at"), str):
+                        filtered["pinned_at"] = str(filtered.get("pinned_at") or "")
                     self._sessions.append(ChatSession(**filtered))
             except (json.JSONDecodeError, OSError, TypeError):
                 self._sessions = []
@@ -82,11 +85,13 @@ class ChatManager:
     def list_sorted(self) -> list[ChatSession]:
         pinned = sorted(
             [s for s in self._sessions if s.pinned],
-            key=lambda s: s.updated_at, reverse=True,
+            key=lambda s: s.pinned_at or s.created_at,
+            reverse=True,
         )
         normal = sorted(
             [s for s in self._sessions if not s.pinned],
-            key=lambda s: s.updated_at, reverse=True,
+            key=lambda s: s.created_at,
+            reverse=True,
         )
         return pinned + normal
 
@@ -95,8 +100,16 @@ class ChatManager:
             return self.list_sorted()
         kw = keyword.lower()
         results = [s for s in self._sessions if kw in s.title.lower()]
-        pinned = sorted([s for s in results if s.pinned], key=lambda s: s.updated_at, reverse=True)
-        normal = sorted([s for s in results if not s.pinned], key=lambda s: s.updated_at, reverse=True)
+        pinned = sorted(
+            [s for s in results if s.pinned],
+            key=lambda s: s.pinned_at or s.created_at,
+            reverse=True,
+        )
+        normal = sorted(
+            [s for s in results if not s.pinned],
+            key=lambda s: s.created_at,
+            reverse=True,
+        )
         return pinned + normal
 
     def create(self, title: str = "", provider: str = "", model: str = "") -> ChatSession:
@@ -134,6 +147,10 @@ class ChatManager:
         s = self.get(session_id)
         if s:
             s.pinned = not s.pinned
+            if s.pinned:
+                s.pinned_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                s.pinned_at = ""
             self.save()
 
     def delete_unpinned(self) -> int:

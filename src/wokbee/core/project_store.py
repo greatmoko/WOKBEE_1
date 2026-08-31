@@ -18,6 +18,7 @@ from wokbee.core.models import (
     ProjectStatus,
     new_project_id,
     MAX_PROJECT_TITLE_LEN,
+    _now,
 )
 from wokbee.core.paths import (
     ARCHIVABLE_DIRS,
@@ -153,12 +154,12 @@ class ProjectStore:
                 logger.warning("跳过损坏的项目元数据 %s: %s", meta, e)
         pinned = sorted(
             [p for p in projects if p.pinned],
-            key=lambda p: p.updated_at,
+            key=lambda p: p.pinned_at or p.created_at,
             reverse=True,
         )
         normal = sorted(
             [p for p in projects if not p.pinned],
-            key=lambda p: p.updated_at,
+            key=lambda p: p.created_at,
             reverse=True,
         )
         return pinned + normal
@@ -223,7 +224,14 @@ class ProjectStore:
             if "model_id" in fields and fields["model_id"] is not None:
                 project.model_id = str(fields["model_id"])
             if "pinned" in fields and fields["pinned"] is not None:
-                project.pinned = bool(fields["pinned"])
+                new_pinned = bool(fields["pinned"])
+                if new_pinned and not project.pinned:
+                    project.pinned_at = _now()
+                elif not new_pinned:
+                    project.pinned_at = ""
+                project.pinned = new_pinned
+            if "pinned_at" in fields and fields["pinned_at"] is not None:
+                project.pinned_at = str(fields["pinned_at"])
             # 直接写盘（已在锁内，勿再进 save 的同锁递归也可，RLock 安全）
             self.save(project)
             return project

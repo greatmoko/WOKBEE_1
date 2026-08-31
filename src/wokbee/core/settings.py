@@ -26,7 +26,7 @@ DEFAULTS = {
     "max_parallel_tools": 4,
     # 有序管线：script/ai 阶段切换次数上限（非强制交错，按 pipeline steps 顺序）
     "max_pipeline_phases": 64,
-    # AI 调用间隔（毫秒）：两次 AI 调用「发起时间」的最小间隔；0 = 不限制
+    # AI 调用间隔（毫秒）：每次调模型、每次调工具前等待；0 = 不限制
     "ai_interval_ms": 0,
     # 是否把 DeepSeek 官方服务端搜索注册成 deepseek_web_search 工具
     "enable_deepseek_search": True,

@@ -193,9 +193,11 @@ class McpStore:
             return []
 
         async def _load():
-            # async with 确保 aclose()：避免 stdio MCP 子进程每次加载后泄漏（B4）
-            async with MultiServerMCPClient(connections) as client:
-                return await client.get_tools()
+            # langchain-mcp-adapters >= 0.1.0 移除了 async with 上下文管理器支持。
+            # get_tools() 内部会为每个工具调用创建新 session 并在调用后自动关闭连接，
+            # 因此无需手动 aclose()（B4 泄漏问题由库内部处理）。
+            client = MultiServerMCPClient(connections)
+            return await client.get_tools()
 
         try:
             tools = list(asyncio.run(_load()))

@@ -120,6 +120,30 @@ _LOCK = threading.Lock()
 _CONTEXT_SENTINEL = "【会话上下文】"
 
 
+def _format_engine_error(exc: BaseException) -> str:
+    """把厂商网关错误翻成可读说明，避免和本机 MCP 调用失败混在一起。"""
+    text = str(exc)
+    low = text.lower()
+    if (
+        "do_request_failed" in low
+        or "upstream error" in low
+        or ("error code: 500" in low and "new_api" in low)
+    ):
+        return (
+            "模型网关返回 500（上游请求失败）。这是厂商把请求转到 DeepSeek 时失败，"
+            "发生在模型 HTTP 调用阶段，不是 MCP 工具执行失败。"
+            "请稍后重试；若连续出现，可暂时关掉部分 MCP 减少 tools 数量，"
+            "或到网关后台用 request id 查日志。"
+            f"\n原始信息：{text}"
+        )
+    if "does not support sync invocation" in low:
+        return (
+            "MCP 工具缺少同步入口。请确认已更新并重启应用后再试。"
+            f"\n原始信息：{text}"
+        )
+    return text
+
+
 def _get_checkpointer(project_id: str) -> InMemorySaver:
     with _LOCK:
         if project_id not in _CHECKPOINTERS:
@@ -1339,8 +1363,9 @@ class AgentRunner:
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
-            self._emit("error", f"交互失败：{e}")
-            return RunResult(ok=False, outcome="failed", error=str(e))
+            err = _format_engine_error(e)
+            self._emit("error", f"交互失败：{err}")
+            return RunResult(ok=False, outcome="failed", error=err)
 
     @staticmethod
     def _recent_events_digest(project_root: Path, *, limit: int = 40) -> str:
@@ -1618,7 +1643,8 @@ class AgentRunner:
 
         except Exception as e:
             logger.exception("Agent 运行失败")
-            self._emit("error", f"执行失败：{e}")
+            err = _format_engine_error(e)
+            self._emit("error", f"执行失败：{err}")
             fail_path = ""
             try:
                 state = agent.get_state(config)
@@ -1638,7 +1664,7 @@ class AgentRunner:
             return RunResult(
                 ok=False,
                 outcome="failed",
-                error=str(e),
+                error=err,
                 lesson_id=lesson.id if lesson else "",
             )
 

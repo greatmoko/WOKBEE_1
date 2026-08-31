@@ -215,13 +215,13 @@ class WokBeeSettingsWorkspace(QWidget):
         self._ai_interval.setFixedWidth(120)
         self._ai_interval.setSuffix(" ms")
         self._ai_interval.setStyleSheet(spin_qss)
-        self._ai_interval.setToolTip("AI 调用最小间隔")
+        self._ai_interval.setToolTip("每次调用模型或工具前等待")
         ai_int_row.addWidget(self._ai_interval)
         ai_int_row.addStretch()
         bl.addLayout(ai_int_row)
         ai_int_hint = QLabel(
-            "间隔按「发起时间」计算（下一次 ≥ 上一次发起 + 间隔），而非响应结束时间。"
-            "设 0 表示关掉节流、完全无额外开销；设为如 2000 则每次 AI 调用至少相隔 2 秒。"
+            "每次调用模型、每次调用工具（execute / 读写 / 搜索等）开始前都会等待该毫秒数。"
+            "设 0 表示关掉；设 2000 则每一步先等 2 秒再执行。并行工具会各自先等再一起跑。"
         )
         ai_int_hint.setWordWrap(True)
         ai_int_hint.setStyleSheet(hint_label_qss(c))

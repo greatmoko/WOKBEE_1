@@ -32,6 +32,29 @@ _TOOL_EXECUTOR = ThreadPoolExecutor(
 )
 
 
+def _run_async_fn_sync(async_fn: Callable, *args, **kwargs):
+    """在同步 Agent（stream/invoke）里跑只提供 coroutine 的工具（MCP 等）。"""
+
+    def _call():
+        return asyncio.run(async_fn(*args, **kwargs))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _call()
+    # 已在事件循环中：不能再 asyncio.run，丢到旁路线程
+    fut = _TOOL_EXECUTOR.submit(_call)
+    return fut.result()
+
+
+def _as_sync_bridge(async_fn: Callable) -> Callable:
+    def _sync(*args, **kwargs):
+        return _run_async_fn_sync(async_fn, *args, **kwargs)
+
+    _sync.__name__ = getattr(async_fn, "__name__", "_sync")
+    return _sync
+
+
 def tool_timeout_result(tool_name: str, timeout: float) -> str:
     return (
         f"工具 `{tool_name}` 执行超时（> {timeout:g} 秒），已被终止并交由 AI 接管。"
@@ -243,7 +266,9 @@ def _wrap_one_tool(
         else _inject_timeout_schema(getattr(tool, "args_schema", None))
     )
 
-    def _truncate(result: Any) -> Any:
+    response_format = getattr(tool, "response_format", "content") or "content"
+
+    def _truncate_payload(result: Any) -> Any:
         if result is None:
             return result
         if isinstance(result, (dict, list)):
@@ -260,14 +285,28 @@ def _wrap_one_tool(
             text, max_chars=max_chars, dump_dir=dump_dir, tool_name=name
         )
 
+    def _truncate(result: Any) -> Any:
+        # MCP 工具 response_format=content_and_artifact，必须保持 (content, artifact)
+        if isinstance(result, tuple) and len(result) == 2:
+            content, artifact = result
+            return (_truncate_payload(content), artifact)
+        truncated = _truncate_payload(result)
+        if response_format == "content_and_artifact":
+            return (truncated, None)
+        return truncated
+
     def _hook(fn: Callable) -> Callable:
         """包装（可能异步的）原函数；异步函数保持异步，否则 ainvoke 会取回裸协程。"""
+        from wokbee.engine.ai_throttle import ai_throttle
+
         if inspect.iscoroutinefunction(fn):
             async def _ahooked(*args, **kwargs):
+                ai_throttle.wait()
                 return _truncate(await fn(*args, **kwargs))
             return _ahooked
 
         def _hooked(*args, **kwargs):
+            ai_throttle.wait()
             return _truncate(fn(*args, **kwargs))
         return _hooked
 
@@ -276,13 +315,14 @@ def _wrap_one_tool(
     if inspect.iscoroutinefunction(coro):
         aw = _hook(_callable_with_timeout(coro, name, tool_timeout))
         try:
-            update = {"coroutine": aw}
+            update = {"coroutine": aw, "func": _as_sync_bridge(aw)}
             if timeout_schema is not None:
                 update["args_schema"] = timeout_schema
             return tool.model_copy(update=update)
         except Exception:
             try:
                 object.__setattr__(tool, "coroutine", aw)
+                object.__setattr__(tool, "func", _as_sync_bridge(aw))
                 if timeout_schema is not None:
                     object.__setattr__(tool, "args_schema", timeout_schema)
                 return tool
@@ -293,10 +333,10 @@ def _wrap_one_tool(
     if hasattr(tool, "func") and callable(getattr(tool, "func")):
         orig = tool.func
         newfunc = _hook(_callable_with_timeout(orig, name, tool_timeout))
-        update = {"func": newfunc}
-        if inspect.iscoroutinefunction(orig):
-            # func 为协程时同步替换 coroutine，避免 ainvoke 返回裸协程
-            update["coroutine"] = newfunc
+        if inspect.iscoroutinefunction(orig) or inspect.iscoroutinefunction(newfunc):
+            update = {"coroutine": newfunc, "func": _as_sync_bridge(newfunc)}
+        else:
+            update = {"func": newfunc}
         if timeout_schema is not None:
             update["args_schema"] = timeout_schema
         try:
@@ -306,6 +346,7 @@ def _wrap_one_tool(
                 tool.func = newfunc  # type: ignore[attr-defined]
                 if inspect.iscoroutinefunction(orig):
                     object.__setattr__(tool, "coroutine", newfunc)
+                    object.__setattr__(tool, "func", _as_sync_bridge(newfunc))
                 if timeout_schema is not None:
                     object.__setattr__(tool, "args_schema", timeout_schema)
                 return tool
@@ -332,11 +373,9 @@ def _wrap_one_tool(
             elif callable(arun):
                 orig_arun = arun
 
-                def _ahooked_run(*args, **kwargs):
-                    return _truncate(orig_arun(*args, **kwargs))
-
+                hooked_arun = _hook(orig_arun)
                 try:
-                    object.__setattr__(tool, "_arun", _ahooked_run)
+                    object.__setattr__(tool, "_arun", hooked_arun)
                     return tool
                 except Exception:
                     pass

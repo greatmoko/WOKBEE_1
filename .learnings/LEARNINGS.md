@@ -29,3 +29,49 @@ Corrections, insights, and knowledge gaps captured during development.
 
 ---
 
+## [LRN-20260831-002] correction
+
+**Logged**: 2026-08-31T17:10:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+MCP StructuredTool 只有 coroutine，同步 Agent.stream 必须补 sync 桥，否则 invoke 报 does not support sync invocation。
+
+### Details
+langchain-mcp-adapters 转换的工具不设 func。WokBee 走 agent.stream → ToolNode.tool.invoke。包装 coroutine 时要同时挂 `_as_sync_bridge`（无事件循环则 asyncio.run）。
+
+### Suggested Action
+已在 wrap_tools_truncate_results 的 coroutine 路径写入 func 同步桥。
+
+### Metadata
+- Source: user_feedback
+- Related Files: src/wokbee/engine/tool_truncate.py
+- Tags: mcp, structuredtool
+
+---
+
+## [LRN-20260831-003] correction
+
+**Logged**: 2026-08-31T19:06:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+MCP 工具 `response_format=content_and_artifact`，包装截断不能把 `(content, artifact)` 收成 str。
+
+### Details
+langchain-mcp-adapters 的 call_tool 返回二元组。wrap 后 `_truncate` 把 tuple 转成字符串，StructuredTool._run 再校验格式即失败。截断时保留二元组；超时等纯字符串结果也要补 `(text, None)`。
+
+### Suggested Action
+已在 tool_truncate._truncate 按 response_format 保留/补齐 artifact 元组。
+
+### Metadata
+- Source: user_feedback
+- Related Files: src/wokbee/engine/tool_truncate.py
+- Tags: mcp, structuredtool, content_and_artifact
+
+---
+

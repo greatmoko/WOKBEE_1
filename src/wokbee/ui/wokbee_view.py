@@ -193,7 +193,7 @@ class WokBeeView(QWidget):
                     ws._timeline.end_run()
                 # force_timeline: 已渲染过也重绘，追加「手机」相关事件
                 ws.load_project(project_id, force_timeline=True)
-        # 项目 updated_at 变了，刷新左侧列表顺序与状态点
+        # 刷新左侧状态点；列表顺序不再跟 updated_at 走
         self._sidebar.refresh()
 
     def _on_gateway_event(self, project_id: str, kind: str, content: str, meta):
@@ -217,7 +217,7 @@ class WokBeeView(QWidget):
             ws._timeline._status("出现错误")
         elif kind == "approval":
             ws._timeline._status("等待审批…", pulse=False)
-        # 防抖刷新顶栏要素与左侧状态点（项目 archived/updated_at 可能变化）
+        # 防抖刷新顶栏要素与左侧状态点（archived/运行态可能变化）
         ws._schedule_essentials_refresh()
 
     def shutdown(self):

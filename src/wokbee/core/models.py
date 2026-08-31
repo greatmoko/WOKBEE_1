@@ -160,6 +160,7 @@ class Project:
     provider: str = ""
     model_id: str = ""
     pinned: bool = False
+    pinned_at: str = ""
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -185,6 +186,7 @@ class Project:
             "provider": self.provider,
             "model_id": self.model_id,
             "pinned": bool(self.pinned),
+            "pinned_at": self.pinned_at or "",
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -221,6 +223,7 @@ class Project:
             provider=data.get("provider") or "",
             model_id=data.get("model_id") or "",
             pinned=data.get("pinned") is True,
+            pinned_at=str(data.get("pinned_at") or ""),
             created_at=data.get("created_at") or _now(),
             updated_at=data.get("updated_at") or _now(),
         )

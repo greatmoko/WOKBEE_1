@@ -69,10 +69,8 @@ _THROTTLE_LOCK = threading.Lock()
 def _apply_throttle_patch() -> None:
     """对 ChatOpenAI 类做**一次**进程级节流补丁：真正发起请求的核心方法前先 wait()。
 
-    覆盖 `_generate` / `_agenerate` / `_stream` / `_astream`——公开的 invoke/stream/ainvoke
-    以及 bind_tools/with_structured_output 派生的 runnable 最终都落到这些私有方法上，
-    所以单点补齐即覆盖全部调用，且不会因公开/私有双重包装而等待两次。
-    节流器 `ai_throttle` 为进程级单例，间隔实时读设置。
+    覆盖 `_generate` / `_agenerate` / `_stream` / `_astream`。每次调用前 sleep 当前间隔。
+    流式路径必须先 wait 再调原方法，避免 HTTP 在等待前发出。
     """
     global _THROTTLE_PATCHED
     # 标志位检查-设置必须加锁：否则并发线程会在检查时都看到 False，
@@ -110,29 +108,26 @@ def _apply_throttle_patch() -> None:
 
         setattr(ChatOpenAI, "_agenerate", _a_wrapped)
 
-    # 同步流：返回生成器，首次迭代前 wait
+    # 同步流：先 wait 再创建底层流，避免 HTTP 在等待前就发出
     orig_stream = getattr(ChatOpenAI, "_stream", None)
     if orig_stream is not None:
 
         def _s_wrapped(self, *args, **kwargs):
-            gen = orig_stream(self, *args, **kwargs)
-
             def _it():
                 ai_throttle.wait()
-                yield from gen
+                yield from orig_stream(self, *args, **kwargs)
 
             return _it()
 
         setattr(ChatOpenAI, "_stream", _s_wrapped)
 
-    # 异步流：async generator，async for 前 wait
+    # 异步流：先 wait 再迭代原异步生成器
     orig_astream = getattr(ChatOpenAI, "_astream", None)
     if orig_astream is not None:
 
         async def _as_wrapped(self, *args, **kwargs):
-            agen = orig_astream(self, *args, **kwargs)
             ai_throttle.wait()
-            async for chunk in agen:
+            async for chunk in orig_astream(self, *args, **kwargs):
                 yield chunk
 
         setattr(ChatOpenAI, "_astream", _as_wrapped)
