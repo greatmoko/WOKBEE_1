@@ -68,6 +68,8 @@ def format_tool_call_for_timeline(name: str, args: dict | None) -> str:
 def format_tool_callback_for_timeline(name: str, body: str) -> str:
     """时间线展示：工具回调的多行 Markdown（固定宽高，超长截断）。"""
     name = (name or "tool").strip() or "tool"
+    if name == "get_credential":
+        return f"**callback:** `{name}`\n\n（已隐藏：凭据明文不会写入时间线或日志）"
     text = (body or "").strip()
     if len(text) > 2000:
         text = text[:2000].rstrip() + f"\n…（已截断，共约 {len(body or '')} 字）"

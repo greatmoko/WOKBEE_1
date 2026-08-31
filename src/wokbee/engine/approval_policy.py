@@ -13,7 +13,7 @@ from wokbee.core.models import ApprovalFlags
 READ_TOOLS = ("ls", "read_file", "glob", "grep")
 # delete 对目录是递归删除，属破坏性写入：并入写分类，随 skip_write 一起受控
 WRITE_TOOLS = ("write_file", "edit_file", "delete")
-HIGH_RISK_TOOLS = ("execute", "request_access")
+HIGH_RISK_TOOLS = ("execute", "request_access", "get_credential")
 # 常规/联网：与 web_search/http_* 一致受控；deepseek_web_search 同属联网检索，不应游离在外
 ROUTINE_TOOLS = ("task", "web_search", "http_get", "http_request", "deepseek_web_search")
 

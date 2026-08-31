@@ -393,6 +393,12 @@ def enrich_shell_env(base: dict[str, str] | None = None, *, project_root: str | 
             env[path_key] = pwsh_dir + os.pathsep + existing if existing else pwsh_dir
     if project_root:
         env["WOKBEE_PROJECT_ROOT"] = str(Path(project_root).resolve())
+    try:
+        from wokbee.core.credential_store import inject_vault_env
+
+        inject_vault_env(env)
+    except Exception:
+        logger.debug("注入凭据环境变量失败", exc_info=True)
     return env
 
 

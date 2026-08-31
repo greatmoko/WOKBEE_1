@@ -94,7 +94,7 @@ def build_approval_checkboxes(
         ("skip_read", "读免审", "读操作免审"),
         ("skip_write", "写免审", "写操作免审"),
         ("skip_routine", "常规操作免审", "常规操作免审"),
-        ("skip_high_risk", "高危操作免审", "高危操作免审"),
+        ("skip_high_risk", "高危操作免审", "本机命令、挂载外目录、读取凭据密码"),
     ]
     checks: dict[str, QCheckBox] = {}
     cb_qss = checkbox_qss(c)

@@ -22,6 +22,8 @@ dependencies = [
     "lark-oapi>=1.5.5",
     "weixin-ilink>=0.3.5",
     "qrcode>=7.4",
+    "cryptography>=43.0",
+    "keyring>=25.0",
 ]
 
 [project.scripts]

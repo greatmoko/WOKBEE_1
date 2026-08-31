@@ -181,6 +181,15 @@ class _AutoHeightMd(QTextBrowser):
         event.accept()
 
 
+def _redact_display(text: str) -> str:
+    try:
+        from wokbee.core.credential_store import redact_text
+
+        return redact_text(text or "")
+    except Exception:
+        return text or ""
+
+
 def _tool_event_display_text(ev: ProjectEvent) -> str:
     """工具气泡正文：优先用结构化 meta 格式化，避免 call 挤成一行。"""
     meta = ev.meta if isinstance(ev.meta, dict) else {}
@@ -652,14 +661,15 @@ class _ToolStepRow(QFrame):
         if self._args:
             try:
                 from wokbee.core.timeline_format import format_tool_call_for_timeline
+                from wokbee.core.credential_store import redact_obj
 
-                parts.append(format_tool_call_for_timeline(self.tool, self._args))
+                parts.append(format_tool_call_for_timeline(self.tool, redact_obj(self._args)))
             except Exception:
                 parts.append(f"**call:** `{self.tool}`")
         else:
             parts.append(f"**call:** `{self.tool}`")
         if self._callback_display:
-            parts.append(self._callback_display)
+            parts.append(_redact_display(self._callback_display))
         elif self._status in ("running", "pending"):
             parts.append(f"**callback:** `{self.tool}`\n\n（等待返回…）")
         else:
@@ -954,6 +964,13 @@ class _Timeline(QFrame):
         if phase == "call":
             index = len(self._batch_order) + 1
             args = meta.get("args") if isinstance(meta.get("args"), dict) else None
+            if isinstance(args, dict):
+                try:
+                    from wokbee.core.credential_store import redact_obj
+
+                    args = redact_obj(args)
+                except Exception:
+                    pass
             row = _ToolStepRow(tid or f"call:{id(ev)}", tool, self.theme, args=args, index=index)
             self._add_row(row)
             if tid:
@@ -1016,9 +1033,9 @@ class _Timeline(QFrame):
     def _finish_tool_row(self, row: _ToolStepRow, ev: ProjectEvent):
         meta = ev.meta if isinstance(ev.meta, dict) else {}
         if str(meta.get("status") or "success").lower() == "error":
-            row.set_failed(ev.content)
+            row.set_failed(_redact_display(ev.content))
         else:
-            row.set_success(ev.content)
+            row.set_success(_redact_display(ev.content))
         self._status(f"{row.tool} 完成")
 
     def _find_unmatched(self, tool: str) -> _ToolStepRow | None:
@@ -1085,9 +1102,9 @@ class _Timeline(QFrame):
                             break
                 if row is not None:
                     if str(meta.get("status") or "success").lower() == "error":
-                        row.set_failed(ev.content)
+                        row.set_failed(_redact_display(ev.content))
                     else:
-                        row.set_success(ev.content)
+                        row.set_success(_redact_display(ev.content))
                 else:
                     out.append(self._make_row(ev))
             else:
@@ -1277,7 +1294,7 @@ class _Timeline(QFrame):
             f"font-size: 11px; color: {head_color}; background: transparent; border: none;"
         )
         bl.addWidget(head)
-        display = (
+        display = _redact_display(
             _tool_event_display_text(ev)
             if ev.kind == "tool"
             else (ev.content or "")

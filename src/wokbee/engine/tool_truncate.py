@@ -134,6 +134,8 @@ def _callable_with_timeout(
 TOOL_RESULT_MAX_CHARS = 12_000
 # 落盘完整结果时的文件名前缀
 TOOL_RESULT_DUMP_PREFIX = "tool_result_"
+# 含密钥的工具结果不得写入 workspace dump
+NEVER_DUMP_TOOLS = frozenset({"get_credential"})
 
 
 def tool_name_of(tool: Any) -> str:
@@ -172,6 +174,8 @@ def truncate_tool_result(
 ) -> str:
     """截断进入模型上下文的 tool 结果；完整内容可落盘。"""
     raw = text if isinstance(text, str) else str(text or "")
+    if tool_name in NEVER_DUMP_TOOLS:
+        dump_dir = None
     if len(raw) <= max_chars:
         return raw
     note = ""

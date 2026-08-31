@@ -25,6 +25,7 @@ from wokbee.core.timeline_format import (
     format_tool_call_for_timeline,
     format_tool_callback_for_timeline,
 )
+from wokbee.core.credential_store import redact_obj, redact_text
 from wokbee.core.paths import (
     ensure_project_layout,
     memory_dir,
@@ -70,6 +71,7 @@ from wokbee.engine.ask_user import (
     normalize_ask_user_value,
 )
 from wokbee.engine.project_tools import build_project_meta_tools
+from wokbee.engine.credential_tools import build_credential_tools
 from wokbee.engine.script_factory import (
     apply_ai_authored_scripts,
     apply_ai_pipeline_steps,
@@ -332,6 +334,7 @@ def _tool_call_id(tc: Any) -> str:
 
 def _format_tool_call(tc: Any) -> str:
     name, args = _tool_call_parts(tc)
+    args = redact_obj(args)
     args_s = json.dumps(args, ensure_ascii=False)
     if len(args_s) > 400:
         args_s = args_s[:400] + "…"
@@ -361,6 +364,9 @@ def build_success_path_from_messages(messages: list, *, limit: int = 40) -> str:
             body = _message_text(
                 getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
             )
+            body = redact_text(body)
+            if str(name) == "get_credential":
+                body = "（凭据明文已隐藏）"
             if len(body) > 220:
                 body = body[:220] + "…"
             if body:
@@ -523,7 +529,7 @@ def _pending_from_state(agent, config: dict) -> list[dict]:
                 {
                     "name": "tool",
                     "args": {},
-                    "description": str(value)[:500],
+                    "description": redact_text(str(value)[:500]),
                     "risk": "操作",
                 }
             )
@@ -544,6 +550,9 @@ def _pending_from_state(agent, config: dict) -> list[dict]:
                     "risk": risk_label_for_tool(str(name)),
                 }
             )
+    for item in pending:
+        item["args"] = redact_obj(item.get("args") or {})
+        item["description"] = redact_text(str(item.get("description") or ""))
     return pending
 
 
@@ -615,7 +624,10 @@ class AgentRunner:
         self._ask_user_event.set()
 
     def _emit(self, kind: str, content: str, meta: dict | None = None) -> None:
-        meta = meta or {}
+        meta = dict(meta or {})
+        content = redact_text(content or "")
+        if "args" in meta:
+            meta["args"] = redact_obj(meta["args"])
         # 本轮内存轨迹：供首次自动总结固化脚本（避免等 UI 写盘竞态）
         self._run_events.append(
             SimpleNamespace(kind=kind, content=content or "", meta=dict(meta))
@@ -863,6 +875,7 @@ class AgentRunner:
         tools = sort_tools_by_name(
             list(NETWORK_TOOLS)
             + list(project_tools)
+            + list(build_credential_tools())
             + [build_ask_user_tool()]
             + [build_access_request_tool(
                 composite_backend, access_registry, self.settings,

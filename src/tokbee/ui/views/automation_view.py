@@ -65,6 +65,7 @@ class _SubNav(QFrame):
         ("session_defaults", "⚙", "TokBee 设置"),
         ("wokbee_settings", "🐝", "WokBee 设置"),
         ("skills", "📚", "Skills"),
+        ("credentials", "🔑", "凭据库"),
         ("mcp", "🔌", "MCP"),
         ("gateway", "📡", "消息网关"),
     ]
@@ -753,6 +754,11 @@ class AutomationView(QWidget):
         skills_page = SkillsWorkspace(self.theme, SkillsStore())
         self._pages["skills"] = skills_page
         self._stack.addWidget(skills_page)
+
+        from tokbee.ui.views.credential_view import CredentialWorkspace
+        cred_page = CredentialWorkspace(self.theme)
+        self._pages["credentials"] = cred_page
+        self._stack.addWidget(cred_page)
 
         from wokbee.ui.mcp_workspace import McpWorkspace
         from wokbee.core.mcp_store import McpStore
