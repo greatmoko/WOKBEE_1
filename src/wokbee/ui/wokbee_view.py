@@ -172,6 +172,19 @@ class WokBeeView(QWidget):
         else:
             self._ensure_welcome_tab()
 
+    def refresh_after_projects_cleared(self):
+        """通用设置批量删除未置顶项目后：关掉已删工作区并刷新侧栏。"""
+        selected = self._sidebar._selected_id
+        self._on_list_changed()
+        self._sidebar.refresh()
+        if selected and self.store.get(selected) is None:
+            projects = self.store.list_projects()
+            if projects:
+                self._sidebar.select(projects[0].id)
+            else:
+                self._sidebar._selected_id = None
+                self._on_selected("")
+
     def _on_workspace_status_changed(self):
         """工作区状态变更时刷新侧栏状态点（运行/待审批在侧栏即可看出）。"""
         self._sidebar.refresh()

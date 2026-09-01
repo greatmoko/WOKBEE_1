@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
-from tokbee.ui.styles.system import apply_lineedit, style_hint_label
+from tokbee.ui.styles.system import apply_danger_btn, apply_lineedit, style_hint_label
 from tokbee.core.provider_store import ProviderStore, ProviderSettings, ProviderModel
 from tokbee.core.provider import get_builtin
 from tokbee.core.errors import AIError
@@ -602,6 +602,12 @@ class ProviderSettingsWorkspace(QWidget):
         """)
         add_model_btn.clicked.connect(self._on_add_model)
         model_row.addWidget(add_model_btn)
+
+        clear_models_btn = QPushButton("清空模型 ID")
+        clear_models_btn.setToolTip("一键清空当前厂商的全部模型 ID")
+        apply_danger_btn(clear_models_btn, c, height=30)
+        clear_models_btn.clicked.connect(self._on_clear_models)
+        model_row.addWidget(clear_models_btn)
         right_l.addLayout(model_row)
 
         filter_row = QHBoxLayout()
@@ -973,6 +979,29 @@ class ProviderSettingsWorkspace(QWidget):
         self._current_id = ""
         self._reload_list()
         self._show_empty_detail()
+
+    def _on_clear_models(self):
+        if not self._current_id:
+            return
+        settings = self._collect_settings()
+        n = len(settings.models)
+        if n == 0:
+            _tip(self, self.theme, "当前没有可清空的模型 ID")
+            return
+        if not _confirm(
+            self,
+            self.theme,
+            f"确定清空当前厂商的全部 {n} 个模型 ID？可稍后重新拉取或手动添加。",
+            title="清空模型 ID",
+        ):
+            return
+        self._close_model_popup()
+        self._autosave_timer.stop()
+        settings.models = []
+        self.store.update_settings(self._current_id, settings)
+        self._render_models([])
+        self._refresh_default_labels()
+        _tip(self, self.theme, f"已清空 {n} 个模型 ID")
 
     def _on_add_model(self):
         if not self._current_id:

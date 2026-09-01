@@ -249,19 +249,22 @@ class MainWindow(QMainWindow):
         svc = self._services
 
         chat = ChatView(self.theme, svc.role_manager)
-        settings = SettingsView(self.theme, chat.manager)
+        wokbee = WokBeeView(
+            self.theme,
+            store=svc.wokbee_store,
+            settings=svc.wokbee_settings,
+            gateway_manager=svc.gateway_manager,
+        )
+        settings = SettingsView(
+            self.theme, chat.manager, project_store=svc.wokbee_store
+        )
         settings.chats_cleared.connect(chat.refresh_after_clear)
+        settings.projects_cleared.connect(wokbee.refresh_after_projects_cleared)
 
         automation = AutomationView(
             self.theme,
             svc.role_manager,
             wokbee_settings=svc.wokbee_settings,
-            gateway_manager=svc.gateway_manager,
-        )
-        wokbee = WokBeeView(
-            self.theme,
-            store=svc.wokbee_store,
-            settings=svc.wokbee_settings,
             gateway_manager=svc.gateway_manager,
         )
         autobee = AutoBeeView(

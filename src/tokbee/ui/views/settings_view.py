@@ -10,8 +10,14 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
-from tokbee.ui.styles.system import apply_textedit, apply_secondary_btn, style_hint_label
+from tokbee.ui.styles.system import (
+    apply_danger_btn,
+    apply_textedit,
+    apply_secondary_btn,
+    style_hint_label,
+)
 from tokbee.core.chat_manager import ChatManager
+from wokbee.core.project_store import ProjectStore, TRASH_RETENTION_DAYS
 from wokbee.core.settings import WokBeeSettings
 from wokbee.engine.runtime_env import (
     build_runtime_env_settings_text,
@@ -167,12 +173,20 @@ class _GeneralWorkspace(QWidget):
     """通用设置页 — 聊天记录管理、本机运行环境等。"""
 
     chats_cleared = Signal()
+    projects_cleared = Signal()
     _env_text_ready = Signal(str)
 
-    def __init__(self, theme: Theme, chat_manager: ChatManager, parent=None):
+    def __init__(
+        self,
+        theme: Theme,
+        chat_manager: ChatManager,
+        project_store: ProjectStore | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.theme = theme
         self.manager = chat_manager
+        self.project_store = project_store
         self._wokbee_settings = WokBeeSettings()
         self._env_text_ready.connect(self._apply_env_text)
         self._build()
@@ -233,6 +247,32 @@ class _GeneralWorkspace(QWidget):
         row.addWidget(clear_btn)
 
         layout.addLayout(row)
+
+        wb_sep = QFrame()
+        wb_sep.setFrameShape(QFrame.Shape.HLine)
+        wb_sep.setStyleSheet(f"color: {c['border_light']};")
+        layout.addWidget(wb_sep)
+
+        wb_group = QLabel("WokBee 项目记录管理")
+        wb_group.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {c['text']}; margin-top: 4px;")
+        layout.addWidget(wb_group)
+
+        wb_row = QHBoxLayout()
+        wb_row.setSpacing(12)
+        wb_desc = QLabel(
+            f"删除所有未置顶项目（移入工作区 _trash，与 WokBee 页面删除一致），"
+            f"置顶项目不受影响。回收站最多保留 {TRASH_RETENTION_DAYS} 天。"
+        )
+        wb_desc.setWordWrap(True)
+        style_hint_label(wb_desc, c)
+        wb_row.addWidget(wb_desc, stretch=1)
+
+        wb_btn = QPushButton("删除非置顶项目")
+        apply_danger_btn(wb_btn, c, height=34)
+        wb_btn.setToolTip("与 WokBee 侧栏删除相同：未置顶移入回收站，置顶跳过")
+        wb_btn.clicked.connect(self._confirm_clear_projects)
+        wb_row.addWidget(wb_btn)
+        layout.addLayout(wb_row)
 
         env_sep = QFrame()
         env_sep.setFrameShape(QFrame.Shape.HLine)
@@ -359,7 +399,64 @@ class _GeneralWorkspace(QWidget):
             self.chats_cleared.emit()
             self._show_result(count)
 
-    def _show_result(self, count: int):
+    def _confirm_clear_projects(self):
+        if self.project_store is None:
+            _show_styled_tip(self, self.theme, "项目存储未就绪")
+            return
+        c = self.theme.colors
+        dlg = QDialog(self)
+        dlg.setWindowTitle("确认删除")
+        dlg.setFixedSize(420, 200)
+        dlg.setStyleSheet(f"background: {c['content_bg']};")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(12)
+
+        msg = QLabel(
+            "确定删除所有未置顶的 WokBee 项目吗？\n\n"
+            f"与 WokBee 页面删除相同：移入工作区 _trash，回收站最多保留 "
+            f"{TRASH_RETENTION_DAYS} 天。置顶项目不受影响。"
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+        layout.addWidget(msg)
+
+        layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setFixedSize(80, 32)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["card_bg"]};
+                color: {c["text"]};
+                border: 1px solid {c["border"]};
+                border-radius: 6px;
+                font-size: 13px;
+            }}
+        """)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(cancel_btn)
+
+        confirm_btn = QPushButton("确认删除")
+        confirm_btn.setFixedSize(100, 32)
+        confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_danger_btn(confirm_btn, c, height=32)
+        confirm_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(confirm_btn)
+
+        layout.addLayout(btn_row)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            count = self.project_store.delete_unpinned(trash=True)
+            self.projects_cleared.emit()
+            self._show_result(count, kind="projects")
+
+    def _show_result(self, count: int, *, kind: str = "chats"):
         c = self.theme.colors
         dlg = QDialog(self)
         dlg.setWindowTitle("提示")
@@ -370,7 +467,14 @@ class _GeneralWorkspace(QWidget):
         layout.setContentsMargins(24, 20, 24, 16)
         layout.setSpacing(12)
 
-        text = f"已清空 {count} 条非置顶聊天记录。" if count > 0 else "没有需要清空的聊天记录。"
+        if kind == "projects":
+            text = (
+                f"已将 {count} 个未置顶项目移入回收站。"
+                if count > 0
+                else "没有需要删除的未置顶项目。"
+            )
+        else:
+            text = f"已清空 {count} 条非置顶聊天记录。" if count > 0 else "没有需要清空的聊天记录。"
         msg = QLabel(text)
         msg.setStyleSheet(f"font-size: 13px; color: {c['text']};")
         layout.addWidget(msg)
@@ -406,11 +510,19 @@ class SettingsView(QWidget):
     """设置页：左侧二级导航 + 右侧工作区。"""
 
     chats_cleared = Signal()
+    projects_cleared = Signal()
 
-    def __init__(self, theme: Theme, chat_manager: ChatManager, parent=None):
+    def __init__(
+        self,
+        theme: Theme,
+        chat_manager: ChatManager,
+        project_store: ProjectStore | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.theme = theme
         self._chat_manager = chat_manager
+        self._project_store = project_store
         self._pages: dict[str, QWidget] = {}
         self._build()
 
@@ -427,8 +539,11 @@ class SettingsView(QWidget):
         self._stack.setStyleSheet(f"background: {self.theme.colors['content_bg']};")
         layout.addWidget(self._stack, stretch=1)
 
-        general_page = _GeneralWorkspace(self.theme, self._chat_manager)
+        general_page = _GeneralWorkspace(
+            self.theme, self._chat_manager, project_store=self._project_store
+        )
         general_page.chats_cleared.connect(self.chats_cleared)
+        general_page.projects_cleared.connect(self.projects_cleared)
         self._pages["general"] = general_page
         self._stack.addWidget(general_page)
 

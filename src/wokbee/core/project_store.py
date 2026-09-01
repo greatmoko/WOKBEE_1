@@ -348,6 +348,15 @@ class ProjectStore:
         self.purge_expired_trash()
         return True
 
+    def delete_unpinned(self, *, trash: bool = True) -> int:
+        """删除全部未置顶项目；置顶跳过。单条逻辑与 ``delete`` / 侧栏删除一致。"""
+        ids = [p.id for p in self.list_projects() if not p.pinned]
+        deleted = 0
+        for pid in ids:
+            if self.delete(pid, trash=trash):
+                deleted += 1
+        return deleted
+
     def append_event(self, project_id: str, event: ProjectEvent) -> None:
         root = self.path_for(project_id)
         ensure_project_layout(root)

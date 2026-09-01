@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
+from tokbee.ui.styles.system import apply_form_combo
 from wokbee.gateway.manager import GatewayManager
 from wokbee.gateway.store import GatewayChannelConfig
 from wokbee.ui.dialogs import tip as _tip
@@ -392,7 +393,7 @@ class _ChannelPanelBase(QWidget):
         prj_hint.setStyleSheet(f"color: {c['text_hint']}; background: transparent; border: none; font-size: 12px;")
         route.addWidget(prj_hint)
         self._default_project = QComboBox()
-        self._default_project.setStyleSheet(_combo_qss(self.theme))
+        apply_form_combo(self._default_project, self.theme.colors)
         self._default_project.currentIndexChanged.connect(self._on_default_project_changed)
         route.addWidget(self._default_project)
         col.addWidget(route_card)
@@ -901,16 +902,6 @@ def _card_frame(theme: Theme, caption: str) -> tuple[QFrame, QVBoxLayout]:
         )
         lay.addWidget(lab)
     return frame, lay
-
-
-def _combo_qss(theme: Theme) -> str:
-    c = theme.colors
-    return f"""
-        QComboBox {{ background: {c['input_bg']}; color: {c['text']};
-            border: 1px solid {c['input_border']}; border-radius: 6px;
-            padding: 6px 8px; font-size: 13px; }}
-        QComboBox:focus {{ border: 1px solid {c['input_focus_border']}; }}
-    """
 
 
 # ── 主工作区 ────────────────────────────────────────
