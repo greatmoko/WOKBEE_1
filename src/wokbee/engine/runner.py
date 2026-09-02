@@ -48,7 +48,9 @@ from wokbee.engine.lessons import (
     Lesson,
     LessonStore,
     build_lesson_digest,
+    collect_events_log,
     collect_scripts_context,
+    judge_should_update_experience,
     summarize_lesson_with_ai,
 )
 from wokbee.engine.runtime_env import build_runtime_env_block
@@ -69,6 +71,11 @@ from wokbee.engine.ask_user import (
     build_ask_user_tool,
     is_ask_user_interrupt,
     normalize_ask_user_value,
+)
+from wokbee.engine.chat_memory import (
+    append_chat_memory,
+    build_chat_memory_tools,
+    summarize_chat_with_ai,
 )
 from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.credential_tools import build_credential_tools
@@ -900,6 +907,7 @@ class AgentRunner:
             list(NETWORK_TOOLS)
             + list(project_tools)
             + list(build_credential_tools())
+            + list(build_chat_memory_tools(project_root=req.project_root, emit=self._emit))
             + [build_ask_user_tool()]
             + [build_access_request_tool(
                 composite_backend, access_registry, self.settings,
@@ -1360,12 +1368,63 @@ class AgentRunner:
                 pass
 
             self._emit("info", "本轮回复已完成")
+            self._maybe_record_chat_memory(req, final_text)
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
             err = _format_engine_error(e)
             self._emit("error", f"交互失败：{err}")
             return RunResult(ok=False, outcome="failed", error=err)
+
+    def _maybe_record_chat_memory(
+        self,
+        req: RunRequest,
+        final_text: str,
+    ) -> None:
+        """交互（对话）成功结束后，自动总结一条对话记忆追加到单文件。
+
+        仅成功时记录；失败/取消/待审批不走这里。无可用模型密钥时跳过。
+        """
+        if not (
+            getattr(req.resolved, "api_key", None)
+            and getattr(req.resolved, "api_host", None)
+        ):
+            return
+        try:
+            run_log = collect_events_log(
+                list(self._run_events) or None, max_chars=8000
+            )
+            self._emit(
+                "info",
+                "正在提炼本轮对话记忆（不主动加载；AI 需要时可按需注入）…",
+            )
+            chat = build_chat_model(
+                req.resolved,
+                temperature=0.2,
+                timeout=self.settings.model_timeout_seconds,
+            )
+            entry = summarize_chat_with_ai(
+                model=chat,
+                goal=req.project.goal or req.user_message,
+                question=(req.user_message or "").strip(),
+                run_log=run_log,
+            )
+            if not entry:
+                self._emit("info", "对话记忆提炼失败，本轮未记录。")
+                return
+            path = append_chat_memory(req.project_root, entry)
+            try:
+                rel = path.relative_to(req.project_root).as_posix()
+            except ValueError:
+                rel = str(path)
+            kws = (entry.get("keywords") or "").strip()
+            self._emit(
+                "info",
+                f"已记录本轮对话记忆到 `{rel}`"
+                + (f"（关键字：{kws}）" if kws else ""),
+            )
+        except Exception:
+            logger.exception("记录对话记忆失败（不影响本次回复）")
 
     @staticmethod
     def _recent_events_digest(project_root: Path, *, limit: int = 40) -> str:
@@ -1679,18 +1738,41 @@ class AgentRunner:
         notes: str = "",
         artifacts: str = "",
     ) -> Lesson | None:
-        """仅在尚无任何经验时自动总结；已有经验则跳过并提示手动发起。"""
+        """首次运行自动总结并提取脚本；已有经验时由 AI 自行判断是否需要更新。"""
         store = LessonStore(req.project_root)
-        if not store.is_empty():
+        if store.is_empty():
+            # 首次运行：自动总结并固化脚本
+            if outcome == "cancelled":
+                self._emit("info", "已取消；尚无经验，未写入取消类经验。")
+                return None
+            return self._write_lesson(
+                req,
+                outcome,
+                summary,
+                errors,
+                success_path=success_path,
+                notes=notes,
+                artifacts="",
+                events=list(self._run_events),
+                use_ai=True,
+            )
+
+        # 已有经验：由 AI 判断本次是否值得更新（脚本报错/环节报错/新优化方法）
+        if outcome == "cancelled":
+            self._emit("info", "已取消；未更新经验。")
+            return None
+        should, reason = self._judge_update_experience(req, store, outcome)
+        if not should:
             self._emit(
                 "info",
-                "已有历史经验，本次未自动总结。需要时请点击「总结经验」"
-                "（将结合上一份经验、本次日志与脚本，由 AI 新建一份带时间戳的经验）。",
+                "AI 判断本次无需更新经验："
+                f"{reason or '无新错误 / 无更优方法 / 执行顺序未变'}",
             )
             return None
-        if outcome == "cancelled":
-            self._emit("info", "已取消；尚无经验，未写入取消类经验。")
-            return None
+        self._emit(
+            "info",
+            f"AI 判断本次需要更新经验：{reason or ''}",
+        )
         return self._write_lesson(
             req,
             outcome,
@@ -1702,6 +1784,37 @@ class AgentRunner:
             events=list(self._run_events),
             use_ai=True,
         )
+
+    def _judge_update_experience(
+        self,
+        req: RunRequest,
+        store: LessonStore,
+        outcome: str,
+    ) -> tuple[bool, str]:
+        """用轻量模型调用判断是否值得更新经验（无模型/失败则跳过）。"""
+        if not (
+            getattr(req.resolved, "api_key", None)
+            and getattr(req.resolved, "api_host", None)
+        ):
+            return False, "无可用模型，跳过判断"
+        try:
+            chat = build_chat_model(
+                req.resolved,
+                temperature=0.0,
+                timeout=self.settings.model_timeout_seconds,
+            )
+            previous_text = store.read_latest_text(max_chars=4000)
+            run_log = build_lesson_digest(list(self._run_events), max_chars=12000)
+            return judge_should_update_experience(
+                model=chat,
+                goal=req.project.goal or req.user_message,
+                outcome=outcome,
+                previous_experience=previous_text,
+                run_log=run_log,
+            )
+        except Exception:
+            logger.exception("AI 判断是否需要更新经验失败，默认不更新")
+            return False, "判断失败"
 
     def write_lesson_manual(
         self,

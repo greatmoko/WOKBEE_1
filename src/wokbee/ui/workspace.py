@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -42,7 +43,6 @@ from wokbee.core.context_usage import (
 from wokbee.core.models import MAX_PROJECT_TITLE_LEN, Project, ProjectEvent, ProjectStatus
 from wokbee.core.paths import deliverables_dir, list_deliverable_names, uploads_dir
 from wokbee.core.project_store import MAX_ARCHIVES, ProjectStore, TRASH_RETENTION_DAYS
-from wokbee.engine.lessons import build_success_path_from_timeline_events, collect_events_log
 from wokbee.ui.action_bar import _ActionBar
 from wokbee.ui.ask_user_dialog import AskUserDialog
 from wokbee.ui.dialogs import (
@@ -55,6 +55,9 @@ from wokbee.ui.dialogs import (
     tip as _tip,
 )
 from wokbee.ui.timeline import _Timeline
+
+
+logger = logging.getLogger("wokbee")
 
 
 STATUS_LABEL = {
@@ -136,7 +139,7 @@ class _CompactWorker(QThread):
 
 
 class _RefineMetaWorker(QThread):
-    """后台调用 AI，根据目标与时间线生成新的项目名称与目标。"""
+    """后台调用 AI，根据对话记忆生成新的项目名称与目标。"""
 
     finished_ok = Signal(str, str)  # title, goal
     failed = Signal(str)
@@ -148,7 +151,7 @@ class _RefineMetaWorker(QThread):
         *,
         current_title: str,
         current_goal: str,
-        timeline_log: str,
+        memory_context: str,
         max_title_len: int,
         parent=None,
     ):
@@ -157,7 +160,7 @@ class _RefineMetaWorker(QThread):
         self._project = project
         self._current_title = current_title
         self._current_goal = current_goal
-        self._timeline_log = timeline_log
+        self._memory_context = memory_context
         self._max_title_len = max_title_len
         self._cancelled = False
         self._client = None
@@ -192,7 +195,7 @@ class _RefineMetaWorker(QThread):
         self._client = client
         client.cancel_check = lambda: self._cancelled
         system = (
-            "你是项目元信息助手。根据当前名称、目标与最近运行/对话记录，"
+            "你是项目元信息助手。根据当前名称、目标与最近「对话记忆」，"
             "生成更贴切的「项目名称」和「项目目标」。\n"
             f"硬性要求：\n"
             f"1. 名称尽量短，不超过 {self._max_title_len} 个字，不要整句目标当名称。\n"
@@ -203,7 +206,7 @@ class _RefineMetaWorker(QThread):
         user = (
             f"当前名称：{self._current_title or '（空）'}\n"
             f"当前目标：{self._current_goal or '（空）'}\n\n"
-            f"最近记录：\n{self._timeline_log or '（无）'}"
+            f"最近对话记忆：\n{self._memory_context or '（无）'}"
         )
         try:
             resp = self._client.chat(
@@ -723,8 +726,7 @@ class _ProjectWorkspace(QWidget):
         self._actions.open_folder_clicked.connect(self._on_open_folder)
         self._actions.open_deliverables_clicked.connect(self._on_open_deliverables)
         self._actions.upload_clicked.connect(self._on_upload)
-        self._actions.summarize_clicked.connect(self._on_summarize)
-        self._actions.clear_experience_clicked.connect(self._on_clear_experience)
+        self._actions.archive_clicked.connect(self._on_archive)
         self._actions.compact_mode_changed.connect(self._timeline.set_global_compact_mode)
         self._actions.send_clicked.connect(self._on_send)
         self._actions.approve_clicked.connect(self._on_approve)
@@ -991,10 +993,13 @@ class _ProjectWorkspace(QWidget):
         if not project:
             return
 
-        events = self.store.list_events(self._project_id)
-        # 取最近片段，控制 token
-        recent = events[-80:] if len(events) > 80 else events
-        timeline_log = collect_events_log(recent, max_chars=8000)
+        # AI 命名/写目标改为从「对话记忆」总结（默认加载最近 2 轮），不再翻聊天记录
+        from wokbee.engine.chat_memory import read_recent_chat_memory
+
+        root = self.store.path_for(self._project_id)
+        memory_context = read_recent_chat_memory(root, rounds=2, max_chars=8000)
+        if not memory_context:
+            memory_context = "（暂无对话记忆；可先进行一次交互再让 AI 提炼名称/目标）"
         self._essentials.set_ai_refine_busy(True)
         self._refine_project_id = self._project_id  # 发起时捕获，切换项目不写错
         worker = _RefineMetaWorker(
@@ -1002,7 +1007,7 @@ class _ProjectWorkspace(QWidget):
             project,
             current_title=project.title,
             current_goal=project.goal,
-            timeline_log=timeline_log,
+            memory_context=memory_context,
             max_title_len=MAX_PROJECT_TITLE_LEN,
             parent=self,
         )
@@ -1206,8 +1211,6 @@ class _ProjectWorkspace(QWidget):
             # 输入框内容若已用作目标，不再重复当指令；无额外指令时用目标运行
             text = ""
 
-        # 运行前自动归档上一轮（有内容才归档；保留经验与 scripts）
-        self._auto_archive_before_run()
         project = self.store.get(self._project_id) or project
 
         if text:
@@ -1586,85 +1589,6 @@ class _ProjectWorkspace(QWidget):
             title="上传完成",
         )
 
-    def _on_summarize(self):
-        """人工发起：根据当前时间线写入一条经验（后台线程，避免卡住 UI）。"""
-        from wokbee.engine.worker import LessonWorker
-
-        if not self._project_id:
-            _tip(self, self.theme, "请先选择项目。")
-            return
-        if self._worker and self._worker.isRunning():
-            _tip(self, self.theme, "请先等待当前运行结束，再总结经验。")
-            return
-        if self._lesson_worker and self._lesson_worker.isRunning():
-            _tip(self, self.theme, "正在总结经验，请稍候。")
-            return
-        project = self.store.get(self._project_id)
-        if not project:
-            return
-        events = self.store.list_events(self._project_id)
-        useful = [
-            e
-            for e in events
-            if e.kind in ("tool", "agent", "error", "user", "info", "approval")
-        ]
-        if not useful:
-            _tip(self, self.theme, "当前没有可总结的运行记录，请先运行一次。")
-            return
-
-        path_text, summary, errors = build_success_path_from_timeline_events(events)
-        if project.status == ProjectStatus.DONE:
-            outcome = "success"
-        elif project.status == ProjectStatus.FAILED:
-            outcome = "failed"
-        elif any(e.kind == "error" for e in events):
-            outcome = "failed"
-        elif any("运行结束：成功" in (e.content or "") for e in events):
-            outcome = "success"
-        else:
-            outcome = "partial"
-
-        if not summary:
-            summary = (project.goal or "人工总结当前会话")[:800]
-
-        notes = (
-            "- 本条由用户点击「总结经验」人工发起。\n"
-            "- 需要实时数据时必须联网，禁止凭记忆编造。\n"
-            "- 高危 execute / 写文件是否免审取决于项目审核策略。"
-        )
-        if errors:
-            notes = f"- 时间线错误摘录：{errors[:300]}\n" + notes
-
-        self._worker_mode = "lesson"
-        self._status_before_lesson = project.status
-        self.store.set_status(
-            self._project_id,
-            ProjectStatus.RUNNING,
-            current_step="总结经验中",
-        )
-        self._schedule_essentials_refresh()
-        self._actions.set_running(True)
-        self._worker_project_id = self._project_id  # 发起时捕获，运行中切项目不串写
-
-        worker = LessonWorker(
-            self.store.settings,
-            project,
-            self.store.path_for(project.id),
-            user_message=project.goal or summary,
-            outcome=outcome,
-            summary=summary,
-            errors=errors,
-            success_path=path_text,
-            notes=notes,
-            events=events,
-            parent=self,
-        )
-        self._lesson_worker = worker
-        worker.event_emitted.connect(self._on_engine_event)
-        worker.finished_lesson.connect(self._on_lesson_finished)
-        worker.failed.connect(self._on_lesson_failed)
-        worker.start()
-
     def _restore_after_lesson(self):
         target = self._worker_project_id or self._project_id
         self._lesson_worker = None
@@ -1742,7 +1666,10 @@ class _ProjectWorkspace(QWidget):
                     pass
 
     def _auto_archive_before_run(self) -> None:
-        """运行前自动归档上一轮会话（无内容则跳过）。"""
+        """运行前自动归档上一轮会话（无内容则跳过）。
+
+        当前运行不再自动调用（省 token 以便重复运行复用经验）；保留此方法供外部按需触发。
+        """
         if not self._project_id:
             return
         if not self.store.needs_auto_archive(self._project_id):
@@ -1760,8 +1687,8 @@ class _ProjectWorkspace(QWidget):
         self._refresh_essentials()
         self.status_changed.emit()
 
-    def _on_clear_experience(self):
-        """归档会话，并把经验文档一并归档后清空。"""
+    def _on_archive(self):
+        """归档本次会话；历史经验一并归档，仅保留最新一份经验与 scripts/。"""
         if not self._project_id:
             return
         if self._worker and self._worker.isRunning():
@@ -1771,22 +1698,56 @@ class _ProjectWorkspace(QWidget):
         ok = _confirm(
             self,
             self.theme,
-            "清空经验",
-            "确认后将：\n"
-            "• 执行一次归档（对话、工作区、交付物等；uploads 上传资料保留）\n"
-            "• 并把 memory/ 经验文档与 scripts/ 本地脚本一并归档后清空\n"
-            "• 保留：项目名称、目标、审核策略、uploads/\n"
-            f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n"
-            "• 之后 Agent 禁止访问 archives/\n\n"
+            "归档",
+            "确认归档本次会话？\n"
+            "• 归档：对话、工作区、交付物、运行记录（uploads 上传资料保留）\n"
+            "• 经验文档仅保留**最新一份**，历史经验一并归档\n"
+            "• 保留：项目名称、目标、审核策略、uploads/、references/\n"
+            f"• 每个项目最多保留 {MAX_ARCHIVES} 份存档，超出自动删除最旧的\n\n"
             "是否继续？",
         )
         if not ok:
             return
         dest = self.store.archive_session(
             self._project_id,
-            include_memory=True,
-            reason="clear_experience",
+            include_memory=False,
+            reason="archive_manual",
         )
         if not dest:
             return
+        self._archive_old_experiences(self._project_id, dest)
         self._refresh()
+
+    def _archive_old_experiences(self, project_id: str, dest: Path) -> None:
+        """把 memory/experiences/ 下除最新一份外的历史经验归档到 dest，只保留最新。"""
+        try:
+            import shutil
+
+            from wokbee.engine.lessons import LessonStore
+
+            store = LessonStore(self.store.path_for(project_id))
+            paths = store.list_paths()
+            if len(paths) <= 1:
+                return
+            target_root = dest / "memory" / "experiences"
+            target_root.mkdir(parents=True, exist_ok=True)
+            moved = 0
+            for p in paths[1:]:
+                try:
+                    shutil.copy2(p, target_root / p.name)
+                    p.unlink(missing_ok=True)
+                    moved += 1
+                except OSError as e:
+                    logger.warning("归档历史经验 %s 失败: %s", p, e)
+            if moved:
+                latest = paths[0].name
+                ev = ProjectEvent(
+                    kind="info",
+                    content=(
+                        f"已归档 {moved} 份历史经验到 `{dest.name}/memory/experiences/`；"
+                        f"仅保留最新一份 `{latest}` 供复用。"
+                    ),
+                )
+                self.store.append_event(project_id, ev)
+        except Exception:
+            logger.exception("归档历史经验失败（会话已归档，不影响使用）")

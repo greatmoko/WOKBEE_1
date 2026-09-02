@@ -24,8 +24,7 @@ class _ActionBar(QFrame):
     run_clicked = Signal()
     pause_clicked = Signal()
     open_folder_clicked = Signal()
-    summarize_clicked = Signal()
-    clear_experience_clicked = Signal()
+    archive_clicked = Signal()
     upload_clicked = Signal()
     open_deliverables_clicked = Signal()
     send_clicked = Signal(str)
@@ -133,7 +132,7 @@ class _ActionBar(QFrame):
             ("📁", "打开目录", self.open_folder_clicked.emit),
             ("📦", "打开交付物目录", self.open_deliverables_clicked.emit),
             ("⬆️", "上传文件", self.upload_clicked.emit),
-            ("🧹", "清空经验", self.clear_experience_clicked.emit),
+            ("🗄️", "归档（仅保留最新经验）", self.archive_clicked.emit),
         ):
             btn = QPushButton(icon)
             btn.setToolTip(tip)
@@ -204,14 +203,6 @@ class _ActionBar(QFrame):
         """)
         pause_btn.clicked.connect(self.pause_clicked.emit)
         row.addWidget(pause_btn)
-
-        summarize_btn = QPushButton("总结")
-        summarize_btn.setFixedSize(48, 34)
-        summarize_btn.setToolTip("AI 总结经验")
-        summarize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        summarize_btn.setStyleSheet(self._sec_qss())
-        summarize_btn.clicked.connect(self.summarize_clicked.emit)
-        row.addWidget(summarize_btn)
 
         send_btn = QPushButton("发送")
         send_btn.setFixedSize(48, 34)

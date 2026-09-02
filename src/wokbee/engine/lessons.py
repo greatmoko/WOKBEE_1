@@ -826,6 +826,84 @@ def summarize_lesson_with_ai(
     return out
 
 
+_AI_SUMMARY_JUDGE_SYSTEM = """你是 WokBee 的「经验是否需要更新」决策助手。
+
+背景：项目已有至少一份经验（memory/experiences/，运行时只加载最新一份）。你需要根据
+「最新经验 + 本次运行日志 + 本轮结果」判断**是否值得**新建一份更新后的经验。
+
+值得更新的情形（任一命中即可）：
+1. 本次运行出现脚本报错 / 步骤报错 / 执行失败，且现有经验没记录该坑（值得写入注意事项或修正执行顺序）。
+2. AI 或脚本发现了**新的、更优的实现方法 / 更快的步骤顺序 / 新脚本**，与现有经验不同。
+3. 本次成功路径明显变化（脚本清单、执行顺序、依赖、环境参数变化）。
+4. 现有最新经验过薄/缺失关键章节，本次有更完整的流程可供固化。
+
+不必更新的情形：
+1. 完全按已有经验+脚本稳定复跑成功，无新错误、无新方法、执行顺序未变。
+2. 仅结果/数据变化（经验不记录结果），流程/方法/环境层面无新信息。
+3. 运行被用户取消，无实质新信息。
+
+硬性要求：
+- 只返回一个 JSON 对象（不要 Markdown 围栏），格式：
+  {"should_update": true 或 false, "reason": "一句话理由，中文"}
+- should_update 默认应偏向 false（省 token）；只有确有意义的新方法 / 新错误 / 新顺序时才为 true。
+"""
+
+
+def judge_should_update_experience(
+    *,
+    model: Any,
+    goal: str,
+    outcome: str,
+    previous_experience: str,
+    run_log: str,
+) -> tuple[bool, str]:
+    """用轻量模型调用判断本次运行是否值得更新经验。失败一律返回 (False, "")。"""
+    user = (
+        f"项目目标：{goal or '（未设置）'}\n"
+        f"本轮 outcome：{outcome}\n\n"
+        f"## 最新一份经验（仅流程方法，不含结果）\n{previous_experience or '（无）'}\n\n"
+        f"## 本次运行日志\n{run_log or '（无）'}\n\n"
+        "请判断是否需要更新经验，仅返回 JSON。"
+    )
+    messages = [
+        {"role": "system", "content": _AI_SUMMARY_JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    text = ""
+    try:
+        parts: list[str] = []
+        for chunk in model.stream(messages):
+            piece = getattr(chunk, "content", None)
+            if piece is None:
+                continue
+            if isinstance(piece, list):
+                piece = "".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in piece
+                )
+            piece = str(piece)
+            if piece:
+                parts.append(piece)
+        text = "".join(parts).strip()
+    except Exception:
+        text = ""
+    if not text:
+        try:
+            resp = model.invoke(messages)
+            raw = getattr(resp, "content", None) or str(resp)
+            if isinstance(raw, list):
+                raw = "\n".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in raw
+                )
+            text = str(raw).strip()
+        except Exception:
+            return False, ""
+    data = _parse_ai_summary_json(text)
+    if not isinstance(data, dict):
+        return False, ""
+    return bool(data.get("should_update")), str(data.get("reason") or "").strip()
+
+
+
 def _normalize_ai_script_files(raw: Any) -> list[dict[str, Any]]:
     """校验并规整 AI 返回的 script_files。"""
     if not isinstance(raw, list):
