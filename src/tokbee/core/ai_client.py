@@ -1,4 +1,4 @@
-"""OpenAI 兼容 API 客户端 — 封装 chat/completions 调用（支持流式）。"""
+"""OpenAI 兼容 API 客户端 — 支持 Chat Completions 与 Responses。"""
 
 import json
 import logging
@@ -38,9 +38,10 @@ class AIClient:
     """调用 OpenAI 兼容的 /chat/completions 接口。"""
 
     def __init__(self, endpoint: str, api_key: str, model: str, *,
-                 family: str = "openai_compat",
+                 family: str = "openai_compat", protocol: str = "chat",
                  retry_interval: int = 0, call_delay: float = 0):
-        self._url = self._build_chat_url(endpoint)
+        self._protocol = protocol if protocol in ("chat", "responses") else "chat"
+        self._url = self._build_url(endpoint, self._protocol)
         self._api_key = api_key
         self._model = model
         self._family = family or "openai_compat"
@@ -50,17 +51,63 @@ class AIClient:
         self.cancel_check: Callable[[], bool] | None = None
 
     @staticmethod
-    def _build_chat_url(endpoint: str) -> str:
+    def _build_url(endpoint: str, protocol: str = "chat") -> str:
         url = endpoint.rstrip("/")
-        for suffix in ["/chat/completions", "/completions"]:
+        target = "/responses" if protocol == "responses" else "/chat/completions"
+        for suffix in ["/chat/completions", "/responses", "/completions"]:
             if url.endswith(suffix):
-                return url if suffix == "/chat/completions" else url.replace(
-                    "/completions", "/chat/completions"
-                )
+                return url[: -len(suffix)] + target
         if url.endswith("/models"):
             url = url[: -len("/models")]
         url = url.rstrip("/")
-        return url + "/chat/completions"
+        return url + target
+
+    @staticmethod
+    def _responses_content(content, role: str) -> list[dict]:
+        block_type = "output_text" if role == "assistant" else "input_text"
+        if isinstance(content, str):
+            return [{"type": block_type, "text": content}]
+        if not isinstance(content, list):
+            return [{"type": block_type, "text": str(content or "")}]
+        result: list[dict] = []
+        for part in content:
+            if not isinstance(part, dict):
+                result.append({"type": block_type, "text": str(part)})
+                continue
+            kind = part.get("type")
+            if kind == "image_url":
+                image = part.get("image_url") or {}
+                url = image.get("url") if isinstance(image, dict) else image
+                result.append({"type": "input_image", "image_url": url})
+            elif kind in ("text", "input_text", "output_text"):
+                result.append({"type": block_type, "text": str(part.get("text") or "")})
+            elif part.get("text") is not None:
+                result.append({"type": block_type, "text": str(part["text"])})
+        return result or [{"type": block_type, "text": ""}]
+
+    @classmethod
+    def _messages_to_responses(cls, messages: list[dict]) -> tuple[str, list[dict]]:
+        instructions: list[str] = []
+        input_items: list[dict] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            content = message.get("content", "")
+            if role == "system":
+                if content:
+                    instructions.append(str(content) if isinstance(content, str) else json.dumps(content, ensure_ascii=False))
+                continue
+            if role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": str(message.get("tool_call_id") or ""),
+                    "output": str(content or ""),
+                })
+                continue
+            input_items.append({
+                "role": "assistant" if role == "assistant" else "user",
+                "content": cls._responses_content(content, role),
+            })
+        return "\n\n".join(instructions), input_items
 
     def _make_request(self, body: dict) -> urllib.request.Request:
         payload_body = dict(body)
@@ -166,12 +213,14 @@ class AIClient:
             try:
                 return self._request_with_cancel(body, timeout)
             except urllib.error.HTTPError as e:
-                if e.code == 429 and self._retry_interval > 0 and rate_limit_count < 100:
+                if e.code == 429 and self._retry_interval > 0 and attempt < max_retries - 1:
                     try:
                         e.read()
                     except Exception:
                         pass
+                    last_exc = e
                     rate_limit_count += 1
+                    attempt += 1
                     self._emit_retry(self._retry_interval, rate_limit_count)
                     if self._cancellable_sleep(self._retry_interval):
                         raise AIError("用户取消") from e
@@ -207,12 +256,13 @@ class AIClient:
         max_tokens: int | None = None,
     ) -> dict:
         if settings is not None:
+            params = build_completion_params(
+                settings, model_id=self._model, family=self._family, stream=stream,
+            )
             body = {
                 "model": self._model,
                 "messages": messages,
-                **build_completion_params(
-                    settings, model_id=self._model, family=self._family, stream=stream,
-                ),
+                **params,
             }
         else:
             body = {"model": self._model, "messages": messages}
@@ -224,11 +274,54 @@ class AIClient:
                 body["top_p"] = top_p
             if max_tokens is not None:
                 body["max_tokens"] = max_tokens
+        if self._protocol == "responses":
+            instructions, input_items = self._messages_to_responses(messages)
+            body.pop("messages", None)
+            body["input"] = input_items
+            if instructions:
+                body["instructions"] = instructions
+            if "max_tokens" in body:
+                body["max_output_tokens"] = body.pop("max_tokens")
+            if "reasoning_effort" in body:
+                body["reasoning"] = {"effort": body.pop("reasoning_effort")}
+            body.pop("thinking", None)
         if tools is not None:
-            body["tools"] = tools
-            if tool_choice is not None:
-                body["tool_choice"] = tool_choice
+            if self._protocol == "responses":
+                converted = []
+                for tool in tools:
+                    fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+                    converted.append({"type": "function", **fn})
+                body["tools"] = converted
+                if tool_choice not in (None, "auto"):
+                    body["tool_choice"] = tool_choice
+            else:
+                body["tools"] = tools
+                if tool_choice is not None:
+                    body["tool_choice"] = tool_choice
         return body
+
+    @staticmethod
+    def _parse_responses(data: dict, model: str) -> ChatResponse:
+        content = str(data.get("output_text") or "")
+        reasoning_parts: list[str] = []
+        for item in data.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "message":
+                for part in item.get("content") or []:
+                    if isinstance(part, dict) and part.get("type") == "output_text":
+                        if not content:
+                            content += str(part.get("text") or "")
+            elif item.get("type") == "reasoning":
+                for part in item.get("summary") or []:
+                    if isinstance(part, dict):
+                        reasoning_parts.append(str(part.get("text") or ""))
+        return ChatResponse(
+            content=content,
+            reasoning_content="".join(reasoning_parts),
+            model=data.get("model", model),
+            usage=data.get("usage"),
+        )
 
     def chat(
         self,
@@ -247,6 +340,8 @@ class AIClient:
             temperature=temperature, top_p=top_p, max_tokens=max_tokens,
         )
         data = self._request_with_retry(body, timeout=timeout)
+        if self._protocol == "responses":
+            return self._parse_responses(data, self._model)
         try:
             choice = data["choices"][0]
             message = choice["message"]
@@ -300,12 +395,14 @@ class AIClient:
                 resp = urllib.request.urlopen(req, timeout=180)
                 break
             except urllib.error.HTTPError as e:
-                if e.code == 429 and self._retry_interval > 0 and rate_limit_count < 100:
+                if e.code == 429 and self._retry_interval > 0 and attempt < max_retries - 1:
                     try:
                         e.read()
                     except Exception:
                         pass
+                    last_exc = e
                     rate_limit_count += 1
+                    attempt += 1
                     self._emit_retry(self._retry_interval, rate_limit_count)
                     if self._cancellable_sleep(self._retry_interval):
                         raise AIError("用户取消") from e
@@ -345,6 +442,24 @@ class AIClient:
                         try:
                             data = json.loads(data_str)
                         except json.JSONDecodeError:
+                            continue
+                        if self._protocol == "responses":
+                            event_type = data.get("type")
+                            if event_type == "response.output_text.delta":
+                                delta = data.get("delta") or ""
+                                if delta:
+                                    yield StreamChunk(content_delta=str(delta))
+                            elif event_type in (
+                                "response.reasoning_summary_text.delta",
+                                "response.reasoning_text.delta",
+                                "response.reasoning.delta",
+                            ):
+                                delta = data.get("delta") or ""
+                                if delta:
+                                    yield StreamChunk(reasoning_delta=str(delta))
+                            elif event_type in ("response.completed", "response.failed", "response.incomplete"):
+                                yield StreamChunk(is_finished=True)
+                                return
                             continue
                         choices = data.get("choices")
                         if not choices:

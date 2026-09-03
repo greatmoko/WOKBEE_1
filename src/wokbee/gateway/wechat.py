@@ -49,6 +49,7 @@ class WeChatChannel(Channel):
         self._cb: Callable[[ChannelMessage], None] | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._ctx_lock = threading.Lock()  # 守护 bot._ctx_cache（poll 线程写 / send 线程读）
         self._stop_requested = False
         self._last_err = ""
 
@@ -171,7 +172,8 @@ class WeChatChannel(Channel):
                     if not from_user:
                         continue
                     if m.get("context_token"):
-                        bot._ctx_cache[from_user] = m["context_token"]
+                        with self._ctx_lock:
+                            bot._ctx_cache[from_user] = m["context_token"]
                     for item in m.get("item_list") or []:
                         im = self._make_im(m, item, bot)
                         cm = self._to_channel_message(im)
@@ -221,7 +223,8 @@ class WeChatChannel(Channel):
         # context_token：优先取入站消息携带的，兜底用 bot 的会话缓存（DM 定向必需）。
         ctx = (msg.channel_meta or {}).get("context_token", "")
         if not ctx:
-            ctx = getattr(bot, "_ctx_cache", {}).get(msg.sender_id, "")
+            with self._ctx_lock:
+                ctx = getattr(bot, "_ctx_cache", {}).get(msg.sender_id, "")
         if not ctx:
             return False, "缺少 context_token，无法定向回复（请先给机器人发一条消息）"
         try:

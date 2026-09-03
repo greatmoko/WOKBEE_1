@@ -63,6 +63,23 @@ def _show_styled_tip(parent: QWidget, theme: "Theme", message: str):
     dlg.exec()
 
 
+def _danger_action_qss(theme: "Theme") -> str:
+    c = theme.colors
+    return f"""
+        QPushButton {{
+            background: {c["danger"]};
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 0 16px;
+            font-size: 13px;
+        }}
+        QPushButton:hover {{
+            background: {c.get("danger_hover", "#c0392b")};
+        }}
+    """
+
+
 class _SubNavButton(QPushButton):
     """二级导航按钮：左侧图标 + 右侧文字。"""
 
@@ -175,6 +192,7 @@ class _GeneralWorkspace(QWidget):
     chats_cleared = Signal()
     projects_cleared = Signal()
     _env_text_ready = Signal(str)
+    _memory_reset_ready = Signal(bool, str)
 
     def __init__(
         self,
@@ -189,6 +207,7 @@ class _GeneralWorkspace(QWidget):
         self.project_store = project_store
         self._wokbee_settings = WokBeeSettings()
         self._env_text_ready.connect(self._apply_env_text)
+        self._memory_reset_ready.connect(self._on_memory_reset_done)
         self._build()
         self._reload_env_text()
 
@@ -230,19 +249,7 @@ class _GeneralWorkspace(QWidget):
         clear_btn = QPushButton("清空非置顶聊天")
         clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_btn.setFixedHeight(34)
-        clear_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["danger"]};
-                color: #ffffff;
-                border: none;
-                border-radius: 6px;
-                padding: 0 16px;
-                font-size: 13px;
-            }}
-            QPushButton:hover {{
-                background: {c.get("danger_hover", "#c0392b")};
-            }}
-        """)
+        clear_btn.setStyleSheet(_danger_action_qss(self.theme))
         clear_btn.clicked.connect(self._confirm_clear)
         row.addWidget(clear_btn)
 
@@ -268,11 +275,40 @@ class _GeneralWorkspace(QWidget):
         wb_row.addWidget(wb_desc, stretch=1)
 
         wb_btn = QPushButton("删除非置顶项目")
-        apply_danger_btn(wb_btn, c, height=34)
+        wb_btn.setFixedHeight(34)
+        wb_btn.setStyleSheet(_danger_action_qss(self.theme))
         wb_btn.setToolTip("与 WokBee 侧栏删除相同：未置顶移入回收站，置顶跳过")
         wb_btn.clicked.connect(self._confirm_clear_projects)
         wb_row.addWidget(wb_btn)
         layout.addLayout(wb_row)
+
+        memory_sep = QFrame()
+        memory_sep.setFrameShape(QFrame.Shape.HLine)
+        memory_sep.setStyleSheet(f"color: {c['border_light']};")
+        layout.addWidget(memory_sep)
+
+        memory_group = QLabel("Agent 记忆管理")
+        memory_group.setStyleSheet(
+            f"font-size: 14px; font-weight: 600; color: {c['text']}; margin-top: 4px;"
+        )
+        layout.addWidget(memory_group)
+
+        memory_row = QHBoxLayout()
+        memory_row.setSpacing(12)
+        memory_desc = QLabel(
+            "清空全局记忆仓库，并将记忆概述恢复为系统初始版本。项目目录中的经验文件不受影响。"
+        )
+        memory_desc.setWordWrap(True)
+        style_hint_label(memory_desc, c)
+        memory_row.addWidget(memory_desc, stretch=1)
+        self._memory_reset_btn = QPushButton("一键重置记忆")
+        self._memory_reset_btn.setFixedHeight(34)
+        self._memory_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._memory_reset_btn.setStyleSheet(_danger_action_qss(self.theme))
+        self._memory_reset_btn.setToolTip("清空记忆仓库，并恢复初始记忆概述")
+        self._memory_reset_btn.clicked.connect(self._confirm_reset_memory)
+        memory_row.addWidget(self._memory_reset_btn)
+        layout.addLayout(memory_row)
 
         env_sep = QFrame()
         env_sep.setFrameShape(QFrame.Shape.HLine)
@@ -455,6 +491,72 @@ class _GeneralWorkspace(QWidget):
             count = self.project_store.delete_unpinned(trash=True)
             self.projects_cleared.emit()
             self._show_result(count, kind="projects")
+
+    def _confirm_reset_memory(self):
+        c = self.theme.colors
+        dlg = QDialog(self)
+        dlg.setWindowTitle("确认重置记忆")
+        dlg.setFixedSize(440, 220)
+        dlg.setStyleSheet(f"background: {c['content_bg']};")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(12)
+        msg = QLabel(
+            "确定要重置 Agent 记忆吗？\n\n"
+            "这会清空全局记忆仓库，并覆盖记忆概述为系统初始版本。\n"
+            "项目目录中的 memory/experiences/ 与 scripts/ 不受影响。"
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+        layout.addWidget(msg)
+        layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setFixedSize(80, 32)
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["card_bg"]}; color: {c["text"]};
+                border: 1px solid {c["border"]}; border-radius: 6px; font-size: 13px;
+            }}
+        """)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(cancel_btn)
+        confirm_btn = QPushButton("确认重置")
+        confirm_btn.setFixedSize(100, 32)
+        confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        confirm_btn.setStyleSheet(_danger_action_qss(self.theme))
+        confirm_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(confirm_btn)
+        layout.addLayout(btn_row)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._memory_reset_btn.setEnabled(False)
+            self._memory_reset_btn.setText("正在重置…")
+            threading.Thread(
+                target=self._reset_memory_worker,
+                daemon=True,
+                name="settings-reset-memory",
+            ).start()
+
+    def _reset_memory_worker(self):
+        try:
+            from wokbee.engine.agent_memory import reset_memory
+
+            reset_memory()
+            self._memory_reset_ready.emit(
+                True, "Agent 记忆已重置，记忆概述已恢复为初始版本。"
+            )
+        except Exception as e:  # noqa: BLE001
+            self._memory_reset_ready.emit(False, f"重置 Agent 记忆失败：{e}")
+
+    def _on_memory_reset_done(self, _ok: bool, message: str):
+        self._memory_reset_btn.setEnabled(True)
+        self._memory_reset_btn.setText("一键重置记忆")
+        _show_styled_tip(self, self.theme, message)
 
     def _show_result(self, count: int, *, kind: str = "chats"):
         c = self.theme.colors

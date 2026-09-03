@@ -287,10 +287,16 @@ def run_cancellable(
                 _win_job_close(leftover)
         t_out.join(timeout=1.5)
         t_err.join(timeout=2)
-        for s in (proc.stdout, proc.stderr):
+        # 只在读取线程已结束（读到 EOF、管道写端已关）时才显式 close。
+        # 若孙进程仍占用管道写端，close() 会阻塞到它退出——正是本函数要避免的挂死。
+        if not t_out.is_alive() and proc.stdout is not None:
             try:
-                if s is not None:
-                    s.close()
+                proc.stdout.close()
+            except OSError:
+                pass
+        if not t_err.is_alive() and proc.stderr is not None:
+            try:
+                proc.stderr.close()
             except OSError:
                 pass
 

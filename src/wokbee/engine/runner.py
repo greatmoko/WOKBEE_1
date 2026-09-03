@@ -77,6 +77,16 @@ from wokbee.engine.chat_memory import (
     build_chat_memory_tools,
     summarize_chat_with_ai,
 )
+from wokbee.engine.agent_memory import (
+    build_memory_tools,
+    ensure_overview,
+    get_memory,
+    judge_update_overview,
+    rewrite_overview,
+    summarize_project_agent_memory,
+    upsert_memory,
+    write_overview,
+)
 from wokbee.engine.project_tools import build_project_meta_tools
 from wokbee.engine.credential_tools import build_credential_tools
 from wokbee.engine.script_factory import (
@@ -171,35 +181,18 @@ def _ensure_memory_files(project_root: Path, project: Project) -> None:
     mem.mkdir(parents=True, exist_ok=True)
     (mem / "experiences").mkdir(parents=True, exist_ok=True)
     agents_md = mem / "AGENTS.md"
+    # AGENTS.md 精简为最小项目标识；能力/环境/工具/目录/凭据约定统一由【记忆概述】承载
     content = (
         f"# Project {project.title}\n\n"
         f"- id: `{project.id}`\n"
         f"- goal: {project.goal or '(未设置)'}\n"
         f"- approval: {project.approval.summary()}\n\n"
-        "你是一个能力强大的AI工作助手,具备完整联网能力,读写本地文件,并且可以执行本机命令。\n"
-        "使用 `web_search` / `http_get` 获取实时信息；需要时可用 `execute` 跑本机命令。\n"
-        "如果配置了deepseek的api key并且deepseek搜索工具可用,则使用DeepSeek服务端搜索工具进行联网搜索。\n"
-        "工作文件放 `workspace/`；最终交付物放 `deliverables/`；"
-        "用户上传文件在 `uploads/`（可直接读取调用；"
-        "若有名称或内容相近的多份文件，默认以修改时间最新的一份为准）；"
-        "参考材料放 `references/`（第三方代码/登录/环境参数/用到的 Skills 快照，归档时不清理）。\n"
-        "当你使用外部软件/服务、需登录、或依赖环境参数/密钥时，请把可复用的第三方代码、配置、环境参数与登录信息保存到 `references/`，并在 `references/MANIFEST.md` 登记，确保下次能稳定复跑；"
-        "这些敏感信息仅供本机使用，勿外发。\n"
-        "**禁止**访问 `archives/`：归档文档与归档数据不得作为本轮数据来源。\n"
-        "文件工具（read_file/write_file/edit_file/ls/glob/grep/delete）**一律用虚拟路径**："
-        "项目内用 workspace/、deliverables/、uploads/ 等；"
-        "项目外先调用 `request_access(path, reason)` 申请**人工高危审批**，"
-        "获批后用返回的 `/ext/<slug>/…` 虚拟路径访问。"
-        "**禁止**把真实主机路径（C:\\\\...、D:/...）传给文件工具——只有 `execute` 接受真实路径。\n"
-        "经验位于 `memory/experiences/exp_时间戳.md`；每次总结新建一份；"
-        "运行时只加载**最新一份**（实现步骤/执行顺序/环境/注意事项），不要依赖旧经验或结果正文。\n"
-        "可用工具更新项目名称（update_project_title）与目标（update_project_goal）；"
-        f"名称尽量简短，最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
-        "总结时会把可确定性步骤固化到 scripts/（不归档）；下次运行优先本地执行脚本，"
-        "脚本 callback 写入 workspace/script_callback_<脚本名>.md，"
-        "后续 AI 步骤必须先读这些文件再继续；仅脚本失败/数据不对/需创作时才唤 AI。\n"
-        "全局 Skills 位于本机公共目录，通过 /skills/ 只读挂载，不复制进本项目；"
-        "用到的 Skills 会在经验总结时快照到 references/skills/。\n"
+        "你是 WokBee——运行在用户本机上的工作助手。能力范围、系统环境、可调用工具、"
+        "目录与凭据约定见运行前注入的【记忆概述】；本轮项目态见【会话上下文】。\n"
+        "经验位于 memory/experiences/（只加载最新一份）；对话记忆在 memory/chat_memory.md；"
+        "跨项目记忆库可用 search_memory 检索，用户要求记住的内容用 save_user_memory 保存。\n"
+        "**禁止**访问 archives/；文件工具只用虚拟路径；凭据只给环境变量名，严禁写出账号密码。\n"
+        f"项目名称最多 {MAX_PROJECT_TITLE_LEN} 字。\n"
     )
     agents_md.write_text(content, encoding="utf-8")
     from wokbee.engine.lessons import LessonStore
@@ -611,6 +604,7 @@ class AgentRunner:
         self._ask_user_event = threading.Event()
         self._ask_user_answers: dict | None = None
         self._run_events: list[Any] = []
+        self._events_lock = threading.Lock()  # 守护 _run_events（流线程与主线程并发访问）
         self._cache_tracker = CacheHitTracker()
         self._prefix_guard: PrefixGuard | None = None
         self._session_context_block: str = ""
@@ -660,14 +654,20 @@ class AgentRunner:
         if "args" in meta:
             meta["args"] = redact_obj(meta["args"])
         # 本轮内存轨迹：供首次自动总结固化脚本（避免等 UI 写盘竞态）
-        self._run_events.append(
-            SimpleNamespace(kind=kind, content=content or "", meta=dict(meta))
-        )
+        with self._events_lock:
+            self._run_events.append(
+                SimpleNamespace(kind=kind, content=content or "", meta=dict(meta))
+            )
         if self.on_event:
             try:
                 self.on_event(kind, content, meta)
             except Exception:
                 logger.exception("on_event 回调失败")
+
+    def _snapshot_run_events(self) -> list:
+        """线程安全地取当前事件快照。"""
+        with self._events_lock:
+            return list(self._run_events)
 
     def _wait_approval(self, pending: list[dict]) -> list[dict]:
         self._approval_event.clear()
@@ -865,6 +865,7 @@ class AgentRunner:
             experience_digest=experience_digest,
             mode=mode,
             runtime_env_block=runtime_env_block,
+            memory_overview_digest=ensure_overview(),
             extra_lines=context_extra or None,
         )
 
@@ -908,6 +909,7 @@ class AgentRunner:
             + list(project_tools)
             + list(build_credential_tools())
             + list(build_chat_memory_tools(project_root=req.project_root, emit=self._emit))
+            + list(build_memory_tools(emit=self._emit))
             + [build_ask_user_tool()]
             + [build_access_request_tool(
                 composite_backend, access_registry, self.settings,
@@ -1304,7 +1306,8 @@ class AgentRunner:
 
     def run_chat(self, req: RunRequest) -> RunResult:
         """非运行期对话：回答提问（可与目标无关），可读写项目名称/目标；不跑经验管线。"""
-        self._run_events = []
+        with self._events_lock:
+            self._run_events = []
         self._context_injected = False
         thread_id = f"wokbee-chat-{req.project.id}"
         config = {"configurable": {"thread_id": thread_id}}
@@ -1368,7 +1371,9 @@ class AgentRunner:
                 pass
 
             self._emit("info", "本轮回复已完成")
-            self._maybe_record_chat_memory(req, final_text)
+            recorded = self._maybe_record_chat_memory(req, final_text)
+            if recorded:
+                self._maybe_update_agent_memory(req, chat_text=final_text)
             return RunResult(ok=True, outcome="success", final_text=final_text)
         except Exception as e:
             logger.exception("交互失败")
@@ -1380,19 +1385,19 @@ class AgentRunner:
         self,
         req: RunRequest,
         final_text: str,
-    ) -> None:
+    ) -> bool:
         """交互（对话）成功结束后，自动总结一条对话记忆追加到单文件。
 
-        仅成功时记录；失败/取消/待审批不走这里。无可用模型密钥时跳过。
+        仅成功时记录；失败/取消/待审批不走这里。无可用模型密钥时跳过。返回是否已写入。
         """
         if not (
             getattr(req.resolved, "api_key", None)
             and getattr(req.resolved, "api_host", None)
         ):
-            return
+            return False
         try:
             run_log = collect_events_log(
-                list(self._run_events) or None, max_chars=8000
+                self._snapshot_run_events() or None, max_chars=8000
             )
             self._emit(
                 "info",
@@ -1411,7 +1416,7 @@ class AgentRunner:
             )
             if not entry:
                 self._emit("info", "对话记忆提炼失败，本轮未记录。")
-                return
+                return False
             path = append_chat_memory(req.project_root, entry)
             try:
                 rel = path.relative_to(req.project_root).as_posix()
@@ -1423,8 +1428,10 @@ class AgentRunner:
                 f"已记录本轮对话记忆到 `{rel}`"
                 + (f"（关键字：{kws}）" if kws else ""),
             )
+            return True
         except Exception:
             logger.exception("记录对话记忆失败（不影响本次回复）")
+            return False
 
     @staticmethod
     def _recent_events_digest(project_root: Path, *, limit: int = 40) -> str:
@@ -1477,7 +1484,8 @@ class AgentRunner:
             return ""
 
     def run(self, req: RunRequest, *, resume: bool = False) -> RunResult:
-        self._run_events = []
+        with self._events_lock:
+            self._run_events = []
         self._context_injected = False
         thread_id = f"wokbee-{req.project.id}"
         config = {"configurable": {"thread_id": thread_id}}
@@ -1745,16 +1753,13 @@ class AgentRunner:
             if outcome == "cancelled":
                 self._emit("info", "已取消；尚无经验，未写入取消类经验。")
                 return None
-            return self._write_lesson(
+            return self._write_lesson_then_memory(
                 req,
                 outcome,
                 summary,
                 errors,
                 success_path=success_path,
                 notes=notes,
-                artifacts="",
-                events=list(self._run_events),
-                use_ai=True,
             )
 
         # 已有经验：由 AI 判断本次是否值得更新（脚本报错/环节报错/新优化方法）
@@ -1773,7 +1778,27 @@ class AgentRunner:
             "info",
             f"AI 判断本次需要更新经验：{reason or ''}",
         )
-        return self._write_lesson(
+        return self._write_lesson_then_memory(
+            req,
+            outcome,
+            summary,
+            errors,
+            success_path=success_path,
+            notes=notes,
+        )
+
+    def _write_lesson_then_memory(
+        self,
+        req: RunRequest,
+        outcome: str,
+        summary: str,
+        errors: str,
+        *,
+        success_path: str = "",
+        notes: str = "",
+    ) -> Lesson | None:
+        """写入经验后，若本轮产生了新经验则顺带更新跨项目 Agent 记忆。"""
+        lesson = self._write_lesson(
             req,
             outcome,
             summary,
@@ -1781,9 +1806,15 @@ class AgentRunner:
             success_path=success_path,
             notes=notes,
             artifacts="",
-            events=list(self._run_events),
+            events=self._snapshot_run_events(),
             use_ai=True,
         )
+        if lesson is not None:
+            self._maybe_update_agent_memory(
+                req,
+                lesson_text=(lesson.summary or lesson.success_path or "")[:2000],
+            )
+        return lesson
 
     def _judge_update_experience(
         self,
@@ -1804,7 +1835,7 @@ class AgentRunner:
                 timeout=self.settings.model_timeout_seconds,
             )
             previous_text = store.read_latest_text(max_chars=4000)
-            run_log = build_lesson_digest(list(self._run_events), max_chars=12000)
+            run_log = build_lesson_digest(self._snapshot_run_events(), max_chars=12000)
             return judge_should_update_experience(
                 model=chat,
                 goal=req.project.goal or req.user_message,
@@ -1815,6 +1846,124 @@ class AgentRunner:
         except Exception:
             logger.exception("AI 判断是否需要更新经验失败，默认不更新")
             return False, "判断失败"
+
+    def _maybe_update_agent_memory(
+        self,
+        req: RunRequest,
+        *,
+        lesson_text: str = "",
+        chat_text: str = "",
+    ) -> None:
+        """本轮产生了新的经验/对话记忆时，更新跨项目 Agent 记忆（单表 kind='agent'）。
+
+        记忆库按关键字跨项目检索；概览仅当 AI 判断有必要时才重写。
+        """
+        if not (
+            getattr(req.resolved, "api_key", None)
+            and getattr(req.resolved, "api_host", None)
+        ):
+            return
+        project_id = req.project.id
+        try:
+            refs = self._collect_agent_memory_refs(req.project_root)
+            previous = ""
+            prev_row = get_memory(project_id, kind="agent")
+            if prev_row:
+                previous = str(prev_row.get("content") or "")
+            chat_mem = ""
+            try:
+                from wokbee.engine.chat_memory import chat_memory_path
+
+                cp = chat_memory_path(req.project_root)
+                if cp.exists():
+                    chat_mem = cp.read_text(encoding="utf-8")[-2000:]
+            except OSError:
+                chat_mem = ""
+
+            chat = build_chat_model(
+                req.resolved,
+                temperature=0.2,
+                timeout=self.settings.model_timeout_seconds,
+            )
+            self._emit("info", "正在更新跨项目 Agent 记忆…")
+            result = summarize_project_agent_memory(
+                model=chat,
+                project_id=project_id,
+                goal=req.project.goal or req.user_message,
+                previous_agent_memory=previous,
+                lesson_text=lesson_text or chat_text,
+                chat_memory_text=chat_mem,
+                refs=refs,
+            )
+            if not result:
+                self._emit("info", "Agent 记忆提炼失败，本轮未更新记忆库。")
+                return
+            upsert_memory(
+                project_id=project_id,
+                kind="agent",
+                content=result.get("summary") or "",
+                keywords=result.get("keywords") or [],
+                refs=result.get("refs") or [],
+            )
+            kw_s = "、".join(str(k) for k in (result.get("keywords") or [])[:8])
+            self._emit(
+                "info",
+                f"已更新项目 Agent 记忆（{project_id}，关键字：{kw_s or '（无）'}）；"
+                "可跨项目用 search_memory 检索。",
+            )
+
+            # 概览：仅当 AI 判断有必要才重写
+            try:
+                overview = ensure_overview()
+                if judge_update_overview(
+                    model=chat,
+                    overview=overview,
+                    project_id=project_id,
+                    new_info=(result.get("summary") or "")[:3000],
+                ):
+                    new_overview = rewrite_overview(
+                        model=chat,
+                        overview=overview,
+                        project_id=project_id,
+                        new_info=(result.get("summary") or "")[:4000],
+                    )
+                    if new_overview and new_overview.strip() != overview.strip():
+                        write_overview(new_overview)
+                        self._emit("info", "AI 判断有必要，已更新跨项目记忆概述。")
+            except Exception:
+                logger.exception("更新记忆概述失败（不影响记忆库）")
+        except Exception:
+            logger.exception("更新跨项目 Agent 记忆失败（不影响本轮结果）")
+
+    @staticmethod
+    def _collect_agent_memory_refs(project_root: Path) -> list[str]:
+        """收集项目 Agent 记忆相关的原始文件绝对路径（仅地址）。"""
+        from wokbee.engine.chat_memory import chat_memory_path
+
+        root = Path(project_root)
+        refs: list[str] = []
+        for p in (
+            chat_memory_path(root),
+            root / "references" / "MANIFEST.md",
+        ):
+            if p.exists() and p.is_file():
+                refs.append(str(p))
+        try:
+            store = LessonStore(root)
+            latest = store.latest_path()
+            if latest and latest.exists():
+                refs.append(str(latest))
+        except Exception:
+            pass
+        sdir = root / "scripts"
+        if sdir.exists():
+            try:
+                for p in sorted(sdir.iterdir())[:20]:
+                    if p.is_file():
+                        refs.append(str(p))
+            except OSError:
+                pass
+        return list(dict.fromkeys(refs))
 
     def write_lesson_manual(
         self,
@@ -1861,7 +2010,8 @@ class AgentRunner:
 
             # 事件优先：调用方传入 > 本轮内存缓冲 > 磁盘 events.jsonl
             if events is None:
-                events = list(self._run_events) if self._run_events else None
+                mem_events = self._snapshot_run_events()
+                events = mem_events if mem_events else None
             if not events:
                 try:
                     from wokbee.core.models import ProjectEvent
@@ -1884,10 +2034,11 @@ class AgentRunner:
                     logger.exception("读取运行日志失败，AI 总结将缺少日志上下文")
                     events = []
             # 内存缓冲有工具调用时并入（补磁盘竞态缺口）
-            if self._run_events:
+            mem_events = self._snapshot_run_events()
+            if mem_events:
                 events = list(events or []) + [
                     e
-                    for e in self._run_events
+                    for e in mem_events
                     if getattr(e, "kind", "") == "tool"
                     and (getattr(e, "meta", None) or {}).get("phase") == "call"
                 ]

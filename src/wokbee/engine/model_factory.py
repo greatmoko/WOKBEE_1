@@ -164,6 +164,8 @@ def build_chat_model(
         "temperature": temperature,
         "max_retries": 1,
     }
+    if resolved.api_protocol == "responses":
+        kwargs["use_responses_api"] = True
     if timeout and timeout > 0:
         kwargs["timeout"] = float(timeout)
     return ChatOpenAI(**kwargs)

@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from wokbee.core.paths import scripts_dir
 from wokbee.engine.archive_guard import command_touches_archives
-from tokbee.core.subprocess_util import nowin
+from tokbee.core.subprocess_util import run_cancellable
 from wokbee.engine.runtime_env import collect_runtime_env, enrich_shell_env
 
 logger = logging.getLogger("wokbee")
@@ -143,24 +143,6 @@ def group_phases(steps: list[dict]) -> list[dict]:
     return phases
 
 
-def _decode_bytes(data: bytes | None) -> str:
-    """尽量用 utf-8 / gbk 解码脚本 stdout/stderr（Windows 常见混码）。"""
-    if not data:
-        return ""
-
-    def _try(enc: str) -> str | None:
-        try:
-            return data.decode(enc)
-        except (LookupError, UnicodeDecodeError):
-            return None
-
-    for enc in ("utf-8", "utf-8-sig", "gbk", "cp936", "big5"):
-        hit = _try(enc)
-        if hit is not None:
-            return hit.strip()
-    return data.decode("utf-8", errors="replace").strip()
-
-
 def _persist_script_callback(project_root: Path, script_rel: str, body: str) -> str | None:
     """把脚本 stdout/stderr 落到 workspace/script_callback_*.md（主机兜底）。"""
     from datetime import datetime
@@ -223,6 +205,7 @@ def run_one_script(
     entry: dict,
     *,
     timeout_sec: int = 120,
+    cancel_event: threading.Event | None = None,
 ) -> ScriptRunItem:
     import os
 
@@ -303,40 +286,38 @@ def run_one_script(
             step_id=step_id,
         )
     try:
-        proc = subprocess.run(
+        result = run_cancellable(
             cmd,
             cwd=str(root),
-            capture_output=True,
             timeout=timeout_sec,
             env=env,
             shell=use_shell,
-            creationflags=nowin(),
+            cancel_event=cancel_event,
         )
-        out = _decode_bytes(proc.stdout)
-        err = _decode_bytes(proc.stderr)
+        out = result.stdout
+        err = result.stderr
         # 约定：固化脚本失败路径都会输出固定哨兵「脚本执行失败」并退出非零码（见 script_factory.py）。
         # 以「退出码为 0 且全量输出不含该哨兵」为成功判定 —— 既往只查 out[:80] 与任意「失败：」
         # 子串，会在失败信息落到中后段、或脚本 _save("失败…") 后 exit(0) 时误判成功。
-        ok = proc.returncode == 0 and "脚本执行失败" not in out
+        # 哨兵可能落在 stdout 或 stderr，两者都要查。
+        ok = result.returncode == 0 and "脚本执行失败" not in out and "脚本执行失败" not in err
         # 主机兜底：无论脚本内部是否 _save，都把输出落到 workspace
         persist_body = out if out else err
         if persist_body:
             saved = _persist_script_callback(root, rel, persist_body)
             if saved and saved not in (out or ""):
                 out = (out or "") + (f"\n[callback 已写入] {saved}" if out else f"[callback 已写入] {saved}")
+        if result.cancelled:
+            error = "已取消"
+        elif result.timed_out:
+            error = f"超时（>{timeout_sec}s）"
+        else:
+            error = (err[:2000] if err else "") or ("" if ok else out[:2000])
         return ScriptRunItem(
             path=rel,
-            ok=ok,
+            ok=ok and not result.timed_out and not result.cancelled,
             output=out[:8000],
-            error=(err[:2000] if err else "") or ("" if ok else out[:2000]),
-            description=desc,
-            step_id=step_id,
-        )
-    except subprocess.TimeoutExpired:
-        return ScriptRunItem(
-            path=rel,
-            ok=False,
-            error=f"超时（>{timeout_sec}s）",
+            error=error,
             description=desc,
             step_id=step_id,
         )
@@ -355,11 +336,15 @@ def run_script_phase(
     steps: list[dict],
     *,
     timeout_sec: int = 120,
+    cancel_event: threading.Event | None = None,
 ) -> PhaseResult:
     phase = PhaseResult(type="script")
     outputs: list[str] = []
     for entry in steps:
-        item = run_one_script(project_root, entry, timeout_sec=timeout_sec)
+        item = run_one_script(
+            project_root, entry,
+            timeout_sec=timeout_sec, cancel_event=cancel_event,
+        )
         phase.items.append(item)
         if item.output:
             outputs.append(f"### [{item.step_id or item.path}] {item.description}\n{item.output[:4000]}")
@@ -402,6 +387,7 @@ def run_pipeline_until_ai_or_end(
     start_phase: int = 0,
     timeout_sec: int = 120,
     prior_context: list[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> PipelineRunResult:
     """从 start_phase 起执行：连续脚本阶段会跑完；遇到 AI 阶段则暂停并 need_ai。
 
@@ -420,7 +406,8 @@ def run_pipeline_until_ai_or_end(
         phase = result.phases[i]
         if phase["type"] == "script":
             pr = run_script_phase(
-                project_root, phase["steps"], timeout_sec=timeout_sec
+                project_root, phase["steps"],
+                timeout_sec=timeout_sec, cancel_event=cancel_event,
             )
             all_items.extend(pr.items)
             if pr.output:

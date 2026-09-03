@@ -237,6 +237,7 @@ class _RoleGenWorker(QThread):
             client = AIClient(
                 self._model.api_host, self._model.api_key, self._model.model_id,
                 family=self._model.family,
+                protocol=self._model.api_protocol,
             )
             messages = [
                 {"role": "system", "content": self._system_prompt},

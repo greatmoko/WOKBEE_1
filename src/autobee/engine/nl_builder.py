@@ -49,7 +49,8 @@ class NLBuilder:
             raise ValueError("请先选择用于生成的 AI 模型")
 
         client = AIClient(
-            model.api_host, model.api_key, model.model_id, family=model.family,
+            model.api_host, model.api_key, model.model_id,
+            family=model.family, protocol=model.api_protocol,
         )
         resp = client.chat(
             [

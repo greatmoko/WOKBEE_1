@@ -14,7 +14,10 @@ from PySide6.QtWidgets import (
 )
 
 from tokbee.ui.styles.theme import Theme
-from tokbee.ui.styles.system import apply_danger_btn, apply_lineedit, style_hint_label
+from tokbee.ui.styles.system import (
+    apply_checkbox, apply_combo_popup_style, apply_danger_btn, apply_lineedit,
+    apply_secondary_btn, apply_spin, section_label_qss, style_hint_label,
+)
 from tokbee.core.provider_store import ProviderStore, ProviderSettings, ProviderModel
 from tokbee.core.provider import get_builtin
 from tokbee.core.errors import AIError
@@ -29,6 +32,7 @@ class _ModelSettingsPopup(QFrame):
     """模型行设置浮层：上下文窗口 / 设为默认 / 删除。"""
 
     context_changed = Signal(str, int)   # model_id, context_window
+    protocol_changed = Signal(str, str)  # model_id, chat | responses
     set_default = Signal(str)
     delete_model = Signal(str)
 
@@ -57,14 +61,14 @@ class _ModelSettingsPopup(QFrame):
         layout.setSpacing(8)
 
         title = QLabel(model.nickname or model.model_id)
-        title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {c['text']};")
+        title.setStyleSheet(section_label_qss(c))
         title.setWordWrap(True)
         layout.addWidget(title)
 
         ctx_row = QHBoxLayout()
         ctx_row.setSpacing(8)
         ctx_lbl = QLabel("上下文窗口")
-        ctx_lbl.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']};")
+        ctx_lbl.setStyleSheet(section_label_qss(c))
         ctx_row.addWidget(ctx_lbl)
         self._ctx_spin = QSpinBox()
         self._ctx_spin.setRange(0, 10_000_000)
@@ -72,49 +76,46 @@ class _ModelSettingsPopup(QFrame):
         self._ctx_spin.setValue(int(model.context_window or 0))
         self._ctx_spin.setToolTip("0 表示未设置 tokens")
         self._ctx_spin.setMinimumWidth(120)
-        self._ctx_spin.setStyleSheet(f"""
-            QSpinBox {{
-                background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
-                border-radius: 4px; padding: 4px 6px; color: {c["text"]}; font-size: 12px;
-            }}
-        """)
+        apply_spin(self._ctx_spin, c)
         self._ctx_spin.valueChanged.connect(self._on_ctx)
         ctx_row.addWidget(self._ctx_spin, stretch=1)
         layout.addLayout(ctx_row)
 
         hint = QLabel("单位 tokens")
-        hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        style_hint_label(hint, c)
         layout.addWidget(hint)
 
-        btn_style = f"""
-            QPushButton {{
-                background: {c["card_bg"]}; color: {c["text"]};
-                border: 1px solid {c["border"]}; border-radius: 6px;
-                padding: 6px 10px; font-size: 12px; text-align: left;
-            }}
-            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
-            QPushButton:disabled {{ color: {c["text_hint"]}; }}
-        """
+        protocol_row = QHBoxLayout()
+        protocol_row.setSpacing(8)
+        protocol_lbl = QLabel("API 协议")
+        protocol_lbl.setStyleSheet(section_label_qss(c))
+        protocol_row.addWidget(protocol_lbl)
+        self._protocol_combo = QComboBox()
+        self._protocol_combo.addItem("Chat Completions（默认）", "chat")
+        self._protocol_combo.addItem("Responses API", "responses")
+        index = self._protocol_combo.findData(model.api_protocol or "chat")
+        self._protocol_combo.setCurrentIndex(max(0, index))
+        self._protocol_combo.setMinimumWidth(120)
+        apply_combo_popup_style(self._protocol_combo, c)
+        self._protocol_combo.currentIndexChanged.connect(
+            lambda _i: self.protocol_changed.emit(
+                self._model_id, str(self._protocol_combo.currentData() or "chat")
+            )
+        )
+        protocol_row.addWidget(self._protocol_combo, stretch=1)
+        layout.addLayout(protocol_row)
+
         if is_default:
             def_btn = QPushButton("✓ 当前为默认模型")
             def_btn.setEnabled(False)
         else:
             def_btn = QPushButton("设为默认模型")
             def_btn.clicked.connect(self._on_default)
-        def_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        def_btn.setStyleSheet(btn_style)
+        apply_secondary_btn(def_btn, c, height=32)
         layout.addWidget(def_btn)
 
         del_btn = QPushButton("删除此模型")
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {c["danger"]};
-                border: 1px solid {c["border"]}; border-radius: 6px;
-                padding: 6px 10px; font-size: 12px; text-align: left;
-            }}
-            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
-        """)
+        apply_danger_btn(del_btn, c, height=32)
         del_btn.clicked.connect(self._on_delete)
         layout.addWidget(del_btn)
 
@@ -797,24 +798,12 @@ class ProviderSettingsWorkspace(QWidget):
             row_l.setContentsMargins(0, 0, 0, 0)
             row_l.setSpacing(8)
 
-            cb = QCheckBox(m.nickname or m.model_id)
+            cb = QCheckBox(m.nickname)
             cb.setChecked(m.enabled)
             cb.setToolTip(m.model_id if m.nickname else "")
-            cb.setStyleSheet(f"font-size: 13px; color: {c['text']};")
+            apply_checkbox(cb, c)
             cb.toggled.connect(self._on_model_toggled)
-            row_l.addWidget(cb, stretch=1)
-
-            is_default = self.store.is_default_model(self._current_id, m.model_id)
-            if is_default:
-                badge = QLabel("默认")
-                badge.setStyleSheet(f"""
-                    QLabel {{
-                        color: {c["accent"]}; font-size: 11px; font-weight: 600;
-                        padding: 2px 8px; border: 1px solid {c["border"]};
-                        border-radius: 4px;
-                    }}
-                """)
-                row_l.addWidget(badge)
+            row_l.addWidget(cb)
 
             gear = QPushButton("⚙")
             gear.setToolTip("模型设置")
@@ -833,6 +822,26 @@ class ProviderSettingsWorkspace(QWidget):
             )
             row_l.addWidget(gear)
 
+            mid_lbl = QLabel(m.model_id)
+            mid_lbl.setToolTip(m.nickname if m.nickname else "")
+            mid_lbl.setStyleSheet(
+                f"font-size: 12px; color: {c['text_secondary']};"
+            )
+            row_l.addWidget(mid_lbl)
+
+            is_default = self.store.is_default_model(self._current_id, m.model_id)
+            if is_default:
+                badge = QLabel("默认")
+                badge.setStyleSheet(f"""
+                    QLabel {{
+                        color: {c["accent"]}; font-size: 11px; font-weight: 600;
+                        padding: 2px 8px; border: 1px solid {c["border"]};
+                        border-radius: 4px;
+                    }}
+                """)
+                row_l.addWidget(badge)
+
+            row_l.addStretch(1)
             self._model_layout.addWidget(row)
             self._model_checks.append((cb, m, row))
 
@@ -855,6 +864,7 @@ class ProviderSettingsWorkspace(QWidget):
             self.theme, model, is_default=is_default, parent=self.window(),
         )
         popup.context_changed.connect(self._on_model_context_changed)
+        popup.protocol_changed.connect(self._on_model_protocol_changed)
         popup.set_default.connect(self._on_set_default)
         popup.delete_model.connect(self._on_delete_model)
         self._model_popup = popup
@@ -866,6 +876,13 @@ class ProviderSettingsWorkspace(QWidget):
         for _cb, m, _row in self._model_checks:
             if m.model_id == model_id:
                 m.context_window = int(context_window)
+                break
+        self._schedule_autosave()
+
+    def _on_model_protocol_changed(self, model_id: str, protocol: str):
+        for _cb, m, _row in self._model_checks:
+            if m.model_id == model_id:
+                m.api_protocol = protocol if protocol in ("chat", "responses") else "chat"
                 break
         self._schedule_autosave()
 
@@ -929,6 +946,7 @@ class ProviderSettingsWorkspace(QWidget):
                 context_window=int(m.context_window or 0),
                 max_output=m.max_output,
                 enabled=cb.isChecked(),
+                api_protocol=m.api_protocol,
             ))
         return ProviderSettings(
             api_key=self._key_edit.text().strip(),

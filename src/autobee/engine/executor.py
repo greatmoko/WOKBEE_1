@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 import sys
 import threading
 from typing import Any, Callable
 
 from tokbee.core.ai_client import AIClient
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
-from tokbee.core.subprocess_util import nowin
+from tokbee.core.subprocess_util import run_cancellable
 
 from wokbee.core.models import ApprovalFlags, Project, ProjectEvent, ProjectStatus
 from wokbee.core.project_store import ProjectStore
@@ -109,7 +108,10 @@ class TaskExecutor:
             return {"ok": True, "message": task.content or "（无内容）", "error": ""}
         try:
             model = self._resolve_model(task, for_gen=False)
-            client = AIClient(model.api_host, model.api_key, model.model_id, family=model.family)
+            client = AIClient(
+                model.api_host, model.api_key, model.model_id,
+                family=model.family, protocol=model.api_protocol,
+            )
             prompt = task.content or task.description or "请生成一段文本。"
             resp = client.chat(
                 [
@@ -138,25 +140,23 @@ class TaskExecutor:
         except FileNotFoundError as e:
             return {"ok": False, "message": "", "error": str(e)}
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                creationflags=nowin(),
-            )
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "message": "", "error": f"脚本执行超时（> {timeout} 秒）"}
+            result = run_cancellable(cmd, timeout=timeout)
+        except FileNotFoundError as e:
+            return {"ok": False, "message": "", "error": str(e)}
         except Exception as e:
             return {"ok": False, "message": "", "error": f"脚本执行失败：{e}"}
-        out = (proc.stdout or "").strip()
-        err = (proc.stderr or "").strip()
-        if proc.returncode == 0:
+        if result.timed_out:
+            return {"ok": False, "message": "", "error": f"脚本执行超时（> {timeout} 秒）"}
+        if result.cancelled:
+            return {"ok": False, "message": "", "error": "脚本执行被取消"}
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        if result.returncode == 0:
             return {"ok": True, "message": out or "（执行成功，无输出）", "error": err}
         return {
             "ok": False,
             "message": out or "脚本执行失败",
-            "error": err or f"退出码 {proc.returncode}",
+            "error": err or f"退出码 {result.returncode}",
         }
 
     @staticmethod

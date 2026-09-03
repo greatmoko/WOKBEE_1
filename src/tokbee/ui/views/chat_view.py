@@ -357,7 +357,7 @@ class _UserBubbleLabel(QLabel):
 
 class _AiNameWorker(QThread):
     """后台线程：调用 AI 生成对话标题。"""
-    finished = Signal(str)
+    name_ready = Signal(str)
     failed = Signal(str)
 
     def __init__(self, client: AIClient, messages: list[dict], parent=None):
@@ -371,14 +371,14 @@ class _AiNameWorker(QThread):
             content = resp.content or ""
             if not content.strip() and resp.reasoning_content:
                 content = resp.reasoning_content
-            self.finished.emit(content)
+            self.name_ready.emit(content)
         except Exception as e:
             self.failed.emit(str(e))
 
 
 class _CompactWorker(QThread):
     """后台线程：生成上下文摘要并返回新的 compaction point。"""
-    finished = Signal(str, int, int)  # summary, boundary_index, pin_end
+    compact_done = Signal(str, int, int)  # summary, boundary_index, pin_end
     failed = Signal(str)
 
     def __init__(
@@ -416,7 +416,7 @@ class _CompactWorker(QThread):
         if not summary.strip():
             self.failed.emit("无法生成摘要")
             return
-        self.finished.emit(summary, self._new_boundary, self._pin_end)
+        self.compact_done.emit(summary, self._new_boundary, self._pin_end)
 
 
 class _AIChatWorker(QThread):
@@ -448,6 +448,7 @@ class _AIChatWorker(QThread):
             client = AIClient(
                 self._model.api_host, self._model.api_key, self._model.model_id,
                 family=self._model.family,
+                protocol=self._model.api_protocol,
             )
             # 让同步请求的等待/退避可被取消（A7）
             client.cancel_check = lambda: self._cancelled
@@ -1887,6 +1888,7 @@ class _ChatWorkspace(QWidget):
                 self._current_model.api_key,
                 self._current_model.model_id,
                 family=self._current_model.family,
+                protocol=self._current_model.api_protocol,
             )
         if manual:
             self._set_sending(True)
@@ -1901,7 +1903,7 @@ class _ChatWorkspace(QWidget):
             pin_end=pin_end,
         )
         self._compact_worker = worker
-        worker.finished.connect(
+        worker.compact_done.connect(
             lambda summary, boundary, pin, m=manual, s=sess: self._on_compact_done(
                 summary, boundary, m, pin_end=pin, sess=s
             )
@@ -2587,7 +2589,10 @@ class _ChatWorkspace(QWidget):
         primary = self._current_model or ProviderStore().first_resolved()
         if not primary or not primary.api_host:
             return
-        client = AIClient(primary.api_host, primary.api_key, primary.model_id, family=primary.family)
+        client = AIClient(
+            primary.api_host, primary.api_key, primary.model_id,
+            family=primary.family, protocol=primary.api_protocol,
+        )
         messages = [
             {"role": "system", "content": (
                 '根据用户的对话内容，生成一个简短的中文对话标题。\n'
@@ -2598,7 +2603,7 @@ class _ChatWorkspace(QWidget):
         ]
         sid = session.id
         worker = _AiNameWorker(client, messages, parent=self)
-        worker.finished.connect(lambda reply, _sid=sid: self._on_auto_name_done(_sid, reply))
+        worker.name_ready.connect(lambda reply, _sid=sid: self._on_auto_name_done(_sid, reply))
         worker.failed.connect(lambda _err: None)
         self._auto_name_worker = worker
         worker.start()

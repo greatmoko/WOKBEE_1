@@ -83,7 +83,7 @@ TITLE_FROM_GOAL_LEN = MAX_PROJECT_TITLE_LEN
 class _CompactWorker(QThread):
     """后台生成上下文摘要，写入 compaction point。"""
 
-    finished = Signal(str, int, int)  # summary, boundary_index, pin_end
+    compact_done = Signal(str, int, int)  # summary, boundary_index, pin_end
     failed = Signal(str)
 
     def __init__(
@@ -135,7 +135,7 @@ class _CompactWorker(QThread):
         if not summary.strip():
             self.failed.emit("无法生成摘要")
             return
-        self.finished.emit(summary, self._new_boundary, self._pin_end)
+        self.compact_done.emit(summary, self._new_boundary, self._pin_end)
 
 
 class _RefineMetaWorker(QThread):
@@ -191,6 +191,7 @@ class _RefineMetaWorker(QThread):
             resolved.api_key,
             resolved.model_id,
             family=resolved.family,
+            protocol=resolved.api_protocol,
         )
         self._client = client
         client.cancel_check = lambda: self._cancelled
@@ -896,6 +897,7 @@ class _ProjectWorkspace(QWidget):
                     resolved.api_key,
                     resolved.model_id,
                     family=resolved.family,
+                    protocol=resolved.api_protocol,
                 )
         except Exception:
             client = None
@@ -910,7 +912,7 @@ class _ProjectWorkspace(QWidget):
             pin_end=pin_end,
         )
         self._compact_worker = worker
-        worker.finished.connect(self._on_compact_done)
+        worker.compact_done.connect(self._on_compact_done)
         worker.failed.connect(self._on_compact_failed)
         worker.start()
         self._refresh_context_usage()

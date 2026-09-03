@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import logging
@@ -29,6 +30,7 @@ class FeishuChannel(Channel):
         self._ws_thread: threading.Thread | None = None
         self._client = None          # WS 长连接客户端（收事件）
         self._rest_client = None     # 独立 REST 客户端（发消息）
+        self._loop = None            # 本频道专用 asyncio 事件循环
         self._lock = threading.Lock()
         self._stop_requested = False
 
@@ -74,31 +76,35 @@ class FeishuChannel(Channel):
     def _run_ws(self) -> None:
         """运行长连接并监控状态，让 UI 显示真实连接状态。
 
-        `lark.ws.Client` 没有「首次连接成功」回调，且 `start()` 会占住模块级 asyncio
-        事件循环无限阻塞。这里不直接调用 `client.start()`，而是自己驱动循环：
-        连上即置 CONNECTED；`stop()` 通过 `loop.stop()` 干净退出（避免第二次 start
-        撞上「event loop is already running」而误报 ERROR）。
+        SDK 所有异步方法都引用模块级单例事件循环 `lark_oapi.ws.client.loop`。若直接
+        复用该单例，`stop()` 无法干净退出：旧任务/旧 WS 残留，重启会撞上
+        「event loop is already running」并误报 ERROR，甚至让旧连接继续投递幽灵消息。
+
+        这里为每个频道创建**独立事件循环**，并把 SDK 的模块级 loop 指针改到本频道
+        的循环上（进程内同一时刻只有一个飞书频道，改动安全）。`stop()` 会关闭 WS、
+        取消任务并关闭本循环，彻底断开、可安全重启。
         """
         client = self._client
         try:
-            # lark-oapi 在模块导入时固定了一个事件循环，`_connect`/`_receive_message_loop`
-            # 都在其上调度任务。我们复用同一个 loop，自己 run_forever，从而能主动 stop。
             from lark_oapi.ws import client as _ws_client_cls
-            loop = _ws_client_cls.loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _ws_client_cls.loop = loop  # 让 SDK 的异步调度落到本频道专用循环
+            self._loop = loop
         except Exception:  # noqa: BLE001
-            logger.exception("无法获取飞书连接事件循环")
+            logger.exception("无法创建飞书连接事件循环")
             self._set_status(ChannelStatus.ERROR)
             return
 
         try:
-            # 首次连接：同步等到握手完成（内部会 `loop.create_task(_receive_message_loop)`）。
             loop.run_until_complete(client._connect())
         except Exception:  # noqa: BLE001
             if not self._stop_requested:
                 logger.exception("飞书首次连接失败")
                 self._set_status(ChannelStatus.ERROR)
-                return
+            self._close_loop(loop)
             return
+
         # 连上了 —— SDK 无首连回调，这里显式置 CONNECTED。
         self._set_status(ChannelStatus.CONNECTED)
         logger.info("飞书长连接已建立：%s", getattr(client, "_conn_url", ""))
@@ -111,29 +117,63 @@ class FeishuChannel(Channel):
         try:
             loop.run_forever()
         except Exception:  # noqa: BLE001
-            # stop() 主动关闭 loop 会抛 RuntimeError；属正常退出。
             logger.debug("飞书连接循环被停止")
         if self._stop_requested:
             self._set_status(ChannelStatus.STOPPED)
         else:
             # 未请求停止却退出（断线且重连耗尽）→ 失败
             self._set_status(ChannelStatus.ERROR)
+        self._close_loop(loop)
+
+    def _close_loop(self, loop) -> None:
+        """取消剩余任务并关闭本频道专用事件循环，避免任务/资源残留。"""
+        self._loop = None
+        if loop is None or loop.is_closed():
+            return
+        try:
+            tasks = [t for t in asyncio.all_tasks(loop)]
+            for t in tasks:
+                t.cancel()
+            if tasks:
+                loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:  # noqa: BLE001
+            logger.exception("清理飞书事件循环任务失败")
+        finally:
+            try:
+                loop.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def stop(self) -> None:
         self._stop_requested = True
         client = self._client
+        loop = self._loop
         if client is not None:
             try:
-                # SDK 没有 `stop()`；关闭事件循环即可让 `run_forever` 退出。
-                from lark_oapi.ws import client as _ws_client_cls
-                loop = _ws_client_cls.loop
                 client._auto_reconnect = False  # 关闭内部自动重连避免阻塞
-                loop.call_soon_threadsafe(loop.stop)
+                if loop is not None and loop.is_running() and not loop.is_closed():
+                    async def _shutdown():
+                        # 关闭 WS 长连接，让收发任务尽快结束；剩余任务由 _close_loop 取消。
+                        try:
+                            await client._disconnect()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    loop.call_soon_threadsafe(loop.create_task, _shutdown())
+                    loop.call_soon_threadsafe(loop.stop)
+                elif loop is not None and not loop.is_running() and not loop.is_closed():
+                    # 尚处于连接阶段就被 stop：直接断开连接并关闭循环。
+                    try:
+                        loop.run_until_complete(client._disconnect())
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._close_loop(loop)
             except Exception:  # noqa: BLE001
                 logger.exception("停止飞书长连接失败")
         if self._ws_thread is not None:
             self._ws_thread.join(timeout=5.0)
             self._ws_thread = None
+        self._client = None
         self._set_status(ChannelStatus.STOPPED)
 
     def send_text(self, msg: ChannelMessage, text: str) -> tuple[bool, str]:
