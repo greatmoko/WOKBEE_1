@@ -485,28 +485,37 @@ def recall_memories(intent_text: str, *, model=None, k: int = 3) -> str:
     conn = _get_conn()
     if not conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]:
         return ""
-    query = text
-    if model is not None:
-        kws = extract_intent_keywords(model, text)
-        if kws:
-            query = " ".join(kws)
+    kws = extract_intent_keywords(model, text) if model is not None else []
+    query = " ".join(kws) if kws else text
     items = _rank_memories(query, k=k)
+    if not items and kws:
+        # 关键词未命中任何记忆：回退到用原始意图文本再次打分，尽量保证命中
+        items = _rank_memories(text, k=k)
     return format_memory_for_injection(items)
 
 
 def _rank_memories(query: str, *, k: int = 3) -> list[dict]:
-    """对所有记忆做关键字命中打分，返回 top k（按命中词数降序、再按更新时间倒序）。"""
+    """对所有记忆做关键字命中打分，返回 top k（按命中词数降序、再按更新时间倒序）。
+
+    双向打分：查询词命中记忆（keywords/content）为正向；记忆关键字出现在整段查询里
+    为反向（弥补中文无空格分段、整句难切词的情况）。
+    """
     terms = [t for t in _split_terms(query)[:8]]
     if not terms:
         return []
+    query_hay = (query or "").lower()
     _init_schema()
     conn = _get_conn()
     rows = conn.execute(f"SELECT {_BODY_COLUMNS} FROM memory").fetchall()
     scored: list[tuple[int, str, dict]] = []
     for r in rows:
         d = _row_to_dict(r)
-        hay = f"{d.get('keywords') or ''} {d.get('content') or ''}".lower()
+        kw = str(d.get("keywords") or "").lower()
+        hay = f"{kw} {d.get('content') or ''}".lower()
         score = sum(1 for t in terms if t.lower() in hay)
+        if not score:
+            mem_terms = [w for w in kw.replace("，", ",").replace("、", ",").split(",") if w.strip()]
+            score = sum(1 for w in mem_terms if w.strip() in query_hay)
         if score:
             scored.append((score, d.get("updated_at") or "", d))
     scored.sort(key=lambda x: (-x[0], x[1]))
