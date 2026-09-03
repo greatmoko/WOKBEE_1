@@ -24,7 +24,7 @@ from tokbee.ui.widgets.context_ring import ContextUsageRing
 from tokbee.core.chat_manager import ChatManager, ChatSession
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
 from tokbee.core.ai_client import AIClient
-from tokbee.core.session_settings import SessionSettings
+from tokbee.core.session_settings import SessionSettings, ProviderOptions
 from tokbee.core.ai_role import AIRoleManager
 from tokbee.core import context_manager as ctxman
 from tokbee.core.file_reader import (
@@ -37,6 +37,24 @@ logger = logging.getLogger("tokbee")
 _RESOURCES = Path(__file__).parent.parent.parent / "resources"
 
 _INPUT_MIN_HEIGHT = 90  # 当前默认高度
+
+
+def _model_settings(model: ResolvedModel) -> SessionSettings:
+    return SessionSettings(
+        temperature=model.temperature,
+        top_p=model.top_p,
+        max_tokens=model.max_tokens,
+        stream=model.stream,
+        provider_options=ProviderOptions(
+            openai_reasoning_effort=(
+                model.deepseek_reasoning_effort
+                if model.family == "deepseek" else model.openai_reasoning_effort
+            ) if model.reasoning_enabled else "",
+            thinking_enabled=(
+                "on" if model.reasoning_enabled and model.family == "deepseek" else "off"
+            ),
+        ),
+    )
 
 
 def _stabilize_markdown(text: str) -> str:
@@ -360,14 +378,15 @@ class _AiNameWorker(QThread):
     name_ready = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, client: AIClient, messages: list[dict], parent=None):
+    def __init__(self, client: AIClient, messages: list[dict], settings: SessionSettings, parent=None):
         super().__init__(parent)
         self._client = client
         self._messages = messages
+        self._settings = settings
 
     def run(self):
         try:
-            resp = self._client.chat(self._messages, temperature=0.3, max_tokens=64)
+            resp = self._client.chat(self._messages, settings=self._settings)
             content = resp.content or ""
             if not content.strip() and resp.reasoning_content:
                 content = resp.reasoning_content
@@ -390,6 +409,7 @@ class _CompactWorker(QThread):
         parent=None,
         *,
         pin_end: int = 0,
+        settings: SessionSettings | None = None,
     ):
         super().__init__(parent)
         self._client = client
@@ -397,6 +417,7 @@ class _CompactWorker(QThread):
         self._previous_summary = previous_summary
         self._new_boundary = new_boundary
         self._pin_end = int(pin_end or 0)
+        self._settings = settings
 
     def run(self):
         summary = ""
@@ -405,7 +426,7 @@ class _CompactWorker(QThread):
                 msgs = ctxman.build_summary_prompt_messages(
                     self._to_compact, self._previous_summary,
                 )
-                resp = self._client.chat(msgs, temperature=0.2, max_tokens=800)
+                resp = self._client.chat(msgs, settings=self._settings)
                 summary = (resp.content or "").strip()
                 if not summary and resp.reasoning_content:
                     summary = resp.reasoning_content.strip()
@@ -434,8 +455,21 @@ class _AIChatWorker(QThread):
         self.session_id = session_id
         self._model = model
         self._messages = messages
-        self._settings = settings
-        self._stream = settings.stream
+        self._settings = SessionSettings.from_dict(settings.to_dict())
+        self._settings.temperature = model.temperature
+        self._settings.top_p = model.top_p
+        self._settings.max_tokens = model.max_tokens
+        self._settings.stream = model.stream
+        self._settings.provider_options = ProviderOptions(
+            openai_reasoning_effort=(
+                (model.deepseek_reasoning_effort if model.family == "deepseek" else model.openai_reasoning_effort)
+                if model.reasoning_enabled else ""
+            ),
+            thinking_enabled=(
+                "on" if model.reasoning_enabled and model.family == "deepseek" else "off"
+            ),
+        )
+        self._stream = model.stream
         self._cancelled = False
         self.accumulated_content = ""
         self.accumulated_reasoning = ""
@@ -1042,23 +1076,6 @@ class _ChatWorkspace(QWidget):
         """)
         self._attach_btn.clicked.connect(self._on_attach)
         bottom_bar.addWidget(self._attach_btn)
-
-        self._params_btn = QPushButton("⚙")
-        self._params_btn.setToolTip("对话参数设置")
-        self._params_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._params_btn.setFixedSize(32, 32)
-        self._params_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["card_bg"]}; color: {c["text_secondary"]};
-                border: 1px solid {c["border_light"]}; border-radius: 6px;
-                font-size: 15px;
-            }}
-            QPushButton:hover {{
-                background: {c["subnav_hover"]}; border-color: {c["border"]};
-            }}
-        """)
-        self._params_btn.clicked.connect(self._show_params_dialog)
-        bottom_bar.addWidget(self._params_btn)
 
         self._send_btn = QPushButton("发送")
         self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1697,6 +1714,22 @@ class _ChatWorkspace(QWidget):
         params = self._session.get_params()
         params.provider = self._current_model.provider_id
         params.model_id = self._current_model.model_id
+        params.temperature = self._current_model.temperature
+        params.top_p = self._current_model.top_p
+        params.max_tokens = self._current_model.max_tokens
+        params.stream = self._current_model.stream
+        params.provider_options = ProviderOptions(
+            openai_reasoning_effort=(
+                (self._current_model.deepseek_reasoning_effort
+                if self._current_model.family == "deepseek"
+                else self._current_model.openai_reasoning_effort)
+                if self._current_model.reasoning_enabled else ""
+            ),
+            thinking_enabled=(
+                "on" if self._current_model.reasoning_enabled
+                and self._current_model.family == "deepseek" else "off"
+            ),
+        )
         self._session.set_params(params)
         self._set_sending(True)
 
@@ -1901,6 +1934,7 @@ class _ChatWorkspace(QWidget):
             new_boundary,
             parent=self,
             pin_end=pin_end,
+            settings=_model_settings(self._current_model) if self._current_model else None,
         )
         self._compact_worker = worker
         worker.compact_done.connect(
@@ -2371,108 +2405,7 @@ class _ChatWorkspace(QWidget):
             self._show_tip(f"AI 回复失败:\n{error_msg}")
 
     def _show_params_dialog(self):
-        if not self._session:
-            self._show_tip("请先选择或新建一个对话")
-            return
-
-        from tokbee.ui.views.session_params_editor import SessionParamsEditor
-
-        c = self.theme.colors
-        p = self._session.get_params()
-        family = self._current_model.family if self._current_model else ""
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("对话参数设置")
-        dlg.setFixedSize(500, 780)
-        dlg.setStyleSheet(f"background: {c['content_bg']};")
-
-        outer = QVBoxLayout(dlg)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        tip = QLabel("仅影响当前对话；新建对话的默认值请到「AI配置 → TokBee 设置」修改")
-        tip.setWordWrap(True)
-        tip.setStyleSheet(
-            f"font-size: 11px; color: {c['text_hint']}; padding: 12px 24px 0 24px;"
-        )
-        outer.addWidget(tip)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; }")
-        editor = SessionParamsEditor(
-            self.theme,
-            family=family,
-            role_manager=self._role_manager,
-        )
-        editor.load(p)
-        editor.quick_create_clicked.connect(
-            lambda: self._show_quick_role_dialog(dlg, editor.role_combo, editor.sys_input)
-        )
-        wrap = QWidget()
-        wl = QVBoxLayout(wrap)
-        wl.setContentsMargins(24, 12, 24, 8)
-        wl.addWidget(editor)
-        scroll.setWidget(wrap)
-        outer.addWidget(scroll)
-
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(24, 8, 24, 16)
-        btn_row.setSpacing(10)
-
-        reset_btn = QPushButton("恢复为全局默认")
-        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_btn.setFixedHeight(34)
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {c["text_secondary"]};
-                border: 1px solid {c["border"]}; border-radius: 6px; padding: 0 12px; font-size: 13px;
-            }}
-            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
-        """)
-        reset_btn.clicked.connect(
-            lambda: editor.load(self.manager.session_defaults.get())
-        )
-        btn_row.addWidget(reset_btn)
-        btn_row.addStretch()
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_btn.setFixedSize(72, 34)
-        cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {c["text_secondary"]};
-                border: 1px solid {c["border"]}; border-radius: 6px; font-size: 13px;
-            }}
-            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
-        """)
-        cancel_btn.clicked.connect(dlg.reject)
-        btn_row.addWidget(cancel_btn)
-
-        save_btn = QPushButton("保存")
-        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        save_btn.setFixedSize(72, 34)
-        save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["btn_primary"]}; color: #ffffff;
-                border: none; border-radius: 6px; font-size: 13px;
-            }}
-            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
-        """)
-        save_btn.clicked.connect(dlg.accept)
-        btn_row.addWidget(save_btn)
-        outer.addLayout(btn_row)
-
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_params = editor.collect()
-            new_params.provider = p.provider or (
-                self._current_model.provider_id if self._current_model else ""
-            )
-            new_params.model_id = p.model_id or (
-                self._current_model.model_id if self._current_model else ""
-            )
-            # 只写入当前对话，不改全局默认
-            self.vm.save_chat_params(new_params)
-            self._refresh_context_ring()
+        self._show_tip("模型调用参数已统一移至「AI配置 → 厂商设置 → 模型设置」")
 
     def _show_quick_role_dialog(self, parent_dlg: QDialog, role_combo: QComboBox, sys_input: QTextEdit):
         c = self.theme.colors
@@ -2602,7 +2535,7 @@ class _ChatWorkspace(QWidget):
             {"role": "user", "content": raw.strip()[:500]},
         ]
         sid = session.id
-        worker = _AiNameWorker(client, messages, parent=self)
+        worker = _AiNameWorker(client, messages, _model_settings(primary), parent=self)
         worker.name_ready.connect(lambda reply, _sid=sid: self._on_auto_name_done(_sid, reply))
         worker.failed.connect(lambda _err: None)
         self._auto_name_worker = worker

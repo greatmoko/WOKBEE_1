@@ -24,6 +24,11 @@ def normalize_base_url(host: str) -> str:
     return url.rstrip("/")
 
 
+def _is_openai_reasoning_model(model_id: str) -> bool:
+    mid = (model_id or "").lower()
+    return mid.startswith(("o1", "o3", "o4")) or "gpt-5" in mid
+
+
 def _reasoning_of(raw: object) -> str:
     if isinstance(raw, list):
         return "".join(str(x) for x in raw)
@@ -136,7 +141,6 @@ def _apply_throttle_patch() -> None:
 def build_chat_model(
     resolved: ResolvedModel,
     *,
-    temperature: float = 0.2,
     timeout: float | None = None,
 ) -> ChatOpenAI:
     """使用 OpenAI 兼容 Chat Completions（非 Responses API）。
@@ -161,9 +165,26 @@ def build_chat_model(
         "model": resolved.model_id,
         "api_key": resolved.api_key,
         "base_url": base,
-        "temperature": temperature,
+        "streaming": bool(resolved.stream),
         "max_retries": 1,
     }
+    openai_reasoning = resolved.family == "openai" and _is_openai_reasoning_model(resolved.model_id)
+    if resolved.temperature is not None and not openai_reasoning:
+        kwargs["temperature"] = resolved.temperature
+    if resolved.top_p is not None and not openai_reasoning:
+        kwargs["top_p"] = resolved.top_p
+    if resolved.max_tokens is not None and resolved.max_tokens > 0:
+        kwargs["max_completion_tokens" if openai_reasoning else "max_tokens"] = resolved.max_tokens
+    if resolved.reasoning_enabled:
+        effort = (
+            resolved.deepseek_reasoning_effort
+            if resolved.family == "deepseek"
+            else resolved.openai_reasoning_effort
+        )
+        if effort:
+            kwargs["reasoning_effort"] = effort
+        if resolved.family == "deepseek":
+            kwargs["thinking"] = {"type": "enabled"}
     if resolved.api_protocol == "responses":
         kwargs["use_responses_api"] = True
     if timeout and timeout > 0:

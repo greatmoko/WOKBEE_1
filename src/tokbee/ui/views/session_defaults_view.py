@@ -78,7 +78,7 @@ class SessionDefaultsWorkspace(QWidget):
             "background: transparent; border: none;"
         )
         hl.addWidget(title)
-        tip = QLabel("新建对话会复制这里的参数；已有对话的设置互不影响，可在对话页单独修改。")
+        tip = QLabel("新建对话会复制这里的会话参数；模型调用参数统一在「厂商设置」的模型配置中管理。")
         tip.setWordWrap(True)
         tip.setStyleSheet(
             f"font-size: 12px; color: {c['text_hint']};"

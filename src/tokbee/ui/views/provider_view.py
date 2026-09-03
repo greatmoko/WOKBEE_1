@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QScrollArea, QLineEdit,
     QDialog, QCheckBox, QListWidget, QListWidgetItem,
-    QInputDialog, QComboBox, QStackedWidget, QSpinBox,
+    QInputDialog, QComboBox, QStackedWidget, QSpinBox, QDoubleSpinBox,
     QApplication,
 )
 
@@ -29,10 +29,11 @@ _CUSTOM_OPTION = "__custom_local__"
 
 
 class _ModelSettingsPopup(QFrame):
-    """模型行设置浮层：上下文窗口 / 设为默认 / 删除。"""
+    """模型级调用参数与连接设置浮层。"""
 
     context_changed = Signal(str, int)   # model_id, context_window
     protocol_changed = Signal(str, str)  # model_id, chat | responses
+    options_changed = Signal(str, object)
     set_default = Signal(str)
     delete_model = Signal(str)
 
@@ -85,6 +86,81 @@ class _ModelSettingsPopup(QFrame):
         style_hint_label(hint, c)
         layout.addWidget(hint)
 
+        self._temperature = QDoubleSpinBox()
+        self._temperature.setRange(0.0, 2.0)
+        self._temperature.setDecimals(2)
+        self._temperature.setSingleStep(0.1)
+        self._temperature.setValue(0.7 if model.temperature is None else model.temperature)
+        self._temperature.setEnabled(model.temperature is not None)
+        self._top_p = QDoubleSpinBox()
+        self._top_p.setRange(0.0, 1.0)
+        self._top_p.setDecimals(2)
+        self._top_p.setSingleStep(0.05)
+        self._top_p.setValue(1.0 if model.top_p is None else model.top_p)
+        self._top_p.setEnabled(model.top_p is not None)
+        self._max_tokens = QSpinBox()
+        self._max_tokens.setRange(1, 256000)
+        self._max_tokens.setSingleStep(256)
+        self._max_tokens.setValue(model.max_tokens or 8192)
+        for label, widget in (("Temperature", self._temperature), ("Top P", self._top_p), ("Max Tokens", self._max_tokens)):
+            row = QHBoxLayout()
+            title_lbl = QLabel(label)
+            title_lbl.setStyleSheet(section_label_qss(c))
+            row.addWidget(title_lbl)
+            row.addStretch()
+            row.addWidget(widget)
+            layout.addLayout(row)
+        self._temperature_enable = QCheckBox("发送 Temperature")
+        self._temperature_enable.setChecked(model.temperature is not None)
+        self._temperature_enable.toggled.connect(self._temperature.setEnabled)
+        self._temperature_enable.toggled.connect(self._emit_options)
+        self._top_p_enable = QCheckBox("发送 Top P")
+        self._top_p_enable.setChecked(model.top_p is not None)
+        self._top_p_enable.toggled.connect(self._top_p.setEnabled)
+        self._top_p_enable.toggled.connect(self._emit_options)
+        self._max_tokens_enable = QCheckBox("发送 Max Tokens")
+        self._max_tokens_enable.setChecked(model.max_tokens is not None)
+        self._max_tokens_enable.toggled.connect(self._max_tokens.setEnabled)
+        self._max_tokens_enable.toggled.connect(self._emit_options)
+        for check in (self._temperature_enable, self._top_p_enable, self._max_tokens_enable):
+            apply_checkbox(check, c)
+            layout.addWidget(check)
+        self._stream = QCheckBox("启用流式输出")
+        self._stream.setChecked(model.stream)
+        self._stream.toggled.connect(self._emit_options)
+        apply_checkbox(self._stream, c)
+        layout.addWidget(self._stream)
+
+        self._reasoning = QCheckBox("启用推理")
+        self._reasoning.setChecked(model.reasoning_enabled)
+        self._reasoning.toggled.connect(self._emit_options)
+        apply_checkbox(self._reasoning, c)
+        layout.addWidget(self._reasoning)
+        for title_text, values, current in (
+            ("OpenAI 推理强度", [("默认", ""), ("低", "low"), ("中", "medium"), ("高", "high")], model.openai_reasoning_effort),
+            ("DeepSeek 推理强度", [("默认", ""), ("低", "low"), ("高", "high"), ("最大", "max")], model.deepseek_reasoning_effort),
+        ):
+            row = QHBoxLayout()
+            title_lbl = QLabel(title_text)
+            title_lbl.setStyleSheet(section_label_qss(c))
+            row.addWidget(title_lbl)
+            combo = QComboBox()
+            for text, value in values:
+                combo.addItem(text, value)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+            combo.setMinimumWidth(120)
+            apply_combo_popup_style(combo, c)
+            combo.currentIndexChanged.connect(self._emit_options)
+            row.addWidget(combo)
+            layout.addLayout(row)
+            if "OpenAI" in title_text:
+                self._openai_reasoning = combo
+            else:
+                self._deepseek_reasoning = combo
+
+        for widget in (self._temperature, self._top_p, self._max_tokens):
+            widget.valueChanged.connect(self._emit_options)
+
         protocol_row = QHBoxLayout()
         protocol_row.setSpacing(8)
         protocol_lbl = QLabel("API 协议")
@@ -119,11 +195,22 @@ class _ModelSettingsPopup(QFrame):
         del_btn.clicked.connect(self._on_delete)
         layout.addWidget(del_btn)
 
-        self.setFixedWidth(240)
+        self.setFixedWidth(300)
         self.adjustSize()
 
     def _on_ctx(self, value: int):
         self.context_changed.emit(self._model_id, int(value))
+
+    def _emit_options(self, *_args):
+        self.options_changed.emit(self._model_id, {
+            "temperature": self._temperature.value() if self._temperature_enable.isChecked() else None,
+            "top_p": self._top_p.value() if self._top_p_enable.isChecked() else None,
+            "max_tokens": self._max_tokens.value() if self._max_tokens_enable.isChecked() else None,
+            "stream": self._stream.isChecked(),
+            "reasoning_enabled": self._reasoning.isChecked(),
+            "openai_reasoning_effort": self._openai_reasoning.currentData() or "",
+            "deepseek_reasoning_effort": self._deepseek_reasoning.currentData() or "",
+        })
 
     def _on_default(self):
         mid = self._model_id
@@ -865,6 +952,7 @@ class ProviderSettingsWorkspace(QWidget):
         )
         popup.context_changed.connect(self._on_model_context_changed)
         popup.protocol_changed.connect(self._on_model_protocol_changed)
+        popup.options_changed.connect(self._on_model_options_changed)
         popup.set_default.connect(self._on_set_default)
         popup.delete_model.connect(self._on_delete_model)
         self._model_popup = popup
@@ -883,6 +971,14 @@ class ProviderSettingsWorkspace(QWidget):
         for _cb, m, _row in self._model_checks:
             if m.model_id == model_id:
                 m.api_protocol = protocol if protocol in ("chat", "responses") else "chat"
+                break
+        self._schedule_autosave()
+
+    def _on_model_options_changed(self, model_id: str, options: dict):
+        for _cb, m, _row in self._model_checks:
+            if m.model_id == model_id:
+                for key, value in options.items():
+                    setattr(m, key, value)
                 break
         self._schedule_autosave()
 
@@ -947,6 +1043,13 @@ class ProviderSettingsWorkspace(QWidget):
                 max_output=m.max_output,
                 enabled=cb.isChecked(),
                 api_protocol=m.api_protocol,
+                temperature=m.temperature,
+                top_p=m.top_p,
+                max_tokens=m.max_tokens,
+                stream=m.stream,
+                reasoning_enabled=m.reasoning_enabled,
+                openai_reasoning_effort=m.openai_reasoning_effort,
+                deepseek_reasoning_effort=m.deepseek_reasoning_effort,
             ))
         return ProviderSettings(
             api_key=self._key_edit.text().strip(),

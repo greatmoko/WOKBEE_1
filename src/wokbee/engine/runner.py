@@ -1405,7 +1405,6 @@ class AgentRunner:
             )
             chat = build_chat_model(
                 req.resolved,
-                temperature=0.2,
                 timeout=self.settings.model_timeout_seconds,
             )
             entry = summarize_chat_with_ai(
@@ -1831,7 +1830,6 @@ class AgentRunner:
         try:
             chat = build_chat_model(
                 req.resolved,
-                temperature=0.0,
                 timeout=self.settings.model_timeout_seconds,
             )
             previous_text = store.read_latest_text(max_chars=4000)
@@ -1882,7 +1880,6 @@ class AgentRunner:
 
             chat = build_chat_model(
                 req.resolved,
-                temperature=0.2,
                 timeout=self.settings.model_timeout_seconds,
             )
             self._emit("info", "正在更新跨项目 Agent 记忆…")
@@ -2080,7 +2077,6 @@ class AgentRunner:
                         )
                         chat = build_chat_model(
                             req.resolved,
-                            temperature=0.2,
                             timeout=self.settings.model_timeout_seconds,
                         )
                         ai_fields = summarize_lesson_with_ai(

@@ -15,6 +15,7 @@ from tokbee.ui.styles.theme import Theme
 from tokbee.core.provider_store import ProviderStore, ResolvedModel
 from tokbee.core.ai_role import AIRole, AIRoleManager
 from tokbee.core.ai_client import AIClient
+from tokbee.core.session_settings import SessionSettings, ProviderOptions
 from tokbee.core.config import Config
 
 logger = logging.getLogger("tokbee")
@@ -60,8 +61,8 @@ class _SubNav(QFrame):
     nav_changed = Signal(str)
 
     ITEMS = [
-        ("ai_roles", "🤖", "AI 角色"),
         ("model_config", "🧠", "厂商设置"),
+        ("ai_roles", "🤖", "AI 角色"),
         ("session_defaults", "⚙", "TokBee 设置"),
         ("wokbee_settings", "🐝", "WokBee 设置"),
         ("skills", "📚", "Skills"),
@@ -243,7 +244,26 @@ class _RoleGenWorker(QThread):
                 {"role": "system", "content": self._system_prompt},
                 {"role": "user", "content": f"角色名称：{self._role_name}"},
             ]
-            resp = client.chat(messages, temperature=0.7, max_tokens=2048)
+            resp = client.chat(
+                messages,
+                settings=SessionSettings(
+                    temperature=self._model.temperature,
+                    top_p=self._model.top_p,
+                    max_tokens=self._model.max_tokens,
+                    stream=self._model.stream,
+                    provider_options=ProviderOptions(
+                        openai_reasoning_effort=(
+                            self._model.deepseek_reasoning_effort
+                            if self._model.family == "deepseek"
+                            else self._model.openai_reasoning_effort
+                        ) if self._model.reasoning_enabled else "",
+                        thinking_enabled=(
+                            "on" if self._model.reasoning_enabled
+                            and self._model.family == "deepseek" else "off"
+                        ),
+                    ),
+                ),
+            )
             content = resp.content.strip()
             if content:
                 self.done.emit(content)
@@ -772,7 +792,7 @@ class AutomationView(QWidget):
         self._pages["gateway"] = gateway_page
         self._stack.addWidget(gateway_page)
 
-        self._subnav.select("ai_roles")
+        self._subnav.select("model_config")
 
     def _switch_page(self, nav_id: str):
         page = self._pages.get(nav_id)

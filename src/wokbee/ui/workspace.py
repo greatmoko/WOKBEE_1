@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 
 from tokbee.core import context_manager as ctxman
 from tokbee.core.ai_client import AIClient
-from tokbee.core.provider_store import ProviderStore
+from tokbee.core.provider_store import ProviderStore, ResolvedModel
+from tokbee.core.session_settings import SessionSettings, ProviderOptions
 from tokbee.ui.styles.system import make_context_menu
 from tokbee.ui.styles.theme import Theme
 
@@ -58,6 +59,25 @@ from wokbee.ui.timeline import _Timeline
 
 
 logger = logging.getLogger("wokbee")
+
+
+def _model_request_settings(model: ResolvedModel) -> SessionSettings:
+    """将厂商-模型配置转换为 TokBee 客户端请求参数。"""
+    return SessionSettings(
+        temperature=model.temperature,
+        top_p=model.top_p,
+        max_tokens=model.max_tokens,
+        stream=model.stream,
+        provider_options=ProviderOptions(
+            openai_reasoning_effort=(
+                model.deepseek_reasoning_effort
+                if model.family == "deepseek" else model.openai_reasoning_effort
+            ) if model.reasoning_enabled else "",
+            thinking_enabled=(
+                "on" if model.reasoning_enabled and model.family == "deepseek" else "off"
+            ),
+        ),
+    )
 
 
 STATUS_LABEL = {
@@ -95,9 +115,11 @@ class _CompactWorker(QThread):
         parent=None,
         *,
         pin_end: int = 0,
+        model: ResolvedModel | None = None,
     ):
         super().__init__(parent)
         self._client = client
+        self._model = model
         self._to_compact = to_compact
         self._previous_summary = previous_summary
         self._new_boundary = new_boundary
@@ -113,12 +135,12 @@ class _CompactWorker(QThread):
         if self._cancelled:
             return
         summary = ""
-        if self._client is not None:
+        if self._client is not None and self._model is not None:
             try:
                 msgs = ctxman.build_summary_prompt_messages(
                     self._to_compact, self._previous_summary,
                 )
-                resp = self._client.chat(msgs, temperature=0.2, max_tokens=800)
+                resp = self._client.chat(msgs, settings=_model_request_settings(self._model))
                 summary = (resp.content or "").strip()
                 if not summary and resp.reasoning_content:
                     summary = resp.reasoning_content.strip()
@@ -164,6 +186,7 @@ class _RefineMetaWorker(QThread):
         self._max_title_len = max_title_len
         self._cancelled = False
         self._client = None
+        self._resolved = None
 
     def cancel(self):
         self._cancelled = True
@@ -193,6 +216,7 @@ class _RefineMetaWorker(QThread):
             family=resolved.family,
             protocol=resolved.api_protocol,
         )
+        self._resolved = resolved
         self._client = client
         client.cancel_check = lambda: self._cancelled
         system = (
@@ -215,8 +239,7 @@ class _RefineMetaWorker(QThread):
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=0.3,
-                max_tokens=800,
+                settings=_model_request_settings(resolved),
             )
             raw = (resp.content or "").strip() or (resp.reasoning_content or "").strip()
         except Exception as e:
@@ -888,6 +911,7 @@ class _ProjectWorkspace(QWidget):
 
         to_compact, _retained, new_boundary, prev_summary, pin_end = plan
         client = None
+        resolved = None
         provider_id, model_id = self._actions.selected_model()
         try:
             resolved = ProviderStore().resolve(provider_id, model_id)
@@ -910,6 +934,7 @@ class _ProjectWorkspace(QWidget):
             new_boundary,
             parent=self,
             pin_end=pin_end,
+            model=resolved,
         )
         self._compact_worker = worker
         worker.compact_done.connect(self._on_compact_done)

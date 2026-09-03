@@ -99,6 +99,13 @@ class ProviderModel:
     max_output: int = 0
     enabled: bool = False  # 默认不勾选，由用户启用
     api_protocol: str = "chat"  # chat | responses
+    temperature: float | None = 0.7
+    top_p: float | None = 1.0
+    max_tokens: int | None = None
+    stream: bool = True
+    reasoning_enabled: bool = False
+    openai_reasoning_effort: str = ""
+    deepseek_reasoning_effort: str = ""
 
     @classmethod
     def from_def(cls, d: ProviderModelDef, enabled: bool = False) -> "ProviderModel":
@@ -126,7 +133,32 @@ class ProviderModel:
                 if str(d.get("api_protocol") or "chat").strip().lower() in ("chat", "responses")
                 else "chat"
             ),
+            temperature=_optional_float(d.get("temperature", 0.7), 0.7),
+            top_p=_optional_float(d.get("top_p", 1.0), 1.0),
+            max_tokens=_optional_int(d.get("max_tokens")),
+            stream=bool(d.get("stream", True)),
+            reasoning_enabled=bool(d.get("reasoning_enabled", False)),
+            openai_reasoning_effort=str(d.get("openai_reasoning_effort") or ""),
+            deepseek_reasoning_effort=str(d.get("deepseek_reasoning_effort") or ""),
         )
+
+
+def _optional_float(value, default: float | None = None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _optional_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -185,6 +217,13 @@ class ResolvedModel:
     family: str
     context_window: int = 0
     api_protocol: str = "chat"
+    temperature: float | None = 0.7
+    top_p: float | None = 1.0
+    max_tokens: int | None = None
+    stream: bool = True
+    reasoning_enabled: bool = False
+    openai_reasoning_effort: str = ""
+    deepseek_reasoning_effort: str = ""
 
 
 class ProviderStore:
@@ -488,6 +527,13 @@ class ProviderStore:
                     family=family or infer_family(pid, host),
                     context_window=m.context_window,
                     api_protocol=m.api_protocol,
+                    temperature=m.temperature,
+                    top_p=m.top_p,
+                    max_tokens=m.max_tokens,
+                    stream=m.stream,
+                    reasoning_enabled=m.reasoning_enabled,
+                    openai_reasoning_effort=m.openai_reasoning_effort,
+                    deepseek_reasoning_effort=m.deepseek_reasoning_effort,
                 ))
         return result
 
@@ -505,10 +551,12 @@ class ProviderStore:
         family = self.get_family(provider_id)
         ctx = 0
         api_protocol = "chat"
+        model_options = ProviderModel(model_id=model_id)
         for m in settings.models:
             if m.model_id == model_id:
                 ctx = m.context_window
                 api_protocol = m.api_protocol
+                model_options = m
                 break
         return ResolvedModel(
             provider_id=provider_id,
@@ -519,6 +567,13 @@ class ProviderStore:
             family=family,
             context_window=ctx,
             api_protocol=api_protocol,
+            temperature=model_options.temperature,
+            top_p=model_options.top_p,
+            max_tokens=model_options.max_tokens,
+            stream=model_options.stream,
+            reasoning_enabled=model_options.reasoning_enabled,
+            openai_reasoning_effort=model_options.openai_reasoning_effort,
+            deepseek_reasoning_effort=model_options.deepseek_reasoning_effort,
         )
 
     def has_any_model(self) -> bool:

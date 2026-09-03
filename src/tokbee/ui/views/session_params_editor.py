@@ -16,7 +16,7 @@ from tokbee.ui.combo_style import (
     DEFAULT_COMBO_WIDTH,
     DEFAULT_COMBO_HEIGHT,
 )
-from tokbee.core.session_settings import SessionSettings, ProviderOptions
+from tokbee.core.session_settings import SessionSettings
 from tokbee.core.ai_role import AIRoleManager
 
 
@@ -149,68 +149,6 @@ class SessionParamsEditor(QWidget):
         self.auto_compact_chk.setStyleSheet(self._chk_style)
         layout.addWidget(self.auto_compact_chk)
 
-        enable_tip = "勾选后随请求发送"
-        params_row = QHBoxLayout()
-        params_row.setSpacing(16)
-
-        self.temp_enable = QCheckBox("启用")
-        self.temp_enable.setToolTip(enable_tip)
-        self.temp_enable.setStyleSheet(self._chk_style)
-        self.temp_box = QDoubleSpinBox()
-        self.temp_box.setRange(0.0, 2.0)
-        self.temp_box.setSingleStep(0.1)
-        self.temp_box.setDecimals(2)
-        self.temp_box.setFixedWidth(180)
-        self.temp_box.setStyleSheet(self._spin_style)
-        self.temp_enable.toggled.connect(self.temp_box.setEnabled)
-        temp_col = QVBoxLayout()
-        tl = QLabel("Temperature")
-        tl.setStyleSheet(self._lbl)
-        temp_col.addWidget(tl)
-        temp_col.addWidget(self.temp_enable)
-        temp_col.addWidget(self.temp_box)
-        params_row.addLayout(temp_col)
-
-        self.topp_enable = QCheckBox("启用")
-        self.topp_enable.setToolTip(enable_tip)
-        self.topp_enable.setStyleSheet(self._chk_style)
-        self.topp_box = QDoubleSpinBox()
-        self.topp_box.setRange(0.0, 1.0)
-        self.topp_box.setSingleStep(0.05)
-        self.topp_box.setDecimals(2)
-        self.topp_box.setFixedWidth(180)
-        self.topp_box.setStyleSheet(self._spin_style)
-        self.topp_enable.toggled.connect(self.topp_box.setEnabled)
-        topp_col = QVBoxLayout()
-        pl = QLabel("Top P")
-        pl.setStyleSheet(self._lbl)
-        topp_col.addWidget(pl)
-        topp_col.addWidget(self.topp_enable)
-        topp_col.addWidget(self.topp_box)
-        params_row.addLayout(topp_col)
-        params_row.addStretch()
-        layout.addLayout(params_row)
-
-        self.mt_enable = QCheckBox("启用")
-        self.mt_enable.setToolTip(enable_tip)
-        self.mt_enable.setStyleSheet(self._chk_style)
-        self.max_tok_box = QSpinBox()
-        self.max_tok_box.setRange(1, 256000)
-        self.max_tok_box.setSingleStep(256)
-        self.max_tok_box.setFixedWidth(180)
-        self.max_tok_box.setStyleSheet(self._spin_style)
-        self.mt_enable.toggled.connect(self.max_tok_box.setEnabled)
-        mt_lbl = QLabel("Max Output Tokens")
-        mt_lbl.setStyleSheet(self._lbl)
-        layout.addWidget(mt_lbl)
-        layout.addWidget(self.mt_enable)
-        layout.addWidget(self.max_tok_box, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self.stream_chk = QCheckBox("启用流式输出")
-        self.stream_chk.setStyleSheet(self._chk_style)
-        layout.addWidget(self.stream_chk)
-
-        self._build_provider_options(layout)
         layout.addStretch()
 
     def _add_section(self, layout: QVBoxLayout, title: str):
@@ -348,79 +286,14 @@ class SessionParamsEditor(QWidget):
         self.thr_box.setValue(p.compaction_threshold)
         self._on_thr_changed(p.compaction_threshold)
         self.auto_compact_chk.setChecked(p.auto_compaction)
-        self.stream_chk.setChecked(p.stream)
-
-        self.temp_enable.setChecked(p.temperature is not None)
-        self.temp_box.setValue(0.7 if p.temperature is None else p.temperature)
-        self.temp_box.setEnabled(p.temperature is not None)
-
-        self.topp_enable.setChecked(p.top_p is not None)
-        self.topp_box.setValue(1.0 if p.top_p is None else p.top_p)
-        self.topp_box.setEnabled(p.top_p is not None)
-
-        self.mt_enable.setChecked(p.max_tokens is not None)
-        self.max_tok_box.setValue(8192 if p.max_tokens is None else p.max_tokens)
-        self.max_tok_box.setEnabled(p.max_tokens is not None)
-
-        opt = p.provider_options
-        if self._reason_combo is not None:
-            self._reason_combo.setCurrentIndex(
-                max(0, self._reason_combo.findData(opt.openai_reasoning_effort))
-            )
-        if self._g_level is not None:
-            self._g_level.setCurrentIndex(
-                max(0, self._g_level.findData(opt.google_thinking_level))
-            )
-        if self._g_budget is not None:
-            self._g_budget.setValue(
-                -1 if opt.google_thinking_budget is None else opt.google_thinking_budget
-            )
-        if self._think_combo is not None:
-            self._think_combo.setCurrentIndex(
-                max(0, self._think_combo.findData(opt.thinking_enabled))
-            )
-        if self._compat_reason is not None:
-            effort = opt.openai_reasoning_effort
-            if effort == "medium":
-                effort = "high"
-            idx = self._compat_reason.findData(effort)
-            self._compat_reason.setCurrentIndex(idx if idx >= 0 else 0)
-
         self.role_combo.setCurrentIndex(0)
 
     def collect(self) -> SessionSettings:
-        openai_effort = ""
-        if self._compat_reason is not None:
-            openai_effort = self._compat_reason.currentData() or ""
-        if not openai_effort and self._reason_combo is not None:
-            openai_effort = self._reason_combo.currentData() or ""
-        # 仅有 OpenAI 区时用其值
-        if self._compat_reason is None and self._reason_combo is not None:
-            openai_effort = self._reason_combo.currentData() or ""
-
-        opt = ProviderOptions(
-            openai_reasoning_effort=openai_effort,
-            google_thinking_level=(
-                (self._g_level.currentData() or "") if self._g_level else ""
-            ),
-            google_thinking_budget=(
-                None if (self._g_budget is None or self._g_budget.value() < 0)
-                else self._g_budget.value()
-            ),
-            thinking_enabled=(
-                (self._think_combo.currentData() or "") if self._think_combo else ""
-            ),
-        )
         return SessionSettings(
             provider=self._base.provider,
             model_id=self._base.model_id,
             system_prompt=self.sys_input.toPlainText().strip(),
-            temperature=self.temp_box.value() if self.temp_enable.isChecked() else None,
-            top_p=self.topp_box.value() if self.topp_enable.isChecked() else None,
-            max_tokens=self.max_tok_box.value() if self.mt_enable.isChecked() else None,
             max_context_message_count=self.hist_box.value(),
-            stream=self.stream_chk.isChecked(),
             compaction_threshold=float(self.thr_box.value()),
             auto_compaction=self.auto_compact_chk.isChecked(),
-            provider_options=opt,
         )

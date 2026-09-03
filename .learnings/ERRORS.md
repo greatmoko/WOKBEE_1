@@ -31,6 +31,34 @@ Run source-tree checks with `PYTHONPATH=src` (or install the package in editable
 
 ---
 
+## [ERR-20260903-UI1] offscreen_ui_smoke_command
+
+**Logged**: 2026-09-03T00:00:00Z
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+The ad hoc PySide6 smoke command passed an argument to `Theme` although the project constructor takes no positional arguments.
+
+### Error
+```text
+TypeError: Theme.__init__() takes 1 positional argument but 2 were given
+```
+
+### Context
+- Attempted to instantiate `_ModelSettingsPopup` with `Theme('light')` under `QT_QPA_PLATFORM=offscreen`.
+- The failure was in the verification command, not application code.
+
+### Suggested Fix
+Use the project-defined `Theme()` constructor when running the offscreen UI smoke check.
+
+### Metadata
+- Reproducible: yes
+- Related Files: src/tokbee/ui/styles/theme.py
+
+---
+
 ## [ERR-20260903-002] pyright-not-installed
 
 **Logged**: 2026-09-03
