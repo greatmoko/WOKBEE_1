@@ -95,12 +95,12 @@ class ProviderModel:
     model_id: str
     nickname: str = ""
     capabilities: list[str] = field(default_factory=list)
-    context_window: int = 0
+    context_window: int = 1_000_000
     max_output: int = 0
     enabled: bool = False  # 默认不勾选，由用户启用
     api_protocol: str = "chat"  # chat | responses
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
+    temperature: float | None = None
+    top_p: float | None = None
     max_tokens: int | None = None
     stream: bool = True
     reasoning_enabled: bool = False
@@ -125,7 +125,7 @@ class ProviderModel:
             model_id=str(d.get("model_id", "")),
             nickname=str(d.get("nickname", "")),
             capabilities=list(d.get("capabilities") or []),
-            context_window=int(d.get("context_window") or 0),
+            context_window=int(d.get("context_window") or 1_000_000),
             max_output=int(d.get("max_output") or 0),
             enabled=bool(d.get("enabled", False)),
             api_protocol=(
@@ -133,8 +133,8 @@ class ProviderModel:
                 if str(d.get("api_protocol") or "chat").strip().lower() in ("chat", "responses")
                 else "chat"
             ),
-            temperature=_optional_float(d.get("temperature", 0.7), 0.7),
-            top_p=_optional_float(d.get("top_p", 1.0), 1.0),
+            temperature=_optional_float(d.get("temperature")),
+            top_p=_optional_float(d.get("top_p")),
             max_tokens=_optional_int(d.get("max_tokens")),
             stream=bool(d.get("stream", True)),
             reasoning_enabled=bool(d.get("reasoning_enabled", False)),
@@ -215,10 +215,10 @@ class ResolvedModel:
     api_host: str
     api_key: str
     family: str
-    context_window: int = 0
+    context_window: int = 1_000_000
     api_protocol: str = "chat"
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
+    temperature: float | None = None
+    top_p: float | None = None
     max_tokens: int | None = None
     stream: bool = True
     reasoning_enabled: bool = False
