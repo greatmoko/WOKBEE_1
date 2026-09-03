@@ -258,6 +258,7 @@ class AIClient:
         if settings is not None:
             params = build_completion_params(
                 settings, model_id=self._model, family=self._family, stream=stream,
+                api_protocol=self._protocol,
             )
             body = {
                 "model": self._model,
@@ -282,9 +283,10 @@ class AIClient:
                 body["instructions"] = instructions
             if "max_tokens" in body:
                 body["max_output_tokens"] = body.pop("max_tokens")
+            # 兼容旧字段：reasoning_effort / thinking 一律转为 reasoning.effort
+            body.pop("thinking", None)
             if "reasoning_effort" in body:
                 body["reasoning"] = {"effort": body.pop("reasoning_effort")}
-            body.pop("thinking", None)
         if tools is not None:
             if self._protocol == "responses":
                 converted = []

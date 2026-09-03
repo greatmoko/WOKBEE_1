@@ -408,6 +408,112 @@ def format_memory_for_injection(items: list[dict], *, max_chars: int = 6000) -> 
 
 
 # --------------------------------------------------------------------------- #
+# 意图理解 + 记忆召回（运行前注入，优先调取记忆库）
+# --------------------------------------------------------------------------- #
+
+_INTENT_STOPWORDS = {
+    "帮我", "请", "请帮", "麻烦", "我们", "你", "我", "这个", "那个", "一下", "一个",
+    "了", "的", "是", "在", "和", "与", "或", "及", "要", "做", "写", "用", "把",
+    "please", "help", "the", "a", "an", "to", "for", "and", "of", "in", "with",
+    "do", "make", "write", "using", "some", "it", "this", "that",
+}
+
+_INTENT_EXTRACT_SYSTEM = """你是 WokBee 的「记忆检索意图助手」。根据用户消息，提炼出用于跨项目
+记忆库检索的关键词/概念：简短、名词/术语化、便于 LIKE 命中记忆库的 keywords 与 content。
+
+硬性要求：
+1. 只输出一个 JSON 数组（不要 Markdown 围栏），元素为字符串，例如 ["爬虫", "Node.js", "项目结构"]。
+2. 3~6 个关键词；避免长句、连词与他用词（帮我/请/做/写 等一律不要）。
+3. 优先保留技术术语、任务对象、领域概念 —— 这些最容易命中原记忆。"""
+
+
+def extract_intent_keywords(model, text: str) -> list[str]:
+    """让模型把用户消息提炼成可检索关键词；失败返回空列表（非流式单次调用）。"""
+    t = (text or "").strip()
+    if not t:
+        return []
+    messages = [
+        {"role": "system", "content": _INTENT_EXTRACT_SYSTEM},
+        {"role": "user", "content": t[:1500]},
+    ]
+    raw = ""
+    try:
+        resp = model.invoke(messages)
+        raw = getattr(resp, "content", None) or str(resp)
+        if isinstance(raw, list):
+            raw = "".join(
+                b.get("text", "") if isinstance(b, dict) else str(b) for b in raw
+            )
+    except Exception:
+        return []
+    raw = str(raw).strip()
+    if not raw:
+        return []
+    return [k for k in _parse_keyword_list(raw) if k.strip()][:8]
+
+
+def _parse_keyword_list(raw: str) -> list[str]:
+    s = (raw or "").strip()
+    # 去掉可能的 Markdown 围栏
+    if s.startswith("```"):
+        s = s.split("\n", 1)[-1]
+        s = s.rsplit("```", 1)[0]
+    s = s.strip()
+    try:
+        data = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        data = None
+    if isinstance(data, list):
+        return [str(x).strip() for x in data if str(x).strip()]
+    # 退化：逗号/顿号分隔
+    return [x.strip() for x in s.replace("，", ",").replace("、", ",").split(",") if x.strip()]
+
+
+_BODY_COLUMNS = "memory_key, project_id, kind, content, keywords, refs, updated_at"
+
+
+def recall_memories(intent_text: str, *, model=None, k: int = 3) -> str:
+    """基于用户意图优先召回记忆库里的相关记忆（top k；不足 k 条则有多少写多少）。
+
+    意图 →（可选）模型提炼关键词 → 关键字命中记忆库并按命中字数打分排序 → 生成注入文本。
+    任何一步失败都降级（如空文本/无命中），绝不阻断主流程。
+    """
+    text = (intent_text or "").strip()
+    if not text:
+        return ""
+    _init_schema()
+    conn = _get_conn()
+    if not conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]:
+        return ""
+    query = text
+    if model is not None:
+        kws = extract_intent_keywords(model, text)
+        if kws:
+            query = " ".join(kws)
+    items = _rank_memories(query, k=k)
+    return format_memory_for_injection(items)
+
+
+def _rank_memories(query: str, *, k: int = 3) -> list[dict]:
+    """对所有记忆做关键字命中打分，返回 top k（按命中词数降序、再按更新时间倒序）。"""
+    terms = [t for t in _split_terms(query)[:8]]
+    if not terms:
+        return []
+    _init_schema()
+    conn = _get_conn()
+    rows = conn.execute(f"SELECT {_BODY_COLUMNS} FROM memory").fetchall()
+    scored: list[tuple[int, str, dict]] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        hay = f"{d.get('keywords') or ''} {d.get('content') or ''}".lower()
+        score = sum(1 for t in terms if t.lower() in hay)
+        if score:
+            scored.append((score, d.get("updated_at") or "", d))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [d for _score, _ts, d in scored[: max(1, min(int(k or 3), _MAX_READ_ROWS))]]
+
+
+# --------------------------------------------------------------------------- #
 # AI 生成 / 更新
 # --------------------------------------------------------------------------- #
 

@@ -89,6 +89,29 @@ def _open_key(blob: str) -> str:
         return ""
 
 
+def _migrate_reasoning_adapter(d: dict) -> str:
+    """旧字段迁移 → 新 reasoning_adapter：""=自动 / openai / deepseek。"""
+    a = str(d.get("reasoning_adapter") or "").strip().lower()
+    if a in ("openai", "deepseek"):
+        return a
+    ctrl = str(d.get("reasoning_control") or "").strip().lower()
+    if ctrl in ("thinking", "enable_thinking"):
+        return "deepseek"
+    if ctrl in ("reasoning_effort", "thinking_config"):
+        return "openai"
+    return ""
+
+
+def _migrate_reasoning_effort(d: dict) -> str:
+    """旧字段迁移 → 新 reasoning_effort。"""
+    e = str(d.get("reasoning_effort") or "").strip()
+    if e:
+        return e
+    adapter = _migrate_reasoning_adapter(d)
+    if adapter == "deepseek":
+        return str(d.get("deepseek_reasoning_effort") or "").strip()
+    return str(d.get("openai_reasoning_effort") or "").strip()
+
 
 @dataclass
 class ProviderModel:
@@ -104,8 +127,8 @@ class ProviderModel:
     max_tokens: int | None = None
     stream: bool = True
     reasoning_enabled: bool = True
-    openai_reasoning_effort: str = ""
-    deepseek_reasoning_effort: str = ""
+    reasoning_adapter: str = ""  # "", "openai", "deepseek"
+    reasoning_effort: str = ""
 
     @classmethod
     def from_def(cls, d: ProviderModelDef, enabled: bool = False) -> "ProviderModel":
@@ -138,8 +161,8 @@ class ProviderModel:
             max_tokens=_optional_int(d.get("max_tokens")),
             stream=bool(d.get("stream", True)),
             reasoning_enabled=bool(d.get("reasoning_enabled", True)),
-            openai_reasoning_effort=str(d.get("openai_reasoning_effort") or ""),
-            deepseek_reasoning_effort=str(d.get("deepseek_reasoning_effort") or ""),
+            reasoning_adapter=_migrate_reasoning_adapter(d),
+            reasoning_effort=_migrate_reasoning_effort(d),
         )
 
 
@@ -222,8 +245,8 @@ class ResolvedModel:
     max_tokens: int | None = None
     stream: bool = True
     reasoning_enabled: bool = True
-    openai_reasoning_effort: str = ""
-    deepseek_reasoning_effort: str = ""
+    reasoning_adapter: str = ""
+    reasoning_effort: str = ""
 
 
 class ProviderStore:
@@ -532,8 +555,8 @@ class ProviderStore:
                     max_tokens=m.max_tokens,
                     stream=m.stream,
                     reasoning_enabled=m.reasoning_enabled,
-                    openai_reasoning_effort=m.openai_reasoning_effort,
-                    deepseek_reasoning_effort=m.deepseek_reasoning_effort,
+                    reasoning_adapter=m.reasoning_adapter,
+                    reasoning_effort=m.reasoning_effort,
                 ))
         return result
 
@@ -572,8 +595,8 @@ class ProviderStore:
             max_tokens=model_options.max_tokens,
             stream=model_options.stream,
             reasoning_enabled=model_options.reasoning_enabled,
-            openai_reasoning_effort=model_options.openai_reasoning_effort,
-            deepseek_reasoning_effort=model_options.deepseek_reasoning_effort,
+            reasoning_adapter=model_options.reasoning_adapter,
+            reasoning_effort=model_options.reasoning_effort,
         )
 
     def has_any_model(self) -> bool:

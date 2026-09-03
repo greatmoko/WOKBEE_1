@@ -15,53 +15,54 @@ from tokbee.core.safe_io import safe_write_json
 class ProviderOptions:
     """厂商推理相关选项（按当前 provider 选用）。
 
-    reasoning_effort 对齐 OpenAI / DeepSeek 的 reasoning_effort：
-    - OpenAI: low / medium / high
-    - DeepSeek: low / high / max（medium、xhigh 会映射到 high）
+    统一三套机制，其余一律不传：
+    - Chat Completions + OpenAI 风格：顶层 reasoning_effort（none/minimal/low/medium/high/xhigh/max）
+    - Chat Completions + DeepSeek 风格：extra_body={"thinking": {"type": "enabled/disabled"}}
+      并可带顶层 reasoning_effort（low/high/max）
+    - Responses API：嵌套 reasoning={"effort": ...}（none/minimal/low/medium/high/xhigh/max）
+
+    parsing 约定：空 effort / 推理开启但未设置强度时，一律不发送这些参数（默认）。
     """
-    openai_reasoning_effort: str = ""  # "", low, medium, high, max, xhigh
-    google_thinking_budget: int | None = None  # None=未设置, 0=关闭
-    google_thinking_level: str = ""  # "", minimal, low, medium, high
-    google_include_thoughts: bool = True
-    thinking_enabled: str = ""  # "", "on", "off" — DeepSeek / Qwen 等
+    reasoning_adapter: str = ""  # "", "openai", "deepseek"；空按 family 推断（openai 默认）
+    reasoning_effort: str = ""  # "", none, minimal, low, medium, high, xhigh, max
+    reasoning_enabled: bool = True  # 关闭时主动发送禁用信号
 
     def to_dict(self) -> dict:
         return {
-            "openai": {"reasoning_effort": self.openai_reasoning_effort} if self.openai_reasoning_effort else {},
-            "google": {
-                k: v for k, v in {
-                    "thinking_budget": self.google_thinking_budget,
-                    "thinking_level": self.google_thinking_level or None,
-                    "include_thoughts": self.google_include_thoughts,
-                }.items() if v is not None and v != ""
+            "reasoning": {
+                "adapter": self.reasoning_adapter,
+                "effort": self.reasoning_effort,
+                "enabled": self.reasoning_enabled,
             },
-            "thinking": {"enabled": self.thinking_enabled} if self.thinking_enabled else {},
         }
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "ProviderOptions":
         if not d:
             return cls()
-        openai = d.get("openai") or {}
-        google = d.get("google") or {}
-        thinking = d.get("thinking") or {}
-        budget = google.get("thinking_budget", None)
-        if budget is not None:
-            try:
-                budget = int(budget)
-            except (TypeError, ValueError):
-                budget = None
+        reasoning = d.get("reasoning") or {}
+        # 旧格式兼容：openai.reasoning_effort / thinking.enabled / reasoning_control
         effort = str(
-            openai.get("reasoning_effort")
+            reasoning.get("effort")
+            or (d.get("openai") or {}).get("reasoning_effort")
             or d.get("reasoning_effort")
             or ""
         )
+        adapter = str(reasoning.get("adapter") or d.get("reasoning_control") or "")
+        # 旧 reasoning_control 值映射到新 adapter
+        if adapter in ("thinking", "enable_thinking"):
+            adapter = "deepseek"
+        elif adapter in ("reasoning_effort", "thinking_config"):
+            adapter = "openai"
+        elif adapter and adapter not in ("openai", "deepseek"):
+            adapter = ""
+        enabled = reasoning.get("enabled")
+        if enabled is None:
+            enabled = True
         return cls(
-            openai_reasoning_effort=effort,
-            google_thinking_budget=budget,
-            google_thinking_level=str(google.get("thinking_level") or ""),
-            google_include_thoughts=bool(google.get("include_thoughts", True)),
-            thinking_enabled=str(thinking.get("enabled") or ""),
+            reasoning_adapter=str(adapter or ""),
+            reasoning_effort=effort,
+            reasoning_enabled=bool(enabled),
         )
 
 

@@ -10,22 +10,26 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QScrollArea, QLineEdit,
     QDialog, QCheckBox, QListWidget, QListWidgetItem,
     QInputDialog, QComboBox, QStackedWidget, QSpinBox, QDoubleSpinBox,
-    QApplication,
+    QRadioButton, QButtonGroup, QApplication,
 )
 
 from tokbee.ui.styles.theme import Theme
 from tokbee.ui.styles.system import (
-    apply_checkbox, apply_combo_popup_style, apply_danger_btn, apply_lineedit,
+    apply_checkbox, apply_combo_popup_style, apply_danger_btn, apply_lineedit, apply_radio,
     apply_secondary_btn, apply_spin, section_label_qss, style_hint_label,
 )
 from tokbee.core.provider_store import ProviderStore, ProviderSettings, ProviderModel
 from tokbee.core.provider import get_builtin
 from tokbee.core.errors import AIError
+from tokbee.core.request_builder import OPENAI_EFFORT_VALUES
 
 logger = logging.getLogger("tokbee")
 
 # 添加弹窗中「自定义本地 API」的特殊选项 id
 _CUSTOM_OPTION = "__custom_local__"
+
+# OpenAI 推理强度下拉：默认 + 全量官方档位
+OPENAI_EFFORT_CHOICES = [("默认（不发送）", "")] + [(v, v) for v in OPENAI_EFFORT_VALUES]
 
 
 class _ModelSettingsPopup(QFrame):
@@ -42,12 +46,14 @@ class _ModelSettingsPopup(QFrame):
         theme: Theme,
         model: ProviderModel,
         *,
+        family: str = "",
         is_default: bool,
         parent=None,
     ):
         super().__init__(parent, Qt.WindowType.Popup)
         self.theme = theme
         self._model_id = model.model_id
+        self.family = family
         c = theme.colors
         self.setObjectName("modelSettingsPopup")
         self.setStyleSheet(f"""
@@ -137,27 +143,37 @@ class _ModelSettingsPopup(QFrame):
         self._reasoning.toggled.connect(self._emit_options)
         apply_checkbox(self._reasoning, c)
         layout.addWidget(self._reasoning)
-        for title_text, values, current in (
-            ("OpenAI 推理强度", [("默认", ""), ("低", "low"), ("中", "medium"), ("高", "high")], model.openai_reasoning_effort),
-            ("DeepSeek 推理强度", [("默认", ""), ("低", "low"), ("高", "high"), ("最大", "max")], model.deepseek_reasoning_effort),
-        ):
-            row = QHBoxLayout()
-            title_lbl = QLabel(title_text)
-            title_lbl.setStyleSheet(section_label_qss(c))
-            row.addWidget(title_lbl)
-            combo = QComboBox()
-            for text, value in values:
-                combo.addItem(text, value)
-            combo.setCurrentIndex(max(0, combo.findData(current)))
-            combo.setMinimumWidth(120)
-            apply_combo_popup_style(combo, c)
-            combo.currentIndexChanged.connect(self._emit_options)
-            row.addWidget(combo)
-            layout.addLayout(row)
-            if "OpenAI" in title_text:
-                self._openai_reasoning = combo
-            else:
-                self._deepseek_reasoning = combo
+
+        ctrl_section = QLabel("推理适配（请按具体模型选择生效机制）")
+        ctrl_section.setStyleSheet(section_label_qss(c))
+        ctrl_section.setWordWrap(True)
+        layout.addWidget(ctrl_section)
+        self._adapter_group = QButtonGroup(self)
+        self._adapter_group.setExclusive(True)
+        adapter_choices = (
+            ("openai", "OpenAI 风格（顶层 reasoning_effort）"),
+            ("deepseek", "DeepSeek 风格（extra_body thinking + reasoning_effort）"),
+        )
+        for key, label in adapter_choices:
+            rb = QRadioButton(label)
+            rb.setProperty("value", key)
+            self._adapter_group.addButton(rb)
+            rb.setChecked((model.reasoning_adapter or "openai") == key)
+            rb.toggled.connect(lambda _on, k=key: self._on_adapter_changed(k))
+            apply_radio(rb, c)
+            layout.addWidget(rb)
+
+        effort_row = QHBoxLayout()
+        effort_lbl = QLabel("推理强度")
+        effort_lbl.setStyleSheet(section_label_qss(c))
+        effort_row.addWidget(effort_lbl)
+        self._effort_combo = QComboBox()
+        self._effort_combo.setMinimumWidth(140)
+        apply_combo_popup_style(self._effort_combo, c)
+        self._effort_combo.currentIndexChanged.connect(self._emit_options)
+        effort_row.addWidget(self._effort_combo)
+        layout.addLayout(effort_row)
+        self._fill_effort_combo((model.reasoning_adapter or "openai"), model.reasoning_effort)
 
         for widget in (self._temperature, self._top_p, self._max_tokens):
             widget.valueChanged.connect(self._emit_options)
@@ -209,9 +225,26 @@ class _ModelSettingsPopup(QFrame):
             "max_tokens": self._max_tokens.value() if self._max_tokens_enable.isChecked() else None,
             "stream": self._stream.isChecked(),
             "reasoning_enabled": self._reasoning.isChecked(),
-            "openai_reasoning_effort": self._openai_reasoning.currentData() or "",
-            "deepseek_reasoning_effort": self._deepseek_reasoning.currentData() or "",
+            "reasoning_adapter": (btn.property("value") if (btn := self._adapter_group.checkedButton()) else "openai"),
+            "reasoning_effort": self._effort_combo.currentData() or "",
         })
+
+    def _adapter_choices(self, adapter: str) -> list[tuple[str, str]]:
+        if adapter == "deepseek":
+            return [("默认（不发送）", ""), ("低 low", "low"), ("高 high", "high"), ("最大 max", "max")]
+        return OPENAI_EFFORT_CHOICES
+
+    def _fill_effort_combo(self, adapter: str, current: str):
+        self._effort_combo.blockSignals(True)
+        self._effort_combo.clear()
+        for text, value in self._adapter_choices(adapter):
+            self._effort_combo.addItem(text, value)
+        self._effort_combo.setCurrentIndex(max(0, self._effort_combo.findData(current or "")))
+        self._effort_combo.blockSignals(False)
+
+    def _on_adapter_changed(self, adapter: str):
+        self._fill_effort_combo(adapter, "")
+        self._emit_options()
 
     def _on_default(self):
         mid = self._model_id
@@ -949,7 +982,8 @@ class ProviderSettingsWorkspace(QWidget):
         self._close_model_popup()
         is_default = self.store.is_default_model(self._current_id, model.model_id)
         popup = _ModelSettingsPopup(
-            self.theme, model, is_default=is_default, parent=self.window(),
+            self.theme, model, family=self.store.get_family(self._current_id),
+            is_default=is_default, parent=self.window(),
         )
         popup.context_changed.connect(self._on_model_context_changed)
         popup.protocol_changed.connect(self._on_model_protocol_changed)
@@ -1049,8 +1083,8 @@ class ProviderSettingsWorkspace(QWidget):
                 max_tokens=m.max_tokens,
                 stream=m.stream,
                 reasoning_enabled=m.reasoning_enabled,
-                openai_reasoning_effort=m.openai_reasoning_effort,
-                deepseek_reasoning_effort=m.deepseek_reasoning_effort,
+                reasoning_adapter=m.reasoning_adapter,
+                reasoning_effort=m.reasoning_effort,
             ))
         return ProviderSettings(
             api_key=self._key_edit.text().strip(),

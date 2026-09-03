@@ -69,13 +69,9 @@ def _model_request_settings(model: ResolvedModel) -> SessionSettings:
         max_tokens=model.max_tokens,
         stream=model.stream,
         provider_options=ProviderOptions(
-            openai_reasoning_effort=(
-                model.deepseek_reasoning_effort
-                if model.family == "deepseek" else model.openai_reasoning_effort
-            ) if model.reasoning_enabled else "",
-            thinking_enabled=(
-                "on" if model.reasoning_enabled and model.family == "deepseek" else "off"
-            ),
+            reasoning_adapter=model.reasoning_adapter,
+            reasoning_effort=model.reasoning_effort,
+            reasoning_enabled=model.reasoning_enabled,
         ),
     )
 

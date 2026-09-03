@@ -43,6 +43,7 @@ def build_session_context_block(
     mode: str = "run",
     runtime_env_block: str = "",
     memory_overview_digest: str = "",
+    memory_recall_block: str = "",
     extra_lines: list[str] | None = None,
 ) -> str:
     """易变内容：拼进首条/当轮 user，不进 system。"""
@@ -65,6 +66,10 @@ def build_session_context_block(
         lines.append("")
         lines.append("【记忆概述】（跨项目 Agent 记忆，运行前注入；一般无需改写）")
         lines.append(memory_overview_digest.strip())
+    if memory_recall_block.strip():
+        lines.append("")
+        lines.append("【相关记忆】（依本次意图从记忆库优先调取，按关联度排序；供参考）")
+        lines.append(memory_recall_block.strip())
     if extra_lines:
         for line in extra_lines:
             s = (line or "").strip()

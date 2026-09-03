@@ -252,15 +252,9 @@ class _RoleGenWorker(QThread):
                     max_tokens=self._model.max_tokens,
                     stream=self._model.stream,
                     provider_options=ProviderOptions(
-                        openai_reasoning_effort=(
-                            self._model.deepseek_reasoning_effort
-                            if self._model.family == "deepseek"
-                            else self._model.openai_reasoning_effort
-                        ) if self._model.reasoning_enabled else "",
-                        thinking_enabled=(
-                            "on" if self._model.reasoning_enabled
-                            and self._model.family == "deepseek" else "off"
-                        ),
+                        reasoning_adapter=self._model.reasoning_adapter,
+                        reasoning_effort=self._model.reasoning_effort,
+                        reasoning_enabled=self._model.reasoning_enabled,
                     ),
                 ),
             )

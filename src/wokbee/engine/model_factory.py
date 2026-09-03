@@ -13,6 +13,13 @@ from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
 from tokbee.core.provider_store import ResolvedModel
+from tokbee.core.request_builder import (
+    OPENAI_EFFORT_VALUES,
+    DEEPSEEK_EFFORT_VALUES,
+    DEEPSEEK_FAMILIES,
+    RESPONSES_EFFORT_VALUES,
+    effective_adapter,
+)
 
 
 def normalize_base_url(host: str) -> str:
@@ -169,23 +176,36 @@ def build_chat_model(
         "max_retries": 1,
     }
     openai_reasoning = resolved.family == "openai" and _is_openai_reasoning_model(resolved.model_id)
-    if resolved.temperature is not None and not openai_reasoning:
+    family = resolved.family
+    adapter = effective_adapter(resolved.reasoning_adapter, family)
+    use_responses = resolved.api_protocol == "responses"
+    mixing = family == "mimo"
+    effort = (resolved.reasoning_effort or "").strip().lower()
+    # 深度思考/思考型模型不接受 temperature / top_p（DeepSeek 开启思考、小米 MiMo）或 OpenAI 推理模型
+    skip_sampling = openai_reasoning or (family in DEEPSEEK_FAMILIES and resolved.reasoning_enabled)
+    if resolved.temperature is not None and not skip_sampling:
         kwargs["temperature"] = resolved.temperature
-    if resolved.top_p is not None and not openai_reasoning:
+    if resolved.top_p is not None and not skip_sampling:
         kwargs["top_p"] = resolved.top_p
     if resolved.max_tokens is not None and resolved.max_tokens > 0:
-        kwargs["max_completion_tokens" if openai_reasoning else "max_tokens"] = resolved.max_tokens
-    if resolved.reasoning_enabled:
-        effort = (
-            resolved.deepseek_reasoning_effort
-            if resolved.family == "deepseek"
-            else resolved.openai_reasoning_effort
-        )
-        if effort:
+        kwargs["max_completion_tokens" if (openai_reasoning or mixing) else "max_tokens"] = resolved.max_tokens
+    if use_responses:
+        if not resolved.reasoning_enabled:
+            kwargs["reasoning"] = {"effort": "none"}
+        elif effort in RESPONSES_EFFORT_VALUES:
+            kwargs["reasoning"] = {"effort": effort}
+    elif adapter == "deepseek":
+        if not resolved.reasoning_enabled:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        elif effort in DEEPSEEK_EFFORT_VALUES:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
             kwargs["reasoning_effort"] = effort
-        if resolved.family == "deepseek":
-            kwargs["thinking"] = {"type": "enabled"}
-    if resolved.api_protocol == "responses":
+    else:
+        if not resolved.reasoning_enabled:
+            kwargs["reasoning_effort"] = "none"
+        elif effort in OPENAI_EFFORT_VALUES:
+            kwargs["reasoning_effort"] = effort
+    if use_responses:
         kwargs["use_responses_api"] = True
     if timeout and timeout > 0:
         kwargs["timeout"] = float(timeout)

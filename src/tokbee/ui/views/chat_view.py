@@ -46,13 +46,9 @@ def _model_settings(model: ResolvedModel) -> SessionSettings:
         max_tokens=model.max_tokens,
         stream=model.stream,
         provider_options=ProviderOptions(
-            openai_reasoning_effort=(
-                model.deepseek_reasoning_effort
-                if model.family == "deepseek" else model.openai_reasoning_effort
-            ) if model.reasoning_enabled else "",
-            thinking_enabled=(
-                "on" if model.reasoning_enabled and model.family == "deepseek" else "off"
-            ),
+            reasoning_adapter=model.reasoning_adapter,
+            reasoning_effort=model.reasoning_effort,
+            reasoning_enabled=model.reasoning_enabled,
         ),
     )
 
@@ -461,13 +457,9 @@ class _AIChatWorker(QThread):
         self._settings.max_tokens = model.max_tokens
         self._settings.stream = model.stream
         self._settings.provider_options = ProviderOptions(
-            openai_reasoning_effort=(
-                (model.deepseek_reasoning_effort if model.family == "deepseek" else model.openai_reasoning_effort)
-                if model.reasoning_enabled else ""
-            ),
-            thinking_enabled=(
-                "on" if model.reasoning_enabled and model.family == "deepseek" else "off"
-            ),
+            reasoning_adapter=model.reasoning_adapter,
+            reasoning_effort=model.reasoning_effort,
+            reasoning_enabled=model.reasoning_enabled,
         )
         self._stream = model.stream
         self._cancelled = False
@@ -1719,16 +1711,9 @@ class _ChatWorkspace(QWidget):
         params.max_tokens = self._current_model.max_tokens
         params.stream = self._current_model.stream
         params.provider_options = ProviderOptions(
-            openai_reasoning_effort=(
-                (self._current_model.deepseek_reasoning_effort
-                if self._current_model.family == "deepseek"
-                else self._current_model.openai_reasoning_effort)
-                if self._current_model.reasoning_enabled else ""
-            ),
-            thinking_enabled=(
-                "on" if self._current_model.reasoning_enabled
-                and self._current_model.family == "deepseek" else "off"
-            ),
+            reasoning_adapter=self._current_model.reasoning_adapter,
+            reasoning_effort=self._current_model.reasoning_effort,
+            reasoning_enabled=self._current_model.reasoning_enabled,
         )
         self._session.set_params(params)
         self._set_sending(True)

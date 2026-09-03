@@ -18,8 +18,6 @@ from tokbee.ui.combo_style import (
 )
 from tokbee.core.session_settings import SessionSettings
 from tokbee.core.ai_role import AIRoleManager
-
-
 class SessionParamsEditor(QWidget):
     """编辑 SessionSettings 的表单主体（不含底部按钮）。"""
 
@@ -40,11 +38,6 @@ class SessionParamsEditor(QWidget):
         self._show_all = show_all_options
         self._role_manager = role_manager
         self._base = SessionSettings()
-        self._reason_combo: QComboBox | None = None
-        self._think_combo: QComboBox | None = None
-        self._g_level: QComboBox | None = None
-        self._g_budget: QSpinBox | None = None
-        self._compat_reason: QComboBox | None = None
         self._build()
 
     def _style_combo(self, combo: QComboBox) -> None:
@@ -150,112 +143,6 @@ class SessionParamsEditor(QWidget):
         layout.addWidget(self.auto_compact_chk)
 
         layout.addStretch()
-
-    def _add_section(self, layout: QVBoxLayout, title: str):
-        sep = QLabel(title)
-        sep.setStyleSheet(
-            f"font-size: 13px; font-weight: bold; color: {self.theme.colors['text']}; margin-top: 8px;"
-        )
-        layout.addWidget(sep)
-
-    def _build_provider_options(self, layout: QVBoxLayout):
-        c = self.theme.colors
-        family = self._family
-        show_openai = self._show_all or family == "openai"
-        show_gemini = self._show_all or family == "gemini"
-        show_think = self._show_all or family in (
-            "deepseek", "qwen", "glm", "kimi", "openai_compat",
-        )
-        # 无厂商信息时（全局默认页以外）也展示兼容思考项
-        if not family and not self._show_all:
-            show_think = True
-
-        if show_openai:
-            self._add_section(layout, "推理强度（OpenAI Reasoning Effort）")
-            oh = QLabel("适用于 o 系列 / GPT-5 等推理模型")
-            oh.setStyleSheet(self._hint)
-            layout.addWidget(oh)
-            self._reason_combo = QComboBox()
-            self._style_combo(self._reason_combo)
-            for label, val in [
-                ("默认（不发送）", ""),
-                ("低 low", "low"),
-                ("中 medium", "medium"),
-                ("高 high", "high"),
-            ]:
-                self._reason_combo.addItem(label, val)
-            layout.addWidget(self._reason_combo, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        if show_gemini:
-            self._add_section(layout, "思考配置（Gemini）")
-            gl = QLabel("Thinking Level")
-            gl.setStyleSheet(self._lbl)
-            layout.addWidget(gl)
-            self._g_level = QComboBox()
-            self._style_combo(self._g_level)
-            for label, val in [
-                ("默认", ""),
-                ("minimal", "minimal"),
-                ("low", "low"),
-                ("medium", "medium"),
-                ("high", "high"),
-            ]:
-                self._g_level.addItem(label, val)
-            layout.addWidget(self._g_level, alignment=Qt.AlignmentFlag.AlignLeft)
-            gb = QLabel("Thinking Budget（可选，0=关闭）")
-            gb.setStyleSheet(self._lbl)
-            layout.addWidget(gb)
-            self._g_budget = QSpinBox()
-            self._g_budget.setRange(-1, 24576)
-            self._g_budget.setSpecialValueText("不指定")
-            self._g_budget.setFixedWidth(180)
-            self._g_budget.setStyleSheet(self._spin_style)
-            layout.addWidget(self._g_budget, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        if show_think:
-            self._add_section(layout, "思考模式（DeepSeek / 兼容）")
-            th = QLabel(
-                "对应 DeepSeek：thinking.type；强度为 reasoning_effort（low/high/max）"
-            )
-            th.setWordWrap(True)
-            th.setStyleSheet(self._hint)
-            layout.addWidget(th)
-
-            self._think_combo = QComboBox()
-            self._style_combo(self._think_combo)
-            for label, val in [
-                ("默认（开启）", ""),
-                ("开启思考", "on"),
-                ("关闭思考", "off"),
-            ]:
-                self._think_combo.addItem(label, val)
-            layout.addWidget(self._think_combo, alignment=Qt.AlignmentFlag.AlignLeft)
-
-            el = QLabel("思考强度（reasoning_effort）")
-            el.setStyleSheet(self._lbl)
-            layout.addWidget(el)
-            self._compat_reason = QComboBox()
-            self._style_combo(self._compat_reason)
-            for label, val in [
-                ("默认（high）", ""),
-                ("低 low", "low"),
-                ("高 high", "high"),
-                ("最大 max", "max"),
-            ]:
-                self._compat_reason.addItem(label, val)
-            layout.addWidget(self._compat_reason, alignment=Qt.AlignmentFlag.AlignLeft)
-
-            tip = QLabel("提示：DeepSeek 开启思考时 Temperature / Top P 不会生效")
-            tip.setWordWrap(True)
-            tip.setStyleSheet(self._hint)
-            layout.addWidget(tip)
-
-            def _sync():
-                on = self._think_combo.currentData() != "off"
-                self._compat_reason.setEnabled(on)
-
-            self._think_combo.currentIndexChanged.connect(lambda _i: _sync())
-            _sync()
 
     def _on_thr_changed(self, value: float):
         self.thr_pct.setText(f"≈ {int(round(value * 100))}%")

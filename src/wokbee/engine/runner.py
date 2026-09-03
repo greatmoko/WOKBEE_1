@@ -82,6 +82,7 @@ from wokbee.engine.agent_memory import (
     ensure_overview,
     get_memory,
     judge_update_overview,
+    recall_memories,
     rewrite_overview,
     summarize_project_agent_memory,
     upsert_memory,
@@ -857,6 +858,15 @@ class AgentRunner:
         if mode == "run":
             context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
 
+        # 依用户意图优先从记忆库召回相关记忆（top≤3；不足则有多少写多少），失败静默降级
+        intent_text = (req.user_message or "").strip() or (req.project.goal or "").strip()
+        memory_recall_block = ""
+        if intent_text:
+            try:
+                memory_recall_block = recall_memories(intent_text, model=model, k=3)
+            except Exception:
+                logger.debug("记忆召回失败，按无召回处理", exc_info=True)
+
         self._session_context_block = build_session_context_block(
             title=req.project.title,
             goal=req.project.goal or "",
@@ -866,6 +876,7 @@ class AgentRunner:
             mode=mode,
             runtime_env_block=runtime_env_block,
             memory_overview_digest=ensure_overview(),
+            memory_recall_block=memory_recall_block,
             extra_lines=context_extra or None,
         )
 
