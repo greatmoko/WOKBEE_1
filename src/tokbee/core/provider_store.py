@@ -103,7 +103,7 @@ class ProviderModel:
     top_p: float | None = None
     max_tokens: int | None = None
     stream: bool = True
-    reasoning_enabled: bool = False
+    reasoning_enabled: bool = True
     openai_reasoning_effort: str = ""
     deepseek_reasoning_effort: str = ""
 
@@ -137,7 +137,7 @@ class ProviderModel:
             top_p=_optional_float(d.get("top_p")),
             max_tokens=_optional_int(d.get("max_tokens")),
             stream=bool(d.get("stream", True)),
-            reasoning_enabled=bool(d.get("reasoning_enabled", False)),
+            reasoning_enabled=bool(d.get("reasoning_enabled", True)),
             openai_reasoning_effort=str(d.get("openai_reasoning_effort") or ""),
             deepseek_reasoning_effort=str(d.get("deepseek_reasoning_effort") or ""),
         )
@@ -221,7 +221,7 @@ class ResolvedModel:
     top_p: float | None = None
     max_tokens: int | None = None
     stream: bool = True
-    reasoning_enabled: bool = False
+    reasoning_enabled: bool = True
     openai_reasoning_effort: str = ""
     deepseek_reasoning_effort: str = ""
 

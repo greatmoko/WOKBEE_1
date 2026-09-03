@@ -102,6 +102,7 @@ class _ModelSettingsPopup(QFrame):
         self._max_tokens.setRange(1, 256000)
         self._max_tokens.setSingleStep(256)
         self._max_tokens.setValue(model.max_tokens or 8192)
+        self._max_tokens.setEnabled(model.max_tokens is not None)
         for label, widget in (("Temperature", self._temperature), ("Top P", self._top_p), ("Max Tokens", self._max_tokens)):
             row = QHBoxLayout()
             title_lbl = QLabel(label)
