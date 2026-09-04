@@ -93,6 +93,10 @@ class Application:
         self.config = Config()
         self.theme = Theme()
 
+        # QWebEngineView 需要共享 OpenGL 上下文，必须在 QApplication 创建前设置
+        QApplication.setAttribute(
+            Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True
+        )
         self.qt_app = QApplication.instance() or QApplication(sys.argv)
         self.qt_app.setStyle(_pick_qt_style())
         self.qt_app.setApplicationName("WokBee")

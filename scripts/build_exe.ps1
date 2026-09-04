@@ -34,6 +34,7 @@ Write-Host "Building WokBee..." -ForegroundColor Cyan
     --collect-submodules langgraph `
     --collect-submodules langchain_mcp_adapters `
     --add-data "src\tokbee\resources;tokbee\resources" `
+    --add-data "src\wokbee\ui\webchat_assets;wokbee\ui\webchat_assets" `
     "main.py"
 
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

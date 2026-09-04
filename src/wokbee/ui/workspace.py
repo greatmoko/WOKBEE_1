@@ -55,7 +55,8 @@ from wokbee.ui.dialogs import (
     open_path as _open_in_explorer,
     tip as _tip,
 )
-from wokbee.ui.timeline import INITIAL_RENDER, _Timeline
+from wokbee.ui.timeline import INITIAL_RENDER
+from wokbee.ui.web_chat import _WebChat
 
 
 logger = logging.getLogger("wokbee")
@@ -746,7 +747,7 @@ class _ProjectWorkspace(QWidget):
         self._essentials.ai_refine_requested.connect(self._on_ai_refine_meta)
         layout.addWidget(self._essentials)
 
-        self._timeline = _Timeline(self.theme)
+        self._timeline = _WebChat(self.theme)
         layout.addWidget(self._timeline, stretch=1)
 
         self._actions = _ActionBar(self.theme)

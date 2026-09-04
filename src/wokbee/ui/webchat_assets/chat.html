@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WokBee 对话</title>
+<style>
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1f2329;
+  --text2: #666b73;
+  --hint: #9aa0a8;
+  --accent: #07c160;
+  --accent-dark: #06ad56;
+  --accent-soft: #e8f5e9;
+  --border: #e5e7eb;
+  --danger: #f56c6c;
+  --danger-soft: #fff1f2;
+  --amber: #b45309;
+  --amber-soft: #fffbeb;
+  --amber-border: #fcd34d;
+  --blue: #2563eb;
+  --blue-soft: #eff6ff;
+  --radius: 12px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: "Microsoft YaHei", "Segoe UI", -apple-system, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background:
+    radial-gradient(1200px 500px at 80% -10%, #f2fbf6 0%, transparent 60%),
+    var(--bg);
+  overflow: hidden;
+}
+#chat { display: flex; flex-direction: column; height: 100vh; }
+
+/* ── 消息区 ── */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 22px 12px;
+  scroll-behavior: auto;
+}
+#messages::-webkit-scrollbar { width: 8px; }
+#messages::-webkit-scrollbar-thumb { background: #d5d9de; border-radius: 4px; }
+#messages::-webkit-scrollbar-thumb:hover { background: #b9bfc6; }
+#messages::-webkit-scrollbar-track { background: transparent; }
+
+.older-btn {
+  display: block; margin: 0 auto 14px; padding: 5px 14px;
+  font-size: 12px; color: var(--text2);
+  background: #fff; border: 1px solid var(--border); border-radius: 16px;
+  cursor: pointer; transition: all .15s;
+}
+.older-btn:hover { color: var(--accent-dark); border-color: var(--accent); background: var(--accent-soft); }
+.hidden { display: none !important; }
+
+/* ── 消息行 ── */
+.msg { display: flex; gap: 10px; margin-bottom: 14px; animation: pop .18s ease-out; }
+@keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.msg.user { justify-content: flex-end; }
+.avatar {
+  flex: none; width: 36px; height: 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; margin-top: 2px;
+}
+.avatar.user { background: var(--accent); }
+.avatar.ai { background: var(--accent-soft); }
+.avatar.tool { background: #fef3c7; }
+.avatar.system { background: #eef0f2; }
+.avatar.thinking { background: var(--blue-soft); }
+.avatar.error { background: #ffe4e6; }
+
+/* ── 气泡 ── */
+.bubble {
+  /* 默认约为聊天窗口 2/3 宽，随窗口大小动态变化；最小约 400px（窗口过窄时不超容器） */
+  width: 66.66%;
+  max-width: calc(100% - 52px);
+  min-width: min(400px, calc(100% - 52px));
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  line-height: 1.65;
+  overflow-wrap: break-word;
+  word-break: normal;
+  position: relative;
+}
+.bubble.ai {
+  background: #fff; border: 1px solid var(--border);
+  border-top-left-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.03);
+}
+.bubble.user {
+  background: var(--accent); color: #fff;
+  border-top-right-radius: 4px;
+}
+.bubble.error {
+  background: var(--danger-soft); border: 1px solid #fecdd3; color: #b91c1c;
+}
+.bubble.system {
+  background: #f7f8fa; border: 1px solid var(--border);
+  border-top-left-radius: 4px; color: var(--text2);
+}
+.bubble.system.approval { background: #fff7e6; border-color: var(--amber-border); color: var(--amber); }
+.bubble.system.lesson { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+.bubble.thinking {
+  background: var(--blue-soft); border: 1px solid #bfdbfe;
+  border-left: 3px solid var(--blue); border-top-left-radius: 4px;
+  color: #1e3a5f;
+}
+.bubble.tool {
+  background: var(--amber-soft); border: 1px solid var(--amber-border);
+  border-top-left-radius: 4px; color: var(--text2);
+}
+.bubble.tool.failed { background: var(--danger-soft); border-color: #fecdd3; }
+.bubble-head {
+  font-size: 11px; color: var(--hint); margin-bottom: 4px;
+  user-select: none;
+}
+.bubble.user .bubble-head { color: rgba(255,255,255,.82); }
+
+/* 思考 / 工具头部行 */
+.thinking-head {
+  display: flex; align-items: center; gap: 6px;
+  padding-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--blue);
+}
+.tool-head {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 4px; font-size: 13px; font-weight: 600; color: var(--text);
+}
+.tool-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble.tool.failed .tool-head { color: #b91c1c; }
+.tool-body { padding-top: 2px; }
+
+/* 工具气泡内 call 与 callback 的分隔线 */
+.cb-sep {
+  height: 1px; background: var(--amber-border);
+  opacity: .6; margin: 6px 0;
+}
+
+/* ── 状态 chip ── */
+.chip {
+  flex: none; font-size: 11px; font-weight: 500;
+  padding: 1px 8px; border-radius: 9px; line-height: 1.6;
+}
+.chip.running { background: #fef3c7; color: var(--amber); animation: pulse 1.4s infinite; }
+.chip.pending { background: #fef3c7; color: var(--amber); }
+.chip.ok { background: #dcfce7; color: #16a34a; }
+.chip.empty { background: #f1f3f5; color: #6b7280; }
+.chip.failed { background: #ffe4e6; color: #dc2626; }
+.chip.skipped { background: #eef0f2; color: #8a919c; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* ── Markdown ── */
+.md { font-size: 14px; }
+.md p { margin: 4px 0; }
+.md p:first-child { margin-top: 0; }
+.md p:last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 8px 0 4px; line-height: 1.4; }
+.md h1 { font-size: 17px; } .md h2 { font-size: 16px; } .md h3 { font-size: 15px; }
+.md h4,.md h5,.md h6 { font-size: 14px; }
+.md ul, .md ol { margin: 4px 0 4px 20px; }
+.md li { margin: 2px 0; }
+.md code {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px; background: #f1f3f5; color: #d9480f;
+  padding: 1px 5px; border-radius: 4px;
+}
+.md pre {
+  background: #1f2329; color: #e5e7eb;
+  border-radius: 8px; padding: 10px 12px; margin: 6px 0;
+  overflow-x: auto;
+}
+.md pre code { background: transparent; color: inherit; padding: 0; font-size: 12px; }
+.md a { color: var(--accent-dark); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md strong { font-weight: 700; }
+.md blockquote {
+  border-left: 3px solid var(--border); padding-left: 10px; color: var(--text2); margin: 6px 0;
+}
+
+/* ── 正文 3 行截断 + 展开 ── */
+.md.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 含代码块（pre）时 line-clamp 不生效，改用 max-height 兜底（JS 计算并内联高度） */
+.md.clamped.pre {
+  display: block;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: unset;
+  overflow: hidden;
+}
+.clamp-toggle {
+  margin-top: 4px; padding: 0; border: none; background: none; cursor: pointer;
+  font-size: 12px; color: var(--accent-dark);
+}
+.clamp-toggle:hover { text-decoration: underline; }
+
+/* ── 空态提示 ── */
+.empty-hint { display: flex; justify-content: center; margin: 10px 0 14px; }
+.empty-hint .pill {
+  max-width: 82%;
+  padding: 8px 16px; font-size: 13px; color: var(--text2);
+  background: #fff; border: 1px solid var(--border); border-radius: 16px;
+  line-height: 1.6; word-break: break-word; text-align: center;
+}
+
+/* ── 流式光标 ── */
+.cursor {
+  display: inline-block; width: 2px; height: 1em;
+  background: var(--accent); vertical-align: -2px; margin-left: 1px;
+  animation: blink .8s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ── 状态条 ── */
+#statusbar {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 7px 24px; font-size: 12px; color: var(--text2);
+  border-top: 1px solid var(--border); background: rgba(255,255,255,.75);
+}
+#statusbar .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); animation: pulse 1s infinite;
+}
+#statusbar .spinner { animation: spin 1s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="chat">
+  <div id="messages">
+    <button id="olderBtn" class="older-btn hidden">加载更早记录 ↑</button>
+  </div>
+  <div id="statusbar" class="hidden">
+    <span class="dot"></span>
+    <span id="statusText"></span>
+  </div>
+</div>
+
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script>
+'use strict';
+
+/* ═══════════════ 工具：Markdown 渲染（无外部依赖，已先转义 HTML） ═══════════════ */
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function inlineMd(s) {
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return s;
+}
+
+function blockMd(escaped) {
+  const lines = escaped.split(/\r?\n/);
+  let html = '';
+  let listType = null;
+  const closeList = () => {
+    if (listType) { html += listType === 'ul' ? '</ul>' : '</ol>'; listType = null; }
+  };
+  for (const raw of lines) {
+    const ln = raw.trim();
+    if (!ln) { closeList(); continue; }
+    const h = ln.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { closeList(); html += '<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>'; continue; }
+    const ul = ln.match(/^[-*+]\s+(.*)$/);
+    if (ul) {
+      if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; }
+      html += '<li>' + inlineMd(ul[1]) + '</li>'; continue;
+    }
+    const ol = ln.match(/^\d+[.)]\s+(.*)$/);
+    if (ol) {
+      if (listType !== 'ol') { closeList(); html += '<ol>'; listType = 'ol'; }
+      html += '<li>' + inlineMd(ol[1]) + '</li>'; continue;
+    }
+    closeList();
+    html += '<p>' + inlineMd(ln) + '</p>';
+  }
+  closeList();
+  return html;
+}
+
+function mdToHtml(text) {
+  if (!text) return '';
+  const parts = String(text).split(/```/);
+  let html = '';
+  let inCode = false;
+  for (const part of parts) {
+    if (inCode) {
+      const body = part.replace(/^\s*\n/, '').replace(/\n\s*$/, '');
+      html += '<pre><code>' + escapeHtml(body) + '</code></pre>';
+    } else {
+      html += blockMd(escapeHtml(part));
+    }
+    inCode = !inCode;
+  }
+  return html;
+}
+
+function setMd(el, text) { el.innerHTML = mdToHtml(text || ''); }
+
+/* ═══════════════ DOM 构建 ═══════════════ */
+const messages = document.getElementById('messages');
+const olderBtn = document.getElementById('olderBtn');
+const statusbar = document.getElementById('statusbar');
+const statusText = document.getElementById('statusText');
+
+function el(tag, cls, html) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (html !== undefined) node.innerHTML = html;
+  return node;
+}
+
+function avatarFor(role, kind) {
+  if (role === 'user') return '👤';
+  if (role === 'ai') return '🤖';
+  if (role === 'error') return '⚠️';
+  if (role === 'tool') return '🔧';
+  if (role === 'thinking') return '💭';
+  if (kind === 'approval') return '✅';
+  if (kind === 'lesson') return '📝';
+  return '💻';
+}
+
+function bubbleCls(role, kind) {
+  if (role === 'user') return 'user';
+  if (role === 'error') return 'error';
+  if (role === 'ai') return 'ai';
+  if (role === 'tool') return 'tool';
+  if (role === 'thinking') return 'thinking';
+  if (kind === 'approval') return 'system approval';
+  if (kind === 'lesson') return 'system lesson';
+  return 'system';
+}
+
+function headLabel(role, kind, time) {
+  const tag = {
+    user: '用户', ai: 'AI', error: '错误', tool: '工具', thinking: '思考',
+    system: { approval: '审批', lesson: '经验', info: '系统' }[kind] || '系统',
+  }[role];
+  return (tag || kind || '') + ' · ' + (time || '');
+}
+
+/* 普通气泡行（user / ai / error / system / 独立 tool callback） */
+function makeMsg(d) {
+  const role = d.role;
+  const row = el('div', 'msg' + (role === 'user' ? ' user' : ''));
+  const bubble = el('div', 'bubble ' + bubbleCls(role, d.kind));
+  bubble.appendChild(el('div', 'bubble-head', escapeHtml(headLabel(role, d.kind, d.time))));
+  const md = el('div', 'md');
+  setMd(md, d.content);
+  bubble.appendChild(md);
+  if (role === 'user') {
+    row.appendChild(bubble);
+    row.appendChild(el('div', 'avatar user', '👤'));
+  } else {
+    row.appendChild(el('div', 'avatar ' + role, avatarFor(role, d.kind)));
+    row.appendChild(bubble);
+  }
+  return row;
+}
+
+/* 思考气泡行：左侧 💭 头像 + 蓝色思考气泡 */
+function makeThinking(d) {
+  const row = el('div', 'msg');
+  row.appendChild(el('div', 'avatar thinking', '💭'));
+  const bubble = el('div', 'bubble thinking');
+  bubble.appendChild(el('div', 'thinking-head', '💭 思考过程'));
+  const bodyWrap = el('div', 'thinking-body');
+  const md = el('div', 'md');
+  setMd(md, d.content);
+  bodyWrap.appendChild(md);
+  bubble.appendChild(bodyWrap);
+  row.appendChild(bubble);
+  return row;
+}
+
+/* ═══════════════ 工具步骤行（call ↔ callback 配对） ═══════════════ */
+const toolRows = new Map();
+const pendingRows = new Set();
+let toolSeq = 0;
+
+function setChip(chipEl, text, status) {
+  chipEl.textContent = text;
+  chipEl.className = 'chip ' + status;
+}
+
+function makeToolCall(d) {
+  const t = d.tool || {};
+  toolSeq++;
+  const row = el('div', 'msg');
+  row.appendChild(el('div', 'avatar tool', '🔧'));
+  const bubble = el('div', 'bubble tool');
+  const head = el('div', 'tool-head');
+  const name = el('span', 'name', escapeHtml(t.name || 'tool'));
+  const chip = el('span', 'chip running', '调用中');
+  head.appendChild(name); head.appendChild(chip);
+  bubble.appendChild(head);
+  const bodyWrap = el('div', 'tool-body');
+  const md = el('div', 'md');
+  setMd(md, d.content);
+  bodyWrap.appendChild(md);
+  bubble.appendChild(bodyWrap);
+  row.appendChild(bubble);
+  const rec = { el: row, head, chip, bodyWrap, md, status: 'running', name: t.name };
+  const id = t.id || '__noid__' + toolSeq;
+  toolRows.set(id, rec);
+  return row;
+}
+
+function finishToolCall(d) {
+  const t = d.tool || {};
+  const id = t.id || '__noid__' + toolSeq;
+  let rec = toolRows.get(id);
+  if (!rec) {
+    for (const [k, v] of toolRows) {
+      if (v.name === t.name && v.status === 'running') { rec = v; toolRows.delete(k); break; }
+    }
+  } else {
+    toolRows.delete(id);
+  }
+  if (!rec) return null;
+  pendingRows.delete(id);
+  const ok = String(t.status || 'success') !== 'error';
+  const empty = !(d.content && d.content.trim());
+  rec.status = ok ? (empty ? 'empty' : 'ok') : 'failed';
+  setChip(rec.chip, { ok: '成功', empty: '返回为空', failed: '失败' }[rec.status], rec.status);
+  // 追加 callback 结果到同一气泡（保留 call 内容，用分隔线隔开，不替换）
+  const md = rec.md;
+  md.innerHTML += '<div class="cb-sep"></div>' + mdToHtml(d.content);
+  rec.md = md;
+  if (rec.status === 'failed') rec.el.querySelector('.bubble.tool').classList.add('failed');
+  setupClamp(md);
+  return rec;
+}
+
+function renderTool(d) {
+  const isCall = (d.tool && d.tool.phase === 'call');
+  return isCall ? makeToolCall(d) : (finishToolCall(d) ? null : makeMsg(d));
+}
+
+function onApprovalPending() {
+  for (const [id, rec] of toolRows) {
+    if (rec.status === 'running') {
+      setChip(rec.chip, '待确认', 'pending');
+      pendingRows.add(id);
+    }
+  }
+}
+
+function onResumeApproval(approved) {
+  for (const id of pendingRows) {
+    const rec = toolRows.get(id);
+    if (!rec) continue;
+    if (approved) { setChip(rec.chip, '调用中', 'running'); rec.status = 'running'; }
+    else { setChip(rec.chip, '未完成', 'skipped'); rec.status = 'skipped'; }
+  }
+  pendingRows.clear();
+}
+
+/* ═══════════════ 正文 3 行截断 + 展开 ═══════════════ */
+const CLAMP_LINES = 3;
+
+function removeClampToggle(md) {
+  const toggle = md.nextElementSibling;
+  if (toggle && toggle.classList && toggle.classList.contains('clamp-toggle')) {
+    toggle.classList.add('hidden');
+  }
+}
+
+function mdLineHeight(md) {
+  const cs = window.getComputedStyle(md);
+  const lh = parseFloat(cs.lineHeight) || 1.65;
+  const fs = parseFloat(cs.fontSize) || 14;
+  return lh > 5 ? lh : lh * fs; // line-height 可能是数值或具体 px
+}
+
+function setupClamp(md) {
+  if (!md || !md.parentNode) return;
+  // 用户已手动展开时，复核不得再次收起
+  if (md.getAttribute('data-clamp-state') === 'expanded') return;
+  const hasPre = !!md.querySelector('pre');
+  md.classList.add('clamped');
+  if (hasPre) {
+    md.classList.add('pre');
+    const lineH = mdLineHeight(md);
+    md.style.maxHeight = Math.round(lineH * CLAMP_LINES + 6) + 'px';
+  } else {
+    md.classList.remove('pre');
+    md.style.maxHeight = '';
+  }
+  const truncated = md.scrollHeight > md.clientHeight + 2;
+  if (!truncated) {
+    md.classList.remove('clamped', 'pre');
+    md.style.maxHeight = '';
+    removeClampToggle(md);
+    return;
+  }
+  let toggle = md.nextElementSibling;
+  if (!toggle || !toggle.classList || !toggle.classList.contains('clamp-toggle')) {
+    toggle = el('button', 'clamp-toggle', '展开全部');
+    md.parentNode.appendChild(toggle);
+    toggle.addEventListener('click', () => {
+      const clamped = md.classList.toggle('clamped');
+      md.classList.toggle('pre', hasPre);
+      if (clamped) {
+        if (hasPre) md.style.maxHeight = Math.round(mdLineHeight(md) * CLAMP_LINES + 6) + 'px';
+        else md.style.maxHeight = '';
+      } else {
+        md.style.maxHeight = '';
+      }
+      md.setAttribute('data-clamp-state', clamped ? 'clamped' : 'expanded');
+      toggle.textContent = clamped ? '展开全部' : '收起';
+    });
+  } else {
+    toggle.classList.remove('hidden');
+  }
+}
+
+function attachClamp(row) {
+  if (row && row.querySelector) {
+    const md = row.querySelector('.md');
+    if (md) {
+      // 同步测量 + 延时复核：字体/布局稳定后再判一次，避免离屏/未显示时误判
+      setupClamp(md);
+      window.setTimeout(() => setupClamp(md), 60);
+      window.setTimeout(() => setupClamp(md), 300);
+    }
+  }
+}
+
+// 窗口尺寸变化 / 字体加载完成后重新测量所有正文，避免窄屏阶段误收起
+window.addEventListener('resize', () => {
+  document.querySelectorAll('.md.clamped').forEach((md) => setupClamp(md));
+});
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => {
+    document.querySelectorAll('.md.clamped').forEach((md) => setupClamp(md));
+  });
+}
+
+/* ═══════════════ 流式渲染 ═══════════════ */
+const stream = { reasoning: null, text: null };
+const streamText = { reasoning: '', text: '' };
+const CURSOR = '<span class="cursor"></span>';
+
+function finalizeStream(target, ended, fullEvent) {
+  const row = stream[target];
+  if (!row) return false;
+  stream[target] = null;
+  const full = fullEvent ? (fullEvent.content || '') : (streamText[target] || '');
+  streamText[target] = '';
+  const md = row.querySelector('.md');
+  if (md) { setMd(md, full); setupClamp(md); }
+  if (target === 'reasoning') {
+    const head = row.querySelector('.thinking-head');
+    if (head) head.textContent = ended ? '💭 思考（已结束）' : '💭 思考过程';
+  } else {
+    const head = row.querySelector('.bubble-head');
+    if (head) {
+      head.textContent = ended
+        ? 'AI（已结束） · 生成中断'
+        : (fullEvent && fullEvent.time ? 'AI · ' + fullEvent.time : 'AI');
+    }
+  }
+  return true;
+}
+
+function onAppendStream(target, delta) {
+  const key = target === 'reasoning' ? 'reasoning' : 'text';
+  if (!stream[key]) {
+    if (key === 'reasoning') {
+      const row = makeThinking({ role: 'ai', kind: 'agent', time: '', content: '' });
+      const head = row.querySelector('.thinking-head');
+      if (head) head.textContent = '💭 思考 · 生成中…';
+      stream[key] = row;
+    } else {
+      const row = makeMsg({ role: 'ai', kind: 'agent', time: '', content: '' });
+      const head = row.querySelector('.bubble-head');
+      if (head) head.textContent = 'AI · 生成中…';
+      stream[key] = row;
+    }
+    messages.appendChild(stream[key]);
+  }
+  streamText[key] += delta;
+  const md = stream[key].querySelector('.md');
+  if (md) setMd(md, streamText[key] + CURSOR);
+  scrollBottom();
+}
+
+/* ═══════════════ 滚动 ═══════════════ */
+let stick = true;
+let loadingOlder = false;
+
+function scrollBottom() {
+  if (!stick) return;
+  messages.scrollTop = messages.scrollHeight;
+}
+
+messages.addEventListener('scroll', () => {
+  const nearBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 48;
+  if (nearBottom) { stick = true; return; }
+  stick = false;
+  if (messages.scrollTop < 24 && olderRemaining > 0 && !loadingOlder) {
+    loadingOlder = true;
+    if (bridge) bridge.load_older();
+  }
+});
+
+olderBtn.addEventListener('click', () => {
+  if (!loadingOlder && olderRemaining > 0) {
+    loadingOlder = true;
+    if (bridge) bridge.load_older();
+  }
+});
+
+function updateOlderButton() {
+  if (olderRemaining > 0) {
+    olderBtn.textContent = '加载更早记录（剩 ' + olderRemaining + ' 条） ↑';
+    olderBtn.classList.remove('hidden');
+  } else {
+    olderBtn.classList.add('hidden');
+  }
+}
+
+/* ═══════════════ 事件渲染入口 ═══════════════ */
+function renderEvent(d) {
+  const kind = d.kind || '';
+  const role = d.role || 'system';
+  if (kind === 'tool') return renderTool(d);
+  if (kind === 'agent' && d.phase === 'reasoning') return makeThinking(d);
+  return makeMsg(d);
+}
+
+function resetAll() {
+  messages.innerHTML = '';
+  messages.appendChild(olderBtn);
+  toolRows.clear(); pendingRows.clear(); toolSeq = 0;
+  stream.reasoning = null; stream.text = null;
+  streamText.reasoning = ''; streamText.text = '';
+  stick = true; loadingOlder = false;
+}
+
+function onRenderEvents(eventsJson, remaining) {
+  resetAll();
+  olderRemaining = remaining || 0;
+  const items = JSON.parse(eventsJson || '[]');
+  for (const d of items) {
+    const node = renderEvent(d);
+    if (node) { messages.appendChild(node); attachClamp(node); }
+  }
+  updateOlderButton();
+  scrollBottom();
+}
+
+function onPrependEvents(eventsJson, remaining) {
+  loadingOlder = false;
+  olderRemaining = remaining || 0;
+  const items = JSON.parse(eventsJson || '[]');
+  const frag = document.createDocumentFragment();
+  for (const d of items) {
+    const node = renderEvent(d);
+    if (node) { frag.appendChild(node); attachClamp(node); }
+  }
+  const anchor = messages.children[0] === olderBtn ? olderBtn : null;
+  messages.insertBefore(frag, anchor ? anchor.nextSibling : messages.firstChild);
+  updateOlderButton();
+}
+
+function onAppendEvent(eventJson) {
+  const d = JSON.parse(eventJson || '{}');
+  if (!d.kind) return;
+  const phase = d.phase || '';
+  let reused = false;
+  if (d.kind === 'agent' && (phase === 'narration' || phase === 'answer')) {
+    reused = finalizeStream('text', false, d);
+  }
+  if (d.kind === 'agent' && phase === 'reasoning') {
+    reused = finalizeStream('reasoning', false, d);
+  }
+  if (reused) { scrollBottom(); return; }
+  const node = renderEvent(d);
+  if (node) { messages.appendChild(node); attachClamp(node); }
+  scrollBottom();
+}
+
+function onBeginRun() {
+  toolRows.clear(); pendingRows.clear(); toolSeq = 0;
+  stream.reasoning = null; stream.text = null;
+  streamText.reasoning = ''; streamText.text = '';
+  stick = true;
+}
+
+function onEndRun() {
+  finalizeStream('reasoning', true);
+  finalizeStream('text', true);
+  for (const [id, rec] of toolRows) {
+    if (rec.status === 'running' || rec.status === 'pending') {
+      setChip(rec.chip, '未完成', 'skipped');
+    }
+  }
+  toolRows.clear(); pendingRows.clear();
+}
+
+function onSetStatus(text) {
+  statusText.textContent = text || '';
+  statusbar.classList.remove('hidden');
+}
+
+function onClearStatus() {
+  statusbar.classList.add('hidden');
+  statusText.textContent = '';
+}
+
+function onSetAgentRunning(running) {
+  if (running) onBeginRun();
+}
+
+function onShowEmpty(text) {
+  resetAll();
+  olderRemaining = 0;
+  const empty = el('div', 'empty-hint');
+  empty.appendChild(el('div', 'pill', escapeHtml(text || '选择或新建一个项目开始。')));
+  messages.appendChild(empty);
+  updateOlderButton();
+}
+
+function onCompactMode() { /* 网页气泡天然轻量，无需折叠模式 */ }
+
+/* ═══════════════ QWebChannel 桥接 ═══════════════ */
+let bridge = null;
+let olderRemaining = 0;
+
+function setup() {
+  new QWebChannel(qt.webChannelTransport, (channel) => {
+    bridge = channel.objects.backend;
+    bridge.render_events.connect(onRenderEvents);
+    bridge.prepend_events.connect(onPrependEvents);
+    bridge.append_event.connect(onAppendEvent);
+    bridge.append_stream.connect(onAppendStream);
+    bridge.begin_run.connect(onBeginRun);
+    bridge.end_run.connect(onEndRun);
+    bridge.set_status.connect(onSetStatus);
+    bridge.clear_status.connect(onClearStatus);
+    bridge.set_agent_running.connect(onSetAgentRunning);
+    bridge.approval_pending.connect(onApprovalPending);
+    bridge.resume_approval.connect(onResumeApproval);
+    bridge.set_compact_mode.connect(onCompactMode);
+    bridge.show_empty.connect(onShowEmpty);
+    try { bridge.page_ready(); } catch (e) { /* 稍后由 Python 兜底重试 */ }
+    window.setInterval(() => { try { bridge.page_ready(); } catch (e) {} }, 1000);
+  });
+}
+
+setup();
+</script>
+</body>
+</html>
