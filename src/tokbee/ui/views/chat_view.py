@@ -13,7 +13,7 @@ from PySide6.QtGui import QPixmap, QKeyEvent, QImage, QMouseEvent, QPainter, QCo
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QFrame,
     QLabel, QPushButton, QScrollArea, QTextEdit, QTextBrowser,
-    QLineEdit, QMenu, QDialog,
+    QLineEdit, QMenu, QDialog, QSpinBox,
     QComboBox, QFileDialog, QSizePolicy, QApplication,
 )
 
@@ -289,10 +289,9 @@ class _UserBubbleLabel(QLabel):
     def __init__(self, text: str, max_width: int, theme: Theme, parent=None):
         super().__init__(parent)
         self.theme = theme
-        c = theme.colors
         self._max_w = max(160, int(max_width))
         font = self.font()
-        font.setPixelSize(13)
+        font.setPixelSize(14)
         self.setFont(font)
         self.setText(text)
         self.setWordWrap(True)
@@ -300,11 +299,12 @@ class _UserBubbleLabel(QLabel):
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
         self.setStyleSheet(f"""
             QLabel {{
-                background: #dcf8c6;
-                border-radius: 10px;
+                background: #07c160;
+                border-radius: 12px;
+                border-top-right-radius: 4px;
                 padding: 10px 14px;
-                font-size: 13px;
-                color: {c["text"]};
+                font-size: 14px;
+                color: #ffffff;
             }}
         """)
         self.setMaximumWidth(self._max_w)
@@ -961,8 +961,8 @@ class _ChatWorkspace(QWidget):
         self._msg_container = QWidget()
         self._msg_container.setStyleSheet("background: transparent;")
         self._msg_layout = QVBoxLayout(self._msg_container)
-        self._msg_layout.setContentsMargins(20, 12, 20, 12)
-        self._msg_layout.setSpacing(10)
+        self._msg_layout.setContentsMargins(22, 18, 22, 12)
+        self._msg_layout.setSpacing(14)
         self._msg_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         msg_scroll.setWidget(self._msg_container)
@@ -1024,6 +1024,23 @@ class _ChatWorkspace(QWidget):
 
         bottom_bar = QHBoxLayout()
         bottom_bar.setSpacing(8)
+
+        self._settings_btn = QPushButton("⚙")
+        self._settings_btn.setToolTip("配置当前对话的参数")
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn.setFixedSize(30, 30)
+        self._settings_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["card_bg"]}; color: {c["text_secondary"]};
+                border: 1px solid {c["border_light"]}; border-radius: 6px;
+                font-size: 14px; padding: 0;
+            }}
+            QPushButton:hover {{
+                background: {c["subnav_hover"]}; border-color: {c["border"]};
+            }}
+        """)
+        self._settings_btn.clicked.connect(self._on_session_settings)
+        bottom_bar.addWidget(self._settings_btn)
 
         self._model_btn = QPushButton("未配置模型")
         self._model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1164,6 +1181,7 @@ class _ChatWorkspace(QWidget):
         self._refresh_attach_bar()
 
         self._header.show()
+        self._settings_btn.show()
         self._title_label.setText(session.title)
         try:
             dt = datetime.strptime(session.updated_at, "%Y-%m-%d %H:%M:%S")
@@ -1320,6 +1338,7 @@ class _ChatWorkspace(QWidget):
         """无任何对话被选中时的欢迎页。"""
         c = self.theme.colors
         self._header.hide()
+        self._settings_btn.hide()
         self._clear_messages()
 
         self._provider_store = ProviderStore()
@@ -1373,6 +1392,7 @@ class _ChatWorkspace(QWidget):
     def _show_empty_chat(self):
         c = self.theme.colors
         self._header.show()
+        self._settings_btn.show()
 
         empty = QWidget()
         el = QVBoxLayout(empty)
@@ -1403,12 +1423,13 @@ class _ChatWorkspace(QWidget):
         tb.set_menu_colors(c)
         tb.setStyleSheet(f"""
             QTextBrowser {{
-                background: {bg};
-                border-radius: 10px;
+                background: #ffffff;
+                border: 1px solid {c["border"]};
+                border-radius: 12px;
+                border-top-left-radius: 4px;
                 padding: 10px 14px;
-                font-size: 13px;
+                font-size: 14px;
                 color: {c["text"]};
-                border: none;
             }}
             QTextBrowser a {{ color: {c["accent"]}; }}
         """)
@@ -1627,6 +1648,7 @@ class _ChatWorkspace(QWidget):
             self._clear_messages()
 
         self._header.show()
+        self._settings_btn.show()
         self._title_label.setText(self._session.title)
         try:
             dt = datetime.strptime(self._session.updated_at, "%Y-%m-%d %H:%M:%S")
@@ -1866,6 +1888,103 @@ class _ChatWorkspace(QWidget):
         self._ctx_ring.set_usage(usage.used, usage.limit)
         busy = self._compact_worker is not None and self._compact_worker.isRunning()
         self._ctx_ring.set_ring_enabled(bool(self._session) and not busy)
+
+    def _on_session_settings(self):
+        """会话级配置：允许为当前对话单独覆盖上下文条数，默认取全局默认值。"""
+        if not self._session:
+            return
+        session = self._session
+        c = self.theme.colors
+        params = session.get_params()
+        defaults = self.manager.session_defaults.get()
+        global_ctx = defaults.max_context_message_count
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("会话设置")
+        dlg.setFixedSize(420, 220)
+        dlg.setStyleSheet(f"background: {c['content_bg']};")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 20, 24, 18)
+        layout.setSpacing(10)
+
+        lbl = QLabel("上下文消息数")
+        lbl.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {c['text']};")
+        layout.addWidget(lbl)
+
+        hist_hint = QLabel(
+            "携带最近多少条消息（soft limit）；设很大表示尽量不按条数截断。\n"
+            f"全局默认：{global_ctx} 条。"
+        )
+        hist_hint.setWordWrap(True)
+        hist_hint.setStyleSheet(f"font-size: 11px; color: {c['text_hint']};")
+        layout.addWidget(hist_hint)
+
+        hist_box = QSpinBox()
+        hist_box.setRange(0, 100000)
+        hist_box.setSingleStep(2)
+        hist_box.setValue(params.max_context_message_count)
+        hist_box.setFixedWidth(200)
+        hist_box.setStyleSheet(f"""
+            QSpinBox {{
+                background: {c["input_bg"]}; border: 1px solid {c["input_border"]};
+                border-radius: 6px; padding: 4px 8px; color: {c["text"]}; font-size: 13px;
+            }}
+            QSpinBox:focus {{ border-color: {c["input_focus_border"]}; }}
+        """)
+        layout.addWidget(hist_box, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        layout.addStretch()
+
+        def set_global():
+            hist_box.setValue(global_ctx)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        use_default_btn = QPushButton("沿用全局默认")
+        use_default_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        use_default_btn.setFixedHeight(30)
+        use_default_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {c["text_secondary"]};
+                border: 1px solid {c["border"]}; border-radius: 6px; padding: 0 12px; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: {c["subnav_hover"]}; }}
+        """)
+        use_default_btn.clicked.connect(set_global)
+        btn_row.addWidget(use_default_btn)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setFixedSize(72, 34)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_bg"]}; color: {c["text"]};
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["btn_hover"]}; }}
+        """)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(cancel_btn)
+
+        save_btn = QPushButton("保存")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setFixedSize(72, 34)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c["btn_primary"]}; color: #ffffff;
+                border: none; border-radius: 6px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
+        """)
+        save_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            params.max_context_message_count = hist_box.value()
+            session.set_params(params)
+            self.manager.save()
+            self._show_tip(f"已更新上下文条数：{hist_box.value()} 条")
 
     def _on_compress_clicked(self):
         if not self._session:

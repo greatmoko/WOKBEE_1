@@ -35,3 +35,11 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 *.lnk
+
+# 本地文档（不入库）
+reviews/
+
+# Reasonix 工具本地文件（不入库）
+.reasonix/
+reasonix.toml
+*.reasonix-tx-*.bak

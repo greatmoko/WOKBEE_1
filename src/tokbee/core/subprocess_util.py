@@ -11,9 +11,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-# 当前仍在跑的 execute 子进程（含 Job Object 句柄），暂停时从任意线程强杀。
+# 当前仍在跑的 execute 子进程（含 Job Object 句柄 + 所属运行标签），暂停/超时时按标签精确杀。
+# 元组：Popen, JobObject, cancel_event（可为 None，用于把「这次运行」发起的所有 execute 绑定在一起）。
 _LIVE_LOCK = threading.Lock()
-_LIVE_RUNS: list[tuple[subprocess.Popen, Any]] = []
+_LIVE_RUNS: list[tuple[subprocess.Popen, Any, threading.Event | None]] = []
 
 
 def nowin() -> int:
@@ -90,37 +91,67 @@ def _win_job_kill(job: Any) -> None:
     _win_job_close(job)
 
 
-def _register_live(proc: subprocess.Popen, job: Any) -> None:
+def _register_live(
+    proc: subprocess.Popen, job: Any, cancel_event: threading.Event | None = None
+) -> None:
     with _LIVE_LOCK:
-        _LIVE_RUNS.append((proc, job))
+        _LIVE_RUNS.append((proc, job, cancel_event))
 
 
 def _unregister_live(proc: subprocess.Popen) -> Any:
     job = None
     with _LIVE_LOCK:
-        remain: list[tuple[subprocess.Popen, Any]] = []
-        for p, j in _LIVE_RUNS:
+        remain: list[tuple[subprocess.Popen, Any, threading.Event | None]] = []
+        for p, j, _ev in _LIVE_RUNS:
             if p is proc:
                 job = j
             else:
-                remain.append((p, j))
+                remain.append((p, j, _ev))
         _LIVE_RUNS[:] = remain
     return job
 
 
-def kill_all_cancellable_runs() -> None:
-    """暂停/超时兜底：杀掉当前所有 execute 子进程树（任意线程可调）。"""
+def kill_cancellable_runs_for(cancel_event: threading.Event) -> None:
+    """只杀掉“某个事件标签”下在册的 execute 子进程树（不误杀其它运行）。
+
+    预留精确入口：把「一次运行」发起的所有 execute（run_cancellable 以同一
+    cancel_event 注册）绑定到该事件，命中即杀。锁内摘出目标，锁外执行杀进程，
+    避免在持有锁时长时间阻塞在 Win32 调用。
+    """
+    with _LIVE_LOCK:
+        targets = [t for t in _LIVE_RUNS if t[2] is cancel_event]
+        _LIVE_RUNS[:] = [t for t in _LIVE_RUNS if t[2] is not cancel_event]
+    for proc, job, _ev in targets:
+        _kill_one(proc, job)
+
+
+def _kill_one(proc: subprocess.Popen, job: Any) -> None:
+    """杀掉单个在册子进程树（Job Object + taskkill 兜底）。锁外调用。"""
+    _win_job_kill(job)
+    try:
+        if proc.poll() is None and proc.pid:
+            kill_process_tree(int(proc.pid))
+            proc.kill()
+    except OSError:
+        pass
+
+
+def kill_all_cancellable_runs(
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """暂停/超时兜底：杀掉当前所有 execute 子进程树（任意线程可调）。
+
+    传 `cancel_event` 时只杀属于该事件标签的在册进程，不再误杀其它运行；
+    不传则保留旧的“全杀”语义作为泛化兜底。
+    """
+    if cancel_event is not None:
+        kill_cancellable_runs_for(cancel_event)
+        return
     with _LIVE_LOCK:
         snapshot = list(_LIVE_RUNS)
         _LIVE_RUNS.clear()
-    for proc, job in snapshot:
-        _win_job_kill(job)
-        try:
-            if proc.poll() is None and proc.pid:
-                kill_process_tree(int(proc.pid))
-                proc.kill()
-        except OSError:
-            pass
+    for proc, job, _ev in snapshot:
+        _kill_one(proc, job)
 
 
 def kill_process_tree(pid: int) -> None:
@@ -211,7 +242,7 @@ def run_cancellable(
     if job and not _win_job_assign(job, proc):
         _win_job_kill(job)
         job = None
-    _register_live(proc, job)
+    _register_live(proc, job, cancel_event)
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     stdout_size = 0

@@ -740,8 +740,6 @@ function onShowEmpty(text) {
   updateOlderButton();
 }
 
-function onCompactMode() { /* 网页气泡天然轻量，无需折叠模式 */ }
-
 /* ═══════════════ QWebChannel 桥接 ═══════════════ */
 let bridge = null;
 let olderRemaining = 0;
@@ -760,7 +758,6 @@ function setup() {
     bridge.set_agent_running.connect(onSetAgentRunning);
     bridge.approval_pending.connect(onApprovalPending);
     bridge.resume_approval.connect(onResumeApproval);
-    bridge.set_compact_mode.connect(onCompactMode);
     bridge.show_empty.connect(onShowEmpty);
     try { bridge.page_ready(); } catch (e) { /* 稍后由 Python 兜底重试 */ }
     window.setInterval(() => { try { bridge.page_ready(); } catch (e) {} }, 1000);

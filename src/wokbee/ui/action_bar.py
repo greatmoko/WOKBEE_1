@@ -48,11 +48,11 @@ class _RunButton(QPushButton):
         self.setFixedSize(59, 34)
         self.setStyleSheet(f"""
             QPushButton {{
-                background: {theme.colors["btn_primary"]}; color: white;
+                background: #faad14; color: white;
                 border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
             }}
-            QPushButton:hover {{ background: {theme.colors["btn_primary_hover"]}; }}
-            QPushButton:pressed {{ background: {theme.colors["btn_primary"]}; }}
+            QPushButton:hover {{ background: #e69500; }}
+            QPushButton:pressed {{ background: #faad14; }}
         """)
 
     def set_spinning(self, spinning: bool):
@@ -120,7 +120,6 @@ class _ActionBar(QFrame):
     reject_clicked = Signal()
     model_changed = Signal(str, str)  # provider_id, model_id
     compress_clicked = Signal()
-    compact_mode_changed = Signal(bool)
     draft_changed = Signal()
 
     def __init__(self, theme: Theme, parent=None):
@@ -207,15 +206,6 @@ class _ActionBar(QFrame):
         row = QHBoxLayout()
         row.setSpacing(6)
 
-        self._compact_btn = QPushButton("↕️")
-        self._compact_btn.setFixedSize(34, 34)
-        self._compact_btn.setToolTip("收拢/展开全部聊天气泡")
-        self._compact_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._compact_btn.setStyleSheet(self._icon_btn_qss())
-        self._compact_btn.clicked.connect(self._on_compact_toggle)
-        row.addWidget(self._compact_btn)
-        self._compact_mode = False
-
         for icon, tip, slot in (
             ("📁", "打开目录", self.open_folder_clicked.emit),
             ("📦", "打开交付物目录", self.open_deliverables_clicked.emit),
@@ -256,10 +246,6 @@ class _ActionBar(QFrame):
         self._ctx_ring.compress_clicked.connect(self.compress_clicked.emit)
         row.addWidget(self._ctx_ring)
 
-        self._run_btn = _RunButton(self.theme)
-        self._run_btn.clicked.connect(self.run_clicked.emit)
-        row.addWidget(self._run_btn)
-
         pause_btn = QPushButton("暂停")
         pause_btn.setFixedSize(48, 34)
         pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -274,31 +260,26 @@ class _ActionBar(QFrame):
         pause_btn.clicked.connect(self.pause_clicked.emit)
         row.addWidget(pause_btn)
 
+        self._run_btn = _RunButton(self.theme)
+        self._run_btn.clicked.connect(self.run_clicked.emit)
+        row.addWidget(self._run_btn)
+
         send_btn = QPushButton("发送")
-        send_btn.setFixedSize(48, 34)
+        send_btn.setFixedSize(72, 34)
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        send_btn.setStyleSheet(self._sec_qss())
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background: #07c160; color: white;
+                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { background: #06ad56; }
+            QPushButton:pressed { background: #07c160; }
+        """)
         send_btn.clicked.connect(self._on_send)
         row.addWidget(send_btn)
         layout.addLayout(row)
 
         self.reload_models()
-
-    def _on_compact_toggle(self):
-        self._compact_mode = not self._compact_mode
-        tip = "展开全部聊天气泡" if self._compact_mode else "收拢全部聊天气泡"
-        self._compact_btn.setToolTip(tip)
-        self.compact_mode_changed.emit(self._compact_mode)
-
-    def _sec_qss(self) -> str:
-        c = self.theme.colors
-        return f"""
-            QPushButton {{
-                background: {c["btn_bg"]}; color: {c["text"]};
-                border: none; border-radius: 6px; padding: 0 12px; font-size: 13px;
-            }}
-            QPushButton:hover {{ background: {c["btn_hover"]}; }}
-        """
 
     def _icon_btn_qss(self) -> str:
         c = self.theme.colors

@@ -663,7 +663,7 @@ class AgentRunner:
         try:
             from tokbee.core.subprocess_util import kill_all_cancellable_runs
 
-            kill_all_cancellable_runs()
+            kill_all_cancellable_runs(cancel_event=self._cancel)
         except Exception:
             pass
         # 若卡在审批/澄清，解开等待
@@ -1215,7 +1215,7 @@ class AgentRunner:
             t.join(0.25)
             if not self._cancel.is_set():
                 continue
-            kill_all_cancellable_runs()
+            kill_all_cancellable_runs(cancel_event=self._cancel)
             t.join(8)
             if t.is_alive():
                 logger.warning("暂停后 stream 未退出，放弃等待并结束本轮")

@@ -107,7 +107,11 @@ class AgentWorker(QThread):
         try:
             from tokbee.core.subprocess_util import kill_all_cancellable_runs
 
-            kill_all_cancellable_runs()
+            if self.runner is not None:
+                # 精确杀本次运行的进程树，不误杀其它并发运行的 execute
+                kill_all_cancellable_runs(cancel_event=self.runner._cancel)
+            else:
+                kill_all_cancellable_runs()
         except Exception:
             pass
         if self.runner is not None:

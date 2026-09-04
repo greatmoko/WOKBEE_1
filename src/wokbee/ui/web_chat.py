@@ -81,7 +81,6 @@ class _ChatBridge(QObject):
     set_agent_running = Signal(bool)
     approval_pending = Signal()
     resume_approval = Signal(bool)
-    set_compact_mode = Signal(bool)
     show_empty = Signal(str)
 
     def __init__(self, host, parent=None):
@@ -236,9 +235,6 @@ class _WebChat(QFrame):
     def reset_scroll_anchor(self):
         # 网页端自动贴底滚动；切项目后下一次渲染由 render_events 全量重绘，无需干预
         pass
-
-    def set_global_compact_mode(self, compact: bool):
-        self._emit("set_compact_mode", bool(compact))
 
     def on_approval_pending(self):
         self._emit("approval_pending")

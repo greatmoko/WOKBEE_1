@@ -400,7 +400,7 @@ def attach_execute_watch(backend, *, cancel_event, default_timeout: float) -> No
         deadline = time.monotonic() + cap
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                kill_all_cancellable_runs()
+                kill_all_cancellable_runs(cancel_event=cancel_event)
                 return ExecuteResponse(
                     output="命令已取消：用户点击了暂停，进程树已被终止。",
                     exit_code=130,
@@ -408,7 +408,7 @@ def attach_execute_watch(backend, *, cancel_event, default_timeout: float) -> No
                 )
             left = deadline - time.monotonic()
             if left <= 0:
-                kill_all_cancellable_runs()
+                kill_all_cancellable_runs(cancel_event=cancel_event)
                 return ExecuteResponse(
                     output=(
                         f"Error: Command timed out after {cap:g} seconds "
