@@ -82,6 +82,7 @@ from wokbee.engine.agent_memory import (
     ensure_overview,
     get_memory,
     judge_update_overview,
+    recall_block_summary,
     recall_memories,
     rewrite_overview,
     summarize_project_agent_memory,
@@ -233,6 +234,49 @@ def _reasoning_text(msg: Any) -> str:
     if isinstance(rc, list):
         rc = "".join(str(x) for x in rc)
     return str(rc).strip()
+
+
+def _raw_text(content: Any) -> str:
+    """保留空白地抽取消息文本增量（流式 delta 用，勿 strip 以免吞词间空格）。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") in ("text", "output_text", "input_text") or "text" in b:
+                    parts.append(str(b.get("text") or ""))
+                elif b.get("type") == "reasoning":
+                    continue
+            elif isinstance(b, str):
+                parts.append(b)
+        return "".join(parts)
+    return str(content)
+
+
+def _raw_reasoning(chunk: Any) -> str:
+    """读取厂商附带的思考 delta（保留空白）。"""
+    ak = getattr(chunk, "additional_kwargs", None)
+    if isinstance(chunk, dict):
+        ak = chunk.get("additional_kwargs")
+    if not isinstance(ak, dict):
+        return ""
+    rc = ak.get("reasoning_content") or ""
+    if isinstance(rc, list):
+        rc = "".join(str(x) for x in rc)
+    return str(rc)
+
+
+def _stream_delta_parts(chunk: Any) -> tuple[str, str]:
+    """把单个流式消息块拆成 (reasoning_delta, text_delta)。"""
+    try:
+        return _raw_reasoning(chunk), _raw_text(
+            getattr(chunk, "content", None) if not isinstance(chunk, dict) else chunk.get("content")
+        )
+    except Exception:
+        return "", ""
 
 
 def _is_ai_message(msg: Any) -> bool:
@@ -649,6 +693,19 @@ class AgentRunner:
         self._ask_user_answers = answers if isinstance(answers, dict) else {"cancelled": True}
         self._ask_user_event.set()
 
+    def _emit_stream_delta(self, target: str, delta: str) -> None:
+        """流式增量事件（agent_stream）：只驱动 UI 实时气泡，不落盘、不入本轮轨迹。
+
+        与 `_emit` 不同：`_emit` 会写 `_run_events`（供对话/经验总结），token 级
+        增量不能混进去，否则总结会读到半截文本；也不进 store，避免 events.jsonl 爆炸。
+        """
+        if not delta or not self.on_event:
+            return
+        try:
+            self.on_event("agent_stream", delta, {"target": target})
+        except Exception:
+            logger.exception("agent_stream 事件回调失败")
+
     def _emit(self, kind: str, content: str, meta: dict | None = None) -> None:
         meta = dict(meta or {})
         content = redact_text(content or "")
@@ -858,14 +915,29 @@ class AgentRunner:
         if mode == "run":
             context_extra = [f"用户于 {_now()} 点击运行。"] + context_extra
 
-        # 依用户意图优先从记忆库召回相关记忆（top≤3；不足则有多少写多少），失败静默降级
+        # 依用户意图优先从记忆库召回相关记忆（top≤3；不足则有多少写多少），失败静默降级。
+        # 召回动作本身也落一条时间线提示，让用户在对话记录里能看到「先调记忆再执行」。
         intent_text = (req.user_message or "").strip() or (req.project.goal or "").strip()
         memory_recall_block = ""
+        recall_failed = False
         if intent_text:
             try:
                 memory_recall_block = recall_memories(intent_text, model=model, k=3)
             except Exception:
+                recall_failed = True
                 logger.debug("记忆召回失败，按无召回处理", exc_info=True)
+            if recall_failed:
+                self._emit("info", "记忆召回失败，已跳过（不影响执行）。")
+            elif memory_recall_block.strip():
+                summary = recall_block_summary(memory_recall_block)
+                self._emit(
+                    "info",
+                    "已从记忆库召回相关记忆（已注入本轮上下文）：\n" + summary,
+                )
+            else:
+                self._emit("info", "已检索记忆库，但未找到相关记忆（无注入）。")
+        else:
+            self._emit("info", "无用户意图与目标，跳过记忆召回。")
 
         self._session_context_block = build_session_context_block(
             title=req.project.title,
@@ -1085,21 +1157,53 @@ class AgentRunner:
         stream_error: list[BaseException] = []
 
         def _run_stream() -> None:
+            pending: dict[str, list[str]] = {"reasoning": [], "text": []}
+            last_flush = 0.0
+            FLUSH_INTERVAL = 0.08
+
+            def _flush(force: bool = False) -> None:
+                nonlocal last_flush
+                now = time.monotonic()
+                if not force and now - last_flush < FLUSH_INTERVAL:
+                    return
+                for _target in ("reasoning", "text"):
+                    parts = pending[_target]
+                    if not parts:
+                        continue
+                    delta = "".join(parts)
+                    parts.clear()
+                    if delta:
+                        self._emit_stream_delta(_target, delta)
+                last_flush = now
+
             try:
                 for chunk in agent.stream(
                     input_payload,
                     config=config,
-                    stream_mode="updates",
+                    stream_mode=["messages", "updates"],
                 ):
                     if self._cancel.is_set():
                         break
-                    for msg in _collect_messages_from_update(chunk):
-                        _emit_message_events(
-                            self._emit,
-                            msg,
-                            seen,
-                            cache_tracker=self._cache_tracker,
-                        )
+                    mode, payload = chunk
+                    if mode == "messages":
+                        msg_chunk, _meta = payload
+                        if _is_ai_message(msg_chunk):
+                            r_delta, t_delta = _stream_delta_parts(msg_chunk)
+                            if r_delta:
+                                pending["reasoning"].append(r_delta)
+                            if t_delta:
+                                pending["text"].append(t_delta)
+                            _flush()
+                    else:
+                        _flush(force=True)
+                        for msg in _collect_messages_from_update(payload):
+                            _emit_message_events(
+                                self._emit,
+                                msg,
+                                seen,
+                                cache_tracker=self._cache_tracker,
+                            )
+                _flush(force=True)
             except GraphInterrupt:
                 pass
             except Exception as e:  # noqa: BLE001

@@ -33,10 +33,15 @@ BUBBLE_COLLAPSED_HEIGHT = 200
 BUBBLE_COMPACT_HEIGHT = 22
 BUBBLE_COMPACT_CHARS = 80
 SCROLL_STICK_THRESHOLD = 48
+SCROLL_TOP_LOAD_THRESHOLD = 24
 # 时间线虚拟化：初始只实例化**最近** N 条成行，避免一次性物化整条时间线
-# 卡顿首屏/切项目；更早的记录通过顶部「加载更早记录」按钮按批前置。
-INITIAL_RENDER = 120
-LOAD_OLDER_BATCH = 120
+# 卡顿首屏/切项目；更早的记录在用户上翻到顶时按批前置加载。
+INITIAL_RENDER = 15
+LOAD_OLDER_BATCH = 50
+# 前置加载后滚动补偿：插入更早行后，气泡高度/滚动条 range 要等事件循环跑过才稳定。
+# 补偿挂在 rangeChanged 信号上，等 maximum 真正变化的那一帧按「当前 range 增量」做
+# 幂等补偿，再等一段静默期自动解除，避免按未更新的 maximum clamp 导致视口跳变。
+SCROLL_COMPENSATE_QUIET_MS = 80
 
 
 def _preview_text(full: str, *, max_chars: int = BUBBLE_PREVIEW_CHARS, max_lines: int = BUBBLE_PREVIEW_LINES) -> tuple[str, bool]:
@@ -400,7 +405,9 @@ class _ExpandableBody(QWidget):
 
 
 class _LiveStatusBar(QFrame):
-    """实时状态条：显示「正在思考… / 正在调用工具…」等，配脉冲光点，避免界面像死机。"""
+    """实时状态条：显示「正在思考… / 正在调用工具…」等，配旋转动画，避免界面像死机。"""
+
+    _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, theme: Theme, parent=None):
         super().__init__(parent)
@@ -428,13 +435,13 @@ class _LiveStatusBar(QFrame):
         self._t = 0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(400)
+        self._timer.start(130)
 
     def _tick(self):
         if not self._pulse_on:
             return
         self._t += 1
-        self._dot.setText("●" if self._t % 2 == 0 else "◐")
+        self._dot.setText(self._SPINNER[self._t % len(self._SPINNER)])
 
     def set_status(self, text: str):
         self._label.setText(text or "")
@@ -724,12 +731,21 @@ class _Timeline(QFrame):
         self._agent_running = False
         self._scroll_programmatic = False
         self._global_compact = False
-        # 虚拟化窗口：_all_events 为完整历史，_window_lo/_window_hi 为当前已实例化的
-        # 事件下标区间 [lo, hi)；更早的在点「加载更早记录」时按批前置。
+        # 流式气泡：target("reasoning"/"text") → 正在增量更新的气泡；结束后移出
+        self._stream_bubbles: dict[str, QWidget] = {}
+        self._stream_bodies: dict[str, _ExpandableBody] = {}
+        self._stream_text: dict[str, str] = {}
+        # 虚拟化窗口：_all_events 为已加载（最新→更早已渲染）的事件；_window_lo/_window_hi
+        # 保留用于窗口区间一致性。更早记录通过 loader 在用户上翻到顶时按批前置。
         self._all_events: list[ProjectEvent] = []
         self._window_lo = 0
         self._window_hi = 0
-        self._older_btn: QPushButton | None = None
+        self._events_loader = None  # callable(skip_from_end, count) -> (events, older_remaining)
+        self._older_remaining = 0
+        self._loading_older = False
+        self._scroll_anchor_base = None  # (旧 value, 旧 maximum)；布局稳定后幂等补偿
+        self._scroll_anchor_conn = None
+        self._scroll_anchor_timer = None
         self._build()
 
     def _build(self):
@@ -744,6 +760,7 @@ class _Timeline(QFrame):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self._container = QWidget()
         self._container.setStyleSheet("background: transparent;")
@@ -763,6 +780,16 @@ class _Timeline(QFrame):
             return
         bar = self._scroll.verticalScrollBar()
         self._stick_to_bottom = (bar.maximum() - value) <= SCROLL_STICK_THRESHOLD
+        # 上翻到顶：若还有更早记录，排队按批前置加载（防抖/去重）
+        if (
+            value <= SCROLL_TOP_LOAD_THRESHOLD
+            and not self._stick_to_bottom
+            and self._older_remaining > 0
+            and not self._loading_older
+            and not self._older_pending
+        ):
+            self._older_pending = True
+            QTimer.singleShot(0, self._load_older_batch)
 
     def _on_scroll_range_changed(self, _min: int, _max: int) -> None:
         """内容高度变化（布局逐步稳定）时，若应贴底则继续滚到底，避免停在旧位置。
@@ -820,29 +847,47 @@ class _Timeline(QFrame):
         self._all_events = []
         self._window_lo = 0
         self._window_hi = 0
-        self._older_btn = None
+        self._events_loader = None
+        self._older_remaining = 0
+        self._loading_older = False
+        self._older_pending = False
+        self._scroll_anchor_base = None
+        if self._scroll_anchor_conn is not None:
+            try:
+                self._scroll.verticalScrollBar().rangeChanged.disconnect(
+                    self._scroll_anchor_conn
+                )
+            except (RuntimeError, TypeError):
+                pass
+        self._scroll_anchor_conn = None
+        self._scroll_anchor_timer = None
+        self._clear_streams()
 
-    def render_events(self, events: list[ProjectEvent]):
+    def render_events(
+        self,
+        events: list[ProjectEvent],
+        *,
+        older_remaining: int = 0,
+        loader=None,
+    ):
         """完整重绘（仅切换项目 / 归档后使用，运行中勿频繁调用）。
 
-        为避免一次物化整条时间线导致首屏/切项目卡顿，只实例化**最近** `INITIAL_RENDER`
-        条成行；更早的历史通过顶部「加载更早记录」按钮按批前置。
+        `events` 为已加载的最新窗口（oldest→newest）；`older_remaining` 为文件里
+        还有多少条更早记录；`loader(skip_from_end, count) -> (events, older_remaining)`
+        供用户上翻到顶时按批前置，避免一次性物化整条时间线。
         """
         self._clear()
         self._all_events = list(events)
+        self._older_remaining = max(0, int(older_remaining or 0))
+        self._events_loader = loader
         if not events:
             self.show_empty("尚无执行记录。在下方输入目标或指令，然后点击运行。")
             return
-        if len(events) <= INITIAL_RENDER:
-            self._window_lo, self._window_hi = 0, len(events)
-            rows = self._build_rows_from_events(events)
-        else:
-            self._window_lo = len(events) - INITIAL_RENDER
-            self._window_hi = len(events)
-            self._create_older_button()
-            rows = self._build_rows_from_events(events[self._window_lo:self._window_hi])
+        self._window_lo = 0
+        self._window_hi = len(events)
+        rows = self._build_rows_from_events(events)
         self._append_rows(rows)
-        self._sync_bubble_widths()
+        QTimer.singleShot(0, self._sync_bubble_widths)
         self.reset_scroll_anchor()
         self._schedule_scroll_to_bottom(force=True)
         if self._global_compact:
@@ -856,49 +901,105 @@ class _Timeline(QFrame):
                 widget = self._wrap_tool_row(widget)
             self._layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
 
-    def _create_older_button(self) -> None:
-        """时间线顶部放一个「加载更早记录」按钮，把剩余的早期事件按批前置。"""
-        accent = self.theme.colors.get("accent", "#2f6fed")
-        btn = QPushButton(f"▲ 更早记录（剩余 {self._window_lo} 条）")
-        btn.setObjectName("loadOlder")
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip("点击加载更早的执行记录")
-        btn.setStyleSheet(
-            "QPushButton { border: none; background: transparent; font-weight: 600; "
-            f"color: {accent}; padding: 6px; text-align: center; }}"
-        )
-        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        btn.clicked.connect(self._load_older)
-        self._older_btn = btn
-        self._layout.insertWidget(0, btn, 0, Qt.AlignmentFlag.AlignTop)
-
-    def _load_older(self) -> None:
-        """前置一批更早的事件（旧→新），保持时间线顶部向下为旧→新。"""
-        if self._older_btn is None or self._window_lo <= 0:
+    def _load_older_batch(self) -> None:
+        """上翻到顶时，通过 loader 前置一批更早的事件（旧→新），保持视口不跳。"""
+        self._older_pending = False
+        if (
+            self._loading_older
+            or self._older_remaining <= 0
+            or self._events_loader is None
+        ):
             return
-        batch = min(LOAD_OLDER_BATCH, self._window_lo)
-        new_lo = self._window_lo - batch
-        rows = self._build_rows_from_events(self._all_events[new_lo:self._window_lo])
-        idx = 1  # 「加载更早记录」按钮固定在 index 0，批行紧随其后
+        self._loading_older = True
+        try:
+            events, remaining = self._events_loader(
+                len(self._all_events), LOAD_OLDER_BATCH
+            )
+        except Exception:
+            events, remaining = [], 0
+        finally:
+            self._loading_older = False
+        if not events:
+            self._older_remaining = 0
+            return
+
+        rows = self._build_rows_from_events(events)
+        idx = 0
         for widget in rows:
             if isinstance(widget, _ToolStepRow):
                 self._track_row(widget)
                 widget = self._wrap_tool_row(widget)
             self._layout.insertWidget(idx, widget, 0, Qt.AlignmentFlag.AlignTop)
             idx += 1
-        self._window_lo = new_lo
-        if self._window_lo <= 0:
-            self._remove_older_button()
-        elif self._older_btn is not None:
-            self._older_btn.setText(f"▲ 更早记录（剩余 {self._window_lo} 条）")
-        self._sync_bubble_widths()
+        self._all_events = list(events) + self._all_events
+        self._window_lo = 0
+        self._window_hi = len(self._all_events)
+        self._older_remaining = remaining
+        QTimer.singleShot(0, self._sync_bubble_widths)
+        # 插入更早行后，布局/滚动条 range 是异步重新计算的：此刻直接按 anchor.y()
+        # 或旧 maximum 补偿会被 clamp / 算成 0，导致视口跳到新批次开头。改为记录
+        # 加载前的 (value, maximum)，等事件循环把布局稳定后再做**幂等**补偿：
+        # 目标值 = 旧 value + (当前 maximum - 旧 maximum)，即把视口下移「新增内容
+        # 高度」的距离，原来看到的那条消息保持在原屏幕位置。
+        if not self._stick_to_bottom and self._scroll_anchor_base is None:
+            self._scroll_anchor_base = (
+                self._scroll.verticalScrollBar().value(),
+                self._scroll.verticalScrollBar().maximum(),
+            )
+            self._scroll_anchor_conn = self._scroll.verticalScrollBar().rangeChanged.connect(
+                self._on_range_changed_compensate
+            )
 
-    def _remove_older_button(self) -> None:
-        if self._older_btn is None:
+    def _on_range_changed_compensate(self, _mn: int, _mx: int) -> None:
+        """滚动条 range 真正变化时，按增量把视口补偿回加载前位置（幂等）。
+
+        插入更早行后，气泡高度/滚动条 maximum 是异步更新的；此刻 maximum 已更新，
+        目标值 = 旧 value + (当前 maximum - 旧 maximum)，即把视口下移「新增内容
+        高度」的距离，原来看到的那条消息保持在原屏幕位置。重复触发不会叠加。
+        """
+        base = self._scroll_anchor_base
+        if base is None:
             return
-        btn = self._older_btn
-        self._older_btn = None
-        btn.deleteLater()
+        old_value, old_max = base
+        bar = self._scroll.verticalScrollBar()
+        target = old_value + (bar.maximum() - old_max)
+        if target < 0:
+            target = 0
+        try:
+            bar.setValue(min(target, bar.maximum()))
+        except RuntimeError:
+            return
+        # range 可能分多帧涨到最终值：安静一段时间后解除监听，避免补偿跑偏。
+        if self._scroll_anchor_timer is None:
+            self._scroll_anchor_timer = QTimer(self)
+            self._scroll_anchor_timer.setSingleShot(True)
+            self._scroll_anchor_timer.timeout.connect(self._release_scroll_anchor)
+        self._scroll_anchor_timer.start(SCROLL_COMPENSATE_QUIET_MS)
+
+    def _release_scroll_anchor(self) -> None:
+        conn = self._scroll_anchor_conn
+        if conn is not None:
+            try:
+                self._scroll.verticalScrollBar().rangeChanged.disconnect(conn)
+            except (RuntimeError, TypeError):
+                pass
+        self._scroll_anchor_conn = None
+        self._scroll_anchor_base = None
+
+    def _topmost_row(self):
+        """当前视口顶部附近最靠上的已实例化行。"""
+        bar = self._scroll.verticalScrollBar()
+        value = bar.value()
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if w is None:
+                continue
+            try:
+                if w.y() + w.height() > value:
+                    return w
+            except RuntimeError:
+                continue
+        return None
 
     def append_event(self, ev: ProjectEvent):
         """增量追加一条气泡（运行中用，避免整表重绘闪烁）。"""
@@ -912,9 +1013,128 @@ class _Timeline(QFrame):
         self._window_hi += 1
         if ev.kind == "tool":
             self._route_tool_event(ev)
+        elif ev.kind == "agent":
+            phase = str((ev.meta if isinstance(ev.meta, dict) else {}).get("phase") or "")
+            target = "reasoning" if phase == "reasoning" else (
+                "text" if phase in ("narration", "answer") else None
+            )
+            if target is not None and self._finalize_stream(target, ev):
+                # 已把流式气泡原地落成最终内容，不再新建重复行
+                self._maybe_scroll_to_bottom()
+                return
+            self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
         else:
             self._layout.addWidget(self._make_row(ev), 0, Qt.AlignmentFlag.AlignTop)
         self._maybe_scroll_to_bottom()
+
+    # ── 流式气泡：AI 思考/正文逐字渲染 ─────────────────────────────────
+
+    def _make_stream_row(self, target: str) -> tuple[QWidget, _ExpandableBody]:
+        """为流式内容创建一个气泡行，返回 (row, body) 供增量更新。"""
+        c = self.theme.colors
+        is_reasoning = target == "reasoning"
+        av_bg, av_fg = self._avatar_spec("ai")
+        emoji = "💭" if is_reasoning else "🤖"
+        if is_reasoning:
+            bub_bg, bub_border = c.get("accent_light", "#eaf1fe"), c.get("accent", "#2f6fed")
+        else:
+            bub_bg, bub_border = self._bubble_colors("ai")
+
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(4, 0, 4, 0)
+        h.setSpacing(8)
+
+        avatar = QLabel(emoji)
+        avatar.setFixedSize(40, 40)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(
+            f"background: {av_bg}; color: {av_fg}; border-radius: 20px; font-size: 18px;"
+        )
+
+        bubble = QFrame()
+        bubble.setFixedWidth(self._bubble_width())
+        bubble.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
+        bubble.setStyleSheet(f"""
+            QFrame {{
+                background: {bub_bg};
+                border: 1px solid {bub_border};
+                border-radius: 10px;
+            }}
+        """)
+        bl = QVBoxLayout(bubble)
+        bl.setContentsMargins(12, 8, 12, 8)
+        bl.setSpacing(4)
+        head = QLabel("💭 思考 · 生成中…" if is_reasoning else "AI · 生成中…")
+        head.setStyleSheet(
+            f"font-size: 11px; color: {c['text_hint']}; background: transparent; border: none;"
+        )
+        bl.addWidget(head)
+        body = _ExpandableBody("", self.theme)
+        bl.addWidget(body)
+        row._stream_head = head  # type: ignore[attr-defined]
+
+        self._bubbles.append(bubble)
+        self._bodies.append(body)
+
+        h.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
+        h.addWidget(bubble, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        h.addStretch(1)
+        return row, body
+
+    def append_stream(self, target: str, delta: str):
+        """增量追加一段 AI 流式文本到对应气泡（reasoning / text）。"""
+        target = "reasoning" if target == "reasoning" else "text"
+        delta = (delta or "")
+        if not delta:
+            return
+        # 若当前是空态文案，先清掉，避免流式气泡堆在占位标签后面
+        if self._layout.count() == 1:
+            w = self._layout.itemAt(0).widget()
+            if isinstance(w, QLabel) and ("尚无执行记录" in (w.text() or "") or "选择或新建一个项目开始" in (w.text() or "")):
+                self._clear()
+        body = self._stream_bodies.get(target)
+        if body is None:
+            row, body = self._make_stream_row(target)
+            self._stream_bubbles[target] = row
+            self._stream_bodies[target] = body
+            self._stream_text[target] = ""
+            self._layout.addWidget(row, 0, Qt.AlignmentFlag.AlignTop)
+        self._stream_text[target] = self._stream_text.get(target, "") + delta
+        try:
+            body.set_content(_redact_display(self._stream_text[target]))
+        except RuntimeError:
+            return
+        if target == "reasoning":
+            self._status("正在思考…")
+        else:
+            self._status("正在执行…")
+        self._maybe_scroll_to_bottom()
+
+    def _finalize_stream(self, target: str, ev: ProjectEvent) -> bool:
+        """完整 agent 事件到达时，把流式气泡原地落为最终内容并停更。"""
+        row = self._stream_bubbles.pop(target, None)
+        body = self._stream_bodies.pop(target, None)
+        if row is None or body is None:
+            return False
+        full = (ev.content or "") or self._stream_text.pop(target, "") or ""
+        try:
+            body.set_content(_redact_display(full))
+        except RuntimeError:
+            return True
+        head = getattr(row, "_stream_head", None)  # type: ignore[attr-defined]
+        if head is not None:
+            try:
+                head.setText(f"💭 思考 · {ev.created_at}" if target == "reasoning" else f"AI · {ev.created_at}")
+            except RuntimeError:
+                pass
+        return True
+
+    def _clear_streams(self):
+        self._stream_bubbles.clear()
+        self._stream_bodies.clear()
+        self._stream_text.clear()
 
     def begin_run(self):
         """一次运行开始：清空配对注册表，显示状态条。"""
@@ -941,6 +1161,23 @@ class _Timeline(QFrame):
         self._batch_order.clear()
         self._unmatched_calls.clear()
         self._pending_rows.clear()
+        # 若运行被中断、流式气泡未等到完整 agent 事件，则原地收尾（去掉「生成中」）
+        for target in list(self._stream_bubbles):
+            row = self._stream_bubbles.pop(target, None)
+            body = self._stream_bodies.pop(target, None)
+            text = self._stream_text.pop(target, "") or ""
+            if row is None or body is None:
+                continue
+            try:
+                body.set_content(_redact_display(text))
+            except RuntimeError:
+                continue
+            head = getattr(row, "_stream_head", None)  # type: ignore[attr-defined]
+            if head is not None:
+                try:
+                    head.setText("💭 思考（已结束）" if target == "reasoning" else "AI（已结束）")
+                except RuntimeError:
+                    pass
         if self._status_bar is not None:
             self._status_bar.clear()
 
@@ -1149,7 +1386,10 @@ class _Timeline(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._sync_bubble_widths()
+        # 窗口调整时，本部件的 resizeEvent 先于内部 QScrollArea 视口完成新布局，
+        # 此刻读取 viewport().width() 是旧值 → 气泡宽度跟不上窗口。延迟到事件循环
+        # 处理完布局后再同步，才能拿到真正的新宽度。
+        QTimer.singleShot(0, self._sync_bubble_widths)
 
     def _sync_bubble_widths(self):
         w = self._bubble_width()

@@ -472,6 +472,24 @@ def _parse_keyword_list(raw: str) -> list[str]:
 _BODY_COLUMNS = "memory_key, project_id, kind, content, keywords, refs, updated_at"
 
 
+def recall_block_summary(block: str) -> str:
+    """从召回渲染块里提取每条记忆的首行摘要（项目 + 关键字），供时间线提示。
+
+    输入为 `format_memory_for_injection` 的输出：每条记忆以 `N. [kind] 项目 …` 开头。
+    只挑这些首行合并成短摘要，避免把完整正文刷进对话记录。
+    """
+    if not block:
+        return ""
+    lines = [ln.strip() for ln in str(block).splitlines()]
+    heads = [
+        ln for ln in lines
+        if len(ln) > 3 and ln[0].isdigit() and ln[1] == "." and ln[2] == " "
+    ]
+    if not heads:
+        return block
+    return "\n".join(heads[:5])
+
+
 def recall_memories(intent_text: str, *, model=None, k: int = 3) -> str:
     """基于用户意图优先召回记忆库里的相关记忆（top k；不足 k 条则有多少写多少）。
 

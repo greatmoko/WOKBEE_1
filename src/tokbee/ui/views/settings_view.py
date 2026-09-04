@@ -452,7 +452,7 @@ class _GeneralWorkspace(QWidget):
         msg = QLabel(
             "确定删除所有未置顶的 WokBee 项目吗？\n\n"
             f"与 WokBee 页面删除相同：移入工作区 _trash，回收站最多保留 "
-            f"{TRASH_RETENTION_DAYS} 天。置顶项目不受影响。"
+            f"{TRASH_RETENTION_DAYS} 天。置顶与运行中的项目不会删除。"
         )
         msg.setWordWrap(True)
         msg.setStyleSheet(f"font-size: 13px; color: {c['text']};")

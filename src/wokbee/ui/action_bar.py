@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QKeyEvent
+import random
+
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QKeyEvent, QPainter
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -19,6 +21,92 @@ from tokbee.ui.combo_style import apply_combo_popup_style
 from tokbee.ui.styles.system import bind_text_edit_context_menu
 from tokbee.ui.styles.theme import Theme
 from tokbee.ui.widgets.context_ring import ContextUsageRing
+
+# 运行中：运行按钮音频均衡器动效 —— 5 根细竖条自绘，底部对齐，随机跃升 + 指数回落
+_RUN_EQ_BARS = 5
+_RUN_EQ_BAR_W = 3        # 竖条宽度（细）
+_RUN_EQ_GAP = 4          # 竖条间距
+_RUN_EQ_PAD_TOP = 6
+_RUN_EQ_PAD_BOTTOM = 6
+_RUN_EQ_INTERVAL = 70    # 帧间隔（毫秒）
+_RUN_EQ_DECAY = 0.82     # 每帧回落系数（真实均衡器风格）
+_RUN_EQ_PEAK = 0.35      # 高于该值的随机量才触发跃升
+
+
+class _RunButton(QPushButton):
+    """运行按钮：空闲显示「运行」，运行中自绘底部对齐的音频均衡器动画。"""
+
+    def __init__(self, theme: Theme, parent=None):
+        super().__init__("运行", parent)
+        self._theme = theme
+        self._spinning = False
+        self._levels = [0.0] * _RUN_EQ_BARS
+        self._eq_timer = QTimer(self)
+        self._eq_timer.setInterval(_RUN_EQ_INTERVAL)
+        self._eq_timer.timeout.connect(self._tick)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(59, 34)
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: {theme.colors["btn_primary"]}; color: white;
+                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {theme.colors["btn_primary_hover"]}; }}
+            QPushButton:pressed {{ background: {theme.colors["btn_primary"]}; }}
+        """)
+
+    def set_spinning(self, spinning: bool):
+        self._spinning = spinning
+        if spinning:
+            self._levels = [0.0] * _RUN_EQ_BARS
+            self._eq_timer.start()
+        else:
+            self._eq_timer.stop()
+            self.setText("运行")
+        self.setEnabled(not spinning)
+        self.update()
+
+    def _tick(self):
+        # 真实均衡器：随机跃升 + 指数回落
+        for i in range(_RUN_EQ_BARS):
+            peak = random.random()
+            if peak > _RUN_EQ_PEAK:
+                self._levels[i] = max(self._levels[i], peak)
+            self._levels[i] *= _RUN_EQ_DECAY
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._spinning:
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        painter.setBrush(QColor("#f5f5f5"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, 6, 6)
+        self._draw_equalizer(painter, rect)
+        painter.end()
+
+    def _draw_equalizer(self, painter: QPainter, rect):
+        inner_h = (rect.height() - _RUN_EQ_PAD_TOP - _RUN_EQ_PAD_BOTTOM) * 0.8
+        base_y = rect.y() + rect.height() - _RUN_EQ_PAD_BOTTOM
+        total_w = _RUN_EQ_BARS * _RUN_EQ_BAR_W + (_RUN_EQ_BARS - 1) * _RUN_EQ_GAP
+        start_x = rect.x() + (rect.width() - total_w) // 2
+        lit = QColor("#07c160")
+        dim = QColor("#f5f5f5")
+        for i in range(_RUN_EQ_BARS):
+            bar_h = round(self._levels[i] * inner_h)
+            x = start_x + i * (_RUN_EQ_BAR_W + _RUN_EQ_GAP)
+            painter.setBrush(dim)
+            painter.drawRoundedRect(
+                x, base_y - inner_h, _RUN_EQ_BAR_W, inner_h, 1, 1
+            )
+            if bar_h > 0:
+                painter.setBrush(lit)
+                painter.drawRoundedRect(
+                    x, base_y - bar_h, _RUN_EQ_BAR_W, bar_h, 1, 1
+                )
 
 class _ActionBar(QFrame):
     run_clicked = Signal()
@@ -168,25 +256,7 @@ class _ActionBar(QFrame):
         self._ctx_ring.compress_clicked.connect(self.compress_clicked.emit)
         row.addWidget(self._ctx_ring)
 
-        self._cache_label = QLabel("")
-        self._cache_label.setToolTip("DeepSeek 缓存命中率")
-        self._cache_label.setStyleSheet(
-            f"font-size: 11px; color: {c['text_hint']}; padding: 0 4px;"
-        )
-        self._cache_label.setMinimumWidth(0)
-        row.addWidget(self._cache_label)
-
-        self._run_btn = QPushButton("运行")
-        self._run_btn.setFixedSize(59, 34)
-        self._run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._run_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {c["btn_primary"]}; color: white;
-                border: none; border-radius: 6px; font-size: 13px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {c["btn_primary_hover"]}; }}
-            QPushButton:disabled {{ background: {c["btn_bg"]}; color: {c["text_hint"]}; }}
-        """)
+        self._run_btn = _RunButton(self.theme)
         self._run_btn.clicked.connect(self.run_clicked.emit)
         row.addWidget(self._run_btn)
 
@@ -270,8 +340,7 @@ class _ActionBar(QFrame):
         self._input.setPlainText(text or "")
 
     def set_running(self, running: bool):
-        self._run_btn.setEnabled(not running)
-        self._run_btn.setText("运行中…" if running else "运行")
+        self._run_btn.set_spinning(running)
         self._model_combo.setEnabled(not running)
 
     def show_approval(self, text: str):
@@ -334,10 +403,12 @@ class _ActionBar(QFrame):
         self._ctx_ring.set_ring_enabled(enabled)
 
     def set_cache_stats(self, text: str = "", *, tooltip: str = ""):
-        self._cache_label.setText(text or "")
-        if tooltip:
-            self._cache_label.setToolTip(tooltip)
-        self._cache_label.setVisible(bool(text))
+        """缓存命中信息不再单独展示，合并进用量环的悬停提示。"""
+        if text or tooltip:
+            parts = [p for p in (text or "", tooltip or "") if p.strip()]
+            self._ctx_ring.set_cache_info("\n".join(parts))
+        else:
+            self._ctx_ring.set_cache_info("")
 
     def draft_text(self) -> str:
         return self._input.toPlainText()

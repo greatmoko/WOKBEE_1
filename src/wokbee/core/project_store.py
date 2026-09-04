@@ -35,6 +35,10 @@ logger = logging.getLogger("wokbee")
 # 跨线程（并行工具调用）保护 project.json 的读改写，避免字段互相覆盖
 _META_LOCK = threading.RLock()
 
+# events.jsonl 行缓存（不做 json 解析，供时间线增量读取），append 时追加、清空时失效
+_EVENTS_LOCK = threading.RLock()
+_event_lines_cache: dict[str, list[str]] = {}
+
 # 回收站保留天数（超时永久删除）
 TRASH_RETENTION_DAYS = 7
 _TRASHED_AT_NAME = "_trashed_at"
@@ -331,6 +335,11 @@ class ProjectStore:
         if project and project.pinned:
             logger.info("拒绝删除置顶项目：%s", project_id)
             return False
+        if project and project.status in (
+            ProjectStatus.RUNNING, ProjectStatus.AWAITING_APPROVAL,
+        ):
+            logger.info("拒绝删除运行中项目：%s", project_id)
+            return False
         root = self.path_for(project_id)
         if not root.exists():
             return False
@@ -349,7 +358,7 @@ class ProjectStore:
         return True
 
     def delete_unpinned(self, *, trash: bool = True) -> int:
-        """删除全部未置顶项目；置顶跳过。单条逻辑与 ``delete`` / 侧栏删除一致。"""
+        """删除全部未置顶项目；置顶与运行中项目跳过。单条逻辑与 ``delete`` / 侧栏删除一致。"""
         ids = [p.id for p in self.list_projects() if not p.pinned]
         deleted = 0
         for pid in ids:
@@ -368,37 +377,77 @@ class ProjectStore:
                 f.write(line)
         else:
             safe_write_text(path, line)
+        # 追加写入后同步行缓存（避免下次读再全量重读）
+        with _EVENTS_LOCK:
+            cached = _event_lines_cache.get(project_id)
+            if cached is not None:
+                cached.append(line.rstrip("\n"))
         # 触碰更新时间（持锁重读，避免覆盖并行中的 title/goal 写入）
         with _META_LOCK:
             project = self.get(project_id)
             if project:
                 self.save(project)
 
-    def list_events(self, project_id: str, limit: int = 500) -> list[ProjectEvent]:
+    def _event_lines(self, project_id: str) -> list[str]:
+        """读取项目的 events.jsonl 行列表（不做 json 解析），按 project_id 缓存。"""
+        with _EVENTS_LOCK:
+            cached = _event_lines_cache.get(project_id)
+            if cached is not None:
+                return cached
         path = events_path(self.path_for(project_id))
-        if not path.exists():
-            return []
+        lines: list[str] = []
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+            except OSError:
+                lines = []
+        with _EVENTS_LOCK:
+            _event_lines_cache[project_id] = lines
+        return lines
+
+    def events_window(
+        self,
+        project_id: str,
+        *,
+        skip_from_end: int = 0,
+        count: int = 50,
+    ) -> tuple[list[ProjectEvent], int]:
+        """从文件尾部往前取一段事件（oldest→newest），返回 (events, older_remaining)。
+
+        skip_from_end = 已从尾部加载的事件数；count = 本次再往前取多少条。
+        只对窗口内的行做 json 解析，避免每次切换项目全量解析历史。
+        """
+        lines = self._event_lines(project_id)
+        total = len(lines)
+        end = max(0, total - max(0, int(skip_from_end)))
+        start = max(0, end - max(0, int(count)))
         events: list[ProjectEvent] = []
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        events.append(ProjectEvent.from_dict(json.loads(line)))
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-        except OSError:
-            return []
-        if limit > 0 and len(events) > limit:
-            return events[-limit:]
+        for line in lines[start:end]:
+            try:
+                events.append(ProjectEvent.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return events, start
+
+    def list_events(self, project_id: str, limit: int = 500) -> list[ProjectEvent]:
+        lines = self._event_lines(project_id)
+        if limit > 0 and len(lines) > limit:
+            lines = lines[-limit:]
+        events: list[ProjectEvent] = []
+        for line in lines:
+            try:
+                events.append(ProjectEvent.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, TypeError):
+                continue
         return events
 
     def clear_events(self, project_id: str) -> None:
         path = events_path(self.path_for(project_id))
         path.parent.mkdir(parents=True, exist_ok=True)
         safe_write_text(path, "")
+        with _EVENTS_LOCK:
+            _event_lines_cache.pop(project_id, None)
 
     def needs_auto_archive(self, project_id: str) -> bool:
         """上一轮是否有可归档内容（避免首次空跑也产生空存档）。"""

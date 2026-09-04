@@ -55,7 +55,7 @@ from wokbee.ui.dialogs import (
     open_path as _open_in_explorer,
     tip as _tip,
 )
-from wokbee.ui.timeline import _Timeline
+from wokbee.ui.timeline import INITIAL_RENDER, _Timeline
 
 
 logger = logging.getLogger("wokbee")
@@ -476,6 +476,11 @@ class _ProjectSidebar(QFrame):
         if project and project.pinned:
             del_a.setEnabled(False)
             del_a.setText("删除（请先取消置顶）")
+        elif project and project.status in (
+            ProjectStatus.RUNNING, ProjectStatus.AWAITING_APPROVAL,
+        ):
+            del_a.setEnabled(False)
+            del_a.setText("删除（运行中，请先暂停）")
         action = menu.exec(pos)
         if action == rename_a:
             project = self.store.get(project_id)
@@ -507,6 +512,10 @@ class _ProjectSidebar(QFrame):
         elif action == del_a:
             project = self.store.get(project_id)
             if project and project.pinned:
+                return
+            if project and project.status in (
+                ProjectStatus.RUNNING, ProjectStatus.AWAITING_APPROVAL,
+            ):
                 return
             if _confirm(
                 self,
@@ -794,13 +803,23 @@ class _ProjectWorkspace(QWidget):
         self._project_id = project_id
         root = self.store.path_for(project_id)
         self._essentials.bind(project, project_root=root)
-        # 切换项目：始终刷新时间线并滚到最新；同项目仅 force 或空表时重绘
+        # 切换项目：只加载最新一批，上翻时再按批前置，加快进入速度
         if not same:
-            events = self.store.list_events(project_id)
-            self._timeline.render_events(events)
+            events, remaining = self.store.events_window(
+                project_id, skip_from_end=0, count=INITIAL_RENDER
+            )
+            self._timeline.render_events(
+                events, older_remaining=remaining,
+                loader=self._make_events_loader(project_id),
+            )
         elif force_timeline or not self._timeline._bubbles:
-            events = self.store.list_events(project_id)
-            self._timeline.render_events(events)
+            events, remaining = self.store.events_window(
+                project_id, skip_from_end=0, count=INITIAL_RENDER
+            )
+            self._timeline.render_events(
+                events, older_remaining=remaining,
+                loader=self._make_events_loader(project_id),
+            )
         self._timeline.set_agent_running(
             self._worker is not None and self._worker.isRunning()
         )
@@ -818,6 +837,15 @@ class _ProjectWorkspace(QWidget):
                 project.model_id = m
                 self.store.save(project)
         self._refresh_context_usage()
+
+    def _make_events_loader(self, project_id: str):
+        """生成时间线「加载更早记录」闭包：从项目 events 文件尾部往前取一批。"""
+        def _load(skip_from_end: int, count: int):
+            events, remaining = self.store.events_window(
+                project_id, skip_from_end=skip_from_end, count=count
+            )
+            return events, remaining
+        return _load
 
     def _on_model_changed(self, provider_id: str, model_id: str):
         if not self._project_id:
@@ -877,7 +905,9 @@ class _ProjectWorkspace(QWidget):
             self._actions.set_context_usage(0, 0, enabled=False)
             return
         root = self.store.path_for(self._project_id)
-        events = self.store.list_events(self._project_id)
+        events, _remaining = self.store.events_window(
+            self._project_id, skip_from_end=0, count=500
+        )
         usage = estimate_project_usage(
             events=events,
             project_root=root,
@@ -1292,6 +1322,11 @@ class _ProjectWorkspace(QWidget):
         if not target:
             return
         meta_d = meta if isinstance(meta, dict) else {}
+        if kind == "agent_stream":
+            # 流式增量：只驱动时间线实时气泡，不落盘（完整 agent 事件到达时再定稿）
+            if visible:
+                self._timeline.append_stream(str(meta_d.get("target") or "text"), content)
+            return
         if kind == "cache" or meta_d.get("cache"):
             now_pct = meta_d.get("now_pct")
             avg_pct = meta_d.get("avg_pct")
@@ -1705,8 +1740,13 @@ class _ProjectWorkspace(QWidget):
         if not dest:
             return
         # 归档会清空时间线并写入一条提示，整表刷新到最新
-        events = self.store.list_events(self._project_id)
-        self._timeline.render_events(events)
+        events, remaining = self.store.events_window(
+            self._project_id, skip_from_end=0, count=INITIAL_RENDER
+        )
+        self._timeline.render_events(
+            events, older_remaining=remaining,
+            loader=self._make_events_loader(self._project_id),
+        )
         self._refresh_essentials()
         self.status_changed.emit()
 

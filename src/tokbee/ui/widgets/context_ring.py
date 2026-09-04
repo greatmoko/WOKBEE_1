@@ -21,9 +21,15 @@ class ContextUsageRing(QWidget):
         self._used = 0
         self._limit = 0
         self._enabled_ring = True
+        self._cache_info = ""
         self.setFixedSize(22, 22)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("上下文用量")
+        self._update_tooltip()
+
+    def set_cache_info(self, text: str = ""):
+        """设置预计缓存命中率信息（悬停提示用），空串则清除。"""
+        self._cache_info = (text or "").strip()
         self._update_tooltip()
 
     def set_usage(self, used: int, limit: int):
@@ -41,13 +47,17 @@ class ContextUsageRing(QWidget):
         self._update_tooltip()
 
     def _update_tooltip(self):
+        lines = []
         if self._limit <= 0:
-            self.setToolTip("未设置上下文窗口")
-            return
-        pct = min(self._ratio * 100.0, 999.0)
-        self.setToolTip(
-            f"上下文 {self._format(self._used)}/{self._format(self._limit)} {pct:.0f}%"
-        )
+            lines.append("未设置上下文窗口")
+        else:
+            pct = min(self._ratio * 100.0, 999.0)
+            lines.append(
+                f"上下文 {self._format(self._used)}/{self._format(self._limit)} {pct:.0f}%"
+            )
+        if self._cache_info:
+            lines.append(self._cache_info)
+        self.setToolTip("\n".join(lines))
 
     @staticmethod
     def _format(n: int) -> str:
