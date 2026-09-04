@@ -44,16 +44,16 @@ class _McpCard(QFrame):
 
         info = QVBoxLayout()
         title = QLabel(server.name)
+        title.setWordWrap(True)
         title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {c['text']}; background: transparent; border: none;")
         info.addWidget(title)
-        if server.transport == "stdio":
-            detail = f"stdio · {server.command} {' '.join(server.args)}".strip()
-        else:
+        # stdio 的命令/参数路径不展示，仅保留服务器名称，避免撑宽卡片出横向滚动条
+        if server.transport != "stdio":
             detail = f"{server.transport} · {server.url}"
-        desc = QLabel(detail)
-        desc.setWordWrap(True)
-        desc.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent; border: none;")
-        info.addWidget(desc)
+            desc = QLabel(detail)
+            desc.setWordWrap(True)
+            desc.setStyleSheet(f"font-size: 12px; color: {c['text_secondary']}; background: transparent; border: none;")
+            info.addWidget(desc)
         lay.addLayout(info, stretch=1)
 
         from tokbee.ui.combo_style import checkbox_qss, secondary_btn_qss
@@ -298,6 +298,7 @@ class McpWorkspace(QWidget):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { border: none; }")
         self._list = QWidget()
         self._list_layout = QVBoxLayout(self._list)

@@ -155,9 +155,6 @@ class _ChannelButton(QPushButton):
     CHANNELS = [
         ("wechat", "💬", "微信", True),
         ("feishu", "✈️", "飞书", True),
-        ("dingtalk", "📮", "钉钉", False),
-        ("wework", "🏢", "企业微信", False),
-        ("qq", "🐧", "QQ", False),
     ]
 
     def __init__(self, key: str, icon: str, label: str, enabled: bool, theme: Theme, active: bool):
@@ -229,7 +226,7 @@ class _ChannelRail(QWidget):
             lay.addWidget(btn)
 
         lay.addStretch(1)
-        note = QLabel("当前支持飞书 / 微信；其余频道后续接入。")
+        note = QLabel("当前支持微信与飞书。")
         note.setWordWrap(True)
         note.setStyleSheet(
             f"color: {c['text_hint']}; background: transparent; border: none; font-size: 11px;"

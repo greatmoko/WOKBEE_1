@@ -81,8 +81,8 @@ class ApprovalFlags:
         if not labels:
             return "全部需审"
         if len(labels) == 4:
-            return "全部免审"
-        return "免审：" + "/".join(labels)
+            return "全部 免审"
+        return "/".join(labels) + " 免审"
 
     @classmethod
     def from_legacy(cls, data: dict) -> ApprovalFlags:

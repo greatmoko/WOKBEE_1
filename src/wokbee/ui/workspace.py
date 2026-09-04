@@ -696,7 +696,7 @@ class _ProjectEssentials(QFrame):
         self.set_goal(project.goal)
 
         summary = project.approval.summary()
-        self._policy_btn.setText(f"（审核策略）：{summary}")
+        self._policy_btn.setText(summary)
         style = f"""
             QPushButton {{
                 background: {c["btn_bg"]}; color: {c["danger" if project.approval.skip_high_risk else "text"]};
